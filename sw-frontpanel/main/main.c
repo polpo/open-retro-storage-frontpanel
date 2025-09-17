@@ -10,7 +10,8 @@
 #include "display_manager.h"
 #include "button_handler.h"
 #include "menu_system.h"
-#include "i2c_slave_comm.h"
+#include "host_comm.h"  // Modular transport layer (I2C/SPI)
+#include "transport_config.h" // Transport configuration
 #include "ui_screens.h"
 
 static const char *TAG = "main";
@@ -20,6 +21,7 @@ static display_manager_t display;
 static menu_t main_menu;
 static menu_t disc_menu;
 static i2c_slave_comm_t slave_comm;
+static host_comm_t host_comm;
 static screen_type_t current_screen = SCREEN_SPLASH;
 
 // Dynamic disc list - populated from I2C communication
@@ -71,15 +73,15 @@ static void handle_button_event(button_event_t *event) {
                         uint32_t selected = menu_get_selected_index(&main_menu);
                         if (selected == 0) { // "Select Disc"
                             // Refresh disc list before showing it
-                            if (!disc_list_loaded && slave_comm.initialized) {
+                            if (!disc_list_loaded && host_comm.initialized) {
                                 ESP_LOGI(TAG, "Loading disc list...");
                                 refresh_disc_list();
                             }
                             current_screen = SCREEN_DISC_LIST;
                             ui_draw_menu(&display, &disc_menu);
                         } else if (selected == 1) { // "Eject Disc"
-                            if (slave_comm.initialized) {
-                                esp_err_t ret = i2c_slave_eject_disc(&slave_comm);
+                            if (host_comm.initialized) {
+                                esp_err_t ret = host_comm_eject_disc(&host_comm);
                                 if (ret == ESP_OK) {
                                     strncpy(current_disc_name, "No disc loaded", sizeof(current_disc_name) - 1);
                                     current_disc_name[sizeof(current_disc_name) - 1] = '\0';
@@ -89,12 +91,16 @@ static void handle_button_event(button_event_t *event) {
                                     ESP_LOGW(TAG, "Failed to eject disc: %s", esp_err_to_name(ret));
                                 }
                             }
+                        } else if (selected == 2) { // "Settings"
+                            current_screen = SCREEN_SETTINGS;
+                            ui_draw_menu(&display, &settings_menu);
                         } else if (selected == 3) { // "System Info"
                             current_screen = SCREEN_INFO;
                             char info_text[128];
-                            snprintf(info_text, sizeof(info_text), 
-                                "PicoIDE Front Panel\nFW: v0.1.0\nESP32-C3\nI2C: %s",
-                                slave_comm.initialized ? "Connected" : "Disconnected");
+                            snprintf(info_text, sizeof(info_text),
+                                "PicoIDE Front Panel\nFW: v0.1.0\nESP32-C3\n%s: %s",
+                                host_comm_get_transport_name(&host_comm),
+                                host_comm.initialized ? "Connected" : "Disconnected");
                             ui_draw_info_screen(&display, "System Info", info_text);
                         }
                     }
@@ -125,14 +131,14 @@ static void handle_button_event(button_event_t *event) {
                         menu_item_t *selected_item = menu_get_selected_item(&disc_menu);
                         if (selected_item) {
                             ESP_LOGI(TAG, "Selected disc: %s", selected_item->text);
-                            // Send command to slave device
-                            if (slave_comm.initialized) {
-                                esp_err_t ret = i2c_slave_select_disc(&slave_comm, selected);
+                            // Send command to host device
+                            if (host_comm.initialized) {
+                                esp_err_t ret = host_comm_select_disc(&host_comm, selected);
                                 if (ret == ESP_OK) {
                                     strncpy(current_disc_name, selected_item->text, sizeof(current_disc_name) - 1);
                                     current_disc_name[sizeof(current_disc_name) - 1] = '\0';
                                 } else {
-                                    ESP_LOGW(TAG, "Failed to select disc via I2C: %s", esp_err_to_name(ret));
+                                    ESP_LOGW(TAG, "Failed to select disc via host comm: %s", esp_err_to_name(ret));
                                 }
                             }
                             // Go back to main menu
@@ -175,19 +181,19 @@ static void display_update_task(void *pvParameters) {
     }
 }
 
-// Function to refresh disc list from I2C slave
+// Function to refresh disc list from host
 static esp_err_t refresh_disc_list(void) {
-    if (!slave_comm.initialized) {
-        ESP_LOGW(TAG, "I2C slave comm not initialized");
+    if (!host_comm.initialized) {
+        ESP_LOGW(TAG, "Host comm not initialized");
         return ESP_ERR_INVALID_STATE;
     }
     
     // Clear current disc list
     menu_clear_items(&disc_menu);
     
-    // Get disc count from slave
+    // Get disc count from host
     uint32_t disc_count = 0;
-    esp_err_t ret = i2c_slave_get_disc_count(&slave_comm, &disc_count);
+    esp_err_t ret = host_comm_get_disc_count(&host_comm, &disc_count);
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "Failed to get disc count: %s", esp_err_to_name(ret));
         // Add fallback message
@@ -195,7 +201,7 @@ static esp_err_t refresh_disc_list(void) {
         return ret;
     }
     
-    ESP_LOGI(TAG, "Found %lu discs on slave", disc_count);
+    ESP_LOGI(TAG, "Found %lu discs on host", disc_count);
     
     if (disc_count == 0) {
         menu_add_item(&disc_menu, "No discs available", MENU_ACTION_SELECT, NULL, NULL);
@@ -206,10 +212,10 @@ static esp_err_t refresh_disc_list(void) {
     for (uint32_t i = 0; i < disc_count && i < MENU_MAX_ITEMS; i++) {
         disc_info_t disc_info;
         ESP_LOGI(TAG, "Requesting disc info for index %lu", i);
-        ret = i2c_slave_get_disc_info(&slave_comm, i, &disc_info);
+        ret = host_comm_get_disc_info(&host_comm, i, &disc_info);
         if (ret == ESP_OK) {
-            ESP_LOGI(TAG, "Disc %lu: %s (%.1f MB, type %d)", i, disc_info.name, 
-                    disc_info.size / 1000000.0f, disc_info.type);
+            ESP_LOGI(TAG, "Disc %lu: %s (%.1f MB, %lu tracks)", i, disc_info.name, 
+                    disc_info.size / 1000000.0f, disc_info.tracks);
             menu_add_item(&disc_menu, disc_info.name, MENU_ACTION_SELECT, NULL, NULL);
         } else {
             ESP_LOGW(TAG, "Failed to get info for disc %lu: %s", i, esp_err_to_name(ret));
@@ -224,20 +230,21 @@ static esp_err_t refresh_disc_list(void) {
     return ESP_OK;
 }
 
-// I2C communication task
-static void i2c_comm_task(void *pvParameters) {
+// Host communication task (currently unused)
+#if 0
+static void host_comm_task(void *pvParameters) {
     // Wait a bit for system to stabilize
     vTaskDelay(pdMS_TO_TICKS(2000));
     
     while (1) {
-        if (slave_comm.initialized) {
-            // Periodically check slave status
-            i2c_status_t status;
-            esp_err_t ret = i2c_slave_get_status(&slave_comm, &status);
+        if (host_comm.initialized) {
+            // Periodically check host status
+            host_status_t status;
+            esp_err_t ret = host_comm_get_status(&host_comm, &status);
             if (ret == ESP_OK) {
-                ESP_LOGD(TAG, "Slave status: 0x%02X", status);
+                ESP_LOGD(TAG, "Host status: 0x%02X", status);
             } else {
-                ESP_LOGW(TAG, "Failed to get slave status: %s", esp_err_to_name(ret));
+                ESP_LOGW(TAG, "Failed to get host status: %s", esp_err_to_name(ret));
             }
             
             // Refresh disc list if not loaded or periodically
@@ -251,6 +258,7 @@ static void i2c_comm_task(void *pvParameters) {
         vTaskDelay(pdMS_TO_TICKS(5000)); // Check every 5 seconds
     }
 }
+#endif
 
 
 void app_main(void) {
@@ -340,16 +348,24 @@ void app_main(void) {
     
     menu_init(&disc_menu, 8);
     // Disc menu will be populated dynamically from I2C communication
+    // Initialize host communication (I2C or SPI based on compile-time config)
+    transport_config_t transport_cfg = {
+        .device_addr = HOST_DEVICE_ADDR,
+        .sda_miso = PIN_SDA,          // I2C SDA or SPI MISO
+        .scl_clk = PIN_SCL,           // I2C SCL or SPI CLK
+        .cs = PIN_HOST_CS,            // SPI CS (ignored for I2C)
+        .mosi = PIN_SPI_MOSI,         // SPI MOSI (ignored for I2C)
+        .clock_speed = HOST_CLOCK_SPEED,
+        .timeout_ms = HOST_TIMEOUT_MS,
+    };
     
-    // Initialize I2C slave communication
-    // Using port 0, slave address 0x50 (different from display at 0x3C)
-    ret = i2c_slave_comm_init(&slave_comm, I2C_NUM_0, 0x50, GPIO_NUM_0, GPIO_NUM_1);
+    ret = host_comm_init(&host_comm, &transport_cfg);
     if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "Failed to initialize I2C slave comm: %s", esp_err_to_name(ret));
-        // Continue anyway - slave might not be connected
+        ESP_LOGW(TAG, "Failed to initialize host comm: %s", esp_err_to_name(ret));
+        // Continue anyway - host might not be connected
     } else {
-        // Skip bus scan for cleaner I2C traffic analysis
-        ESP_LOGI(TAG, "I2C slave comm initialized successfully");
+        ESP_LOGI(TAG, "Host comm initialized successfully using %s", 
+                 host_comm_get_transport_name(&host_comm));
         
         // Manually fetch disc list at startup
         ESP_LOGI(TAG, "Fetching disc list at startup...");
@@ -370,7 +386,7 @@ void app_main(void) {
     xTaskCreate(display_update_task, "display_update", 4096, NULL, 5, NULL);
     
     // Create I2C communication task (commented out to reduce debug noise)
-    // xTaskCreate(i2c_comm_task, "i2c_comm", 4096, NULL, 3, NULL);
+    // xTaskCreate(host_comm_task, "host_comm", 4096, NULL, 3, NULL);
     
     ESP_LOGI(TAG, "System initialized successfully");
     

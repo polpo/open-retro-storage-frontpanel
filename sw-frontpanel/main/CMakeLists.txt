@@ -1,9 +1,17 @@
-idf_component_register(SRCS "main.c" 
+idf_component_register(SRCS "main.c"
                             "display_manager.c"
                             "button_handler.c"
                             "menu_system.c"
-                            "i2c_slave_comm.c"
+                            "host_comm.c"
+                            "transport.c"
+                            "transport_i2c.c"
+                            "transport_spi.c"
                             "ui_screens.c"
+                            "led_driver.c"
+                            "wifi_manager.c"
+                            "web_server.cpp"
+                            "interface_common.c"
+                            "json_stream.cpp"
                     INCLUDE_DIRS "."
-                    REQUIRES u8g2 u8g2-hal-esp-idf esp_timer driver
+                    REQUIRES u8g2 u8g2-hal-esp-idf esp_timer driver led_strip esp_wifi esp_netif esp_http_server nvs_flash json
                 )

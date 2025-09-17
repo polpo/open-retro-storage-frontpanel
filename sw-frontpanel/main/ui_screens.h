@@ -16,6 +16,8 @@ typedef enum {
     SCREEN_MAIN_MENU,
     SCREEN_DISC_LIST,
     SCREEN_SETTINGS,
+    SCREEN_WIFI_MENU,
+    SCREEN_WIFI_NETWORKS,
     SCREEN_INFO
 } screen_type_t;
 
