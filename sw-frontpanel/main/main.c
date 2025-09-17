@@ -13,6 +13,7 @@
 #include "host_comm.h"  // Modular transport layer (I2C/SPI)
 #include "transport_config.h" // Transport configuration
 #include "ui_screens.h"
+#include "led_driver.h"
 
 static const char *TAG = "main";
 
@@ -288,6 +289,33 @@ void app_main(void) {
         ESP_LOGE(TAG, "Failed to initialize display: %s", esp_err_to_name(ret));
         return;
     }
+
+    /*    
+    // Initialize LED driver
+    ret = led_driver_init();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to initialize LED driver: %s", esp_err_to_name(ret));
+        return;
+    }
+    
+    // Rainbow demo for 10 seconds to indicate startup
+    // led_demo_rainbow(0xffffffff);
+
+    for(;;) {
+        led_set_color(COLOR_RED);
+        vTaskDelay(pdMS_TO_TICKS(250));
+        led_set_color(COLOR_GREEN);
+        vTaskDelay(pdMS_TO_TICKS(250));
+        led_set_color(COLOR_BLUE);
+        vTaskDelay(pdMS_TO_TICKS(250));
+        led_set_color(COLOR_YELLOW);
+        vTaskDelay(pdMS_TO_TICKS(250));
+        led_set_color(COLOR_CYAN);
+        vTaskDelay(pdMS_TO_TICKS(250));
+        led_set_color(COLOR_MAGENTA);
+        vTaskDelay(pdMS_TO_TICKS(250));
+    }
+    */
     
     // Show splash screen
     ui_show_splash_screen(&display, 2000);
