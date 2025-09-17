@@ -14,6 +14,10 @@
 #include "transport_config.h" // Transport configuration
 #include "ui_screens.h"
 #include "led_driver.h"
+#include "wifi_manager.h"
+#include "web_server.h"
+#include "interface_common.h"
+#include "esp_netif_ip_addr.h"
 
 static const char *TAG = "main";
 
@@ -21,8 +25,12 @@ static const char *TAG = "main";
 static display_manager_t display;
 static menu_t main_menu;
 static menu_t disc_menu;
-static i2c_slave_comm_t slave_comm;
+static menu_t wifi_menu;
+static menu_t settings_menu;
 static host_comm_t host_comm;
+static wifi_manager_t wifi_manager;
+static web_server_t web_server;
+static interface_context_t interface_ctx;
 static screen_type_t current_screen = SCREEN_SPLASH;
 
 // Dynamic disc list - populated from I2C communication
@@ -37,6 +45,21 @@ static menu_item_t main_menu_items[] = {
     {.text = "Eject Disc", .action = MENU_ACTION_CUSTOM, .selectable = true},
     {.text = "Settings", .action = MENU_ACTION_CUSTOM, .selectable = true},
     {.text = "System Info", .action = MENU_ACTION_CUSTOM, .selectable = true},
+};
+
+static menu_item_t settings_menu_items[] = {
+    {.text = "WiFi Setup", .action = MENU_ACTION_CUSTOM, .selectable = true},
+    {.text = "Web Interface", .action = MENU_ACTION_CUSTOM, .selectable = true},
+    {.text = "Display Settings", .action = MENU_ACTION_CUSTOM, .selectable = true},
+    {.text = "Back", .action = MENU_ACTION_BACK, .selectable = true},
+};
+
+static menu_item_t wifi_menu_items[] = {
+    {.text = "Scan Networks", .action = MENU_ACTION_CUSTOM, .selectable = true},
+    {.text = "WiFi Status", .action = MENU_ACTION_CUSTOM, .selectable = true},
+    {.text = "Start Web Portal", .action = MENU_ACTION_CUSTOM, .selectable = true},
+    {.text = "Disconnect", .action = MENU_ACTION_CUSTOM, .selectable = true},
+    {.text = "Back", .action = MENU_ACTION_BACK, .selectable = true},
 };
 
 // Button event handler
@@ -158,6 +181,135 @@ static void handle_button_event(button_event_t *event) {
             }
             break;
             
+        case SCREEN_SETTINGS:
+            switch (event->button_id) {
+                case 0: // Up button (North)
+                    if (event->type == BUTTON_EVENT_CLICK || event->type == BUTTON_EVENT_REPEAT) {
+                        menu_navigate_up(&settings_menu);
+                        ui_draw_menu(&display, &settings_menu);
+                    }
+                    break;
+                case 2: // Down button (South)
+                    if (event->type == BUTTON_EVENT_CLICK || event->type == BUTTON_EVENT_REPEAT) {
+                        menu_navigate_down(&settings_menu);
+                        ui_draw_menu(&display, &settings_menu);
+                    }
+                    break;
+                case 1: // Select button (East)
+                    if (event->type == BUTTON_EVENT_CLICK) {
+                        uint32_t selected = menu_get_selected_index(&settings_menu);
+                        if (selected == 0) { // "WiFi Setup"
+                            current_screen = SCREEN_WIFI_MENU;
+                            ui_draw_menu(&display, &wifi_menu);
+                        } else if (selected == 1) { // "Web Interface"
+                            // TODO: Implement web interface settings
+                            ESP_LOGI(TAG, "Web interface settings not implemented yet");
+                        } else if (selected == 2) { // "Display Settings"
+                            // TODO: Implement display settings
+                            ESP_LOGI(TAG, "Display settings not implemented yet");
+                        } else if (selected == 3) { // "Back"
+                            current_screen = SCREEN_MAIN_MENU;
+                            ui_draw_menu(&display, &main_menu);
+                        }
+                    }
+                    break;
+                case 3: // Back button (West)
+                    current_screen = SCREEN_MAIN_MENU;
+                    ui_draw_menu(&display, &main_menu);
+                    break;
+            }
+            break;
+
+        case SCREEN_WIFI_MENU:
+            switch (event->button_id) {
+                case 0: // Up button (North)
+                    if (event->type == BUTTON_EVENT_CLICK || event->type == BUTTON_EVENT_REPEAT) {
+                        menu_navigate_up(&wifi_menu);
+                        ui_draw_menu(&display, &wifi_menu);
+                    }
+                    break;
+                case 2: // Down button (South)
+                    if (event->type == BUTTON_EVENT_CLICK || event->type == BUTTON_EVENT_REPEAT) {
+                        menu_navigate_down(&wifi_menu);
+                        ui_draw_menu(&display, &wifi_menu);
+                    }
+                    break;
+                case 1: // Select button (East)
+                    if (event->type == BUTTON_EVENT_CLICK) {
+                        uint32_t selected = menu_get_selected_index(&wifi_menu);
+                        if (selected == 0) { // "Scan Networks"
+                            // TODO: Implement WiFi network scanning and display
+                            ESP_LOGI(TAG, "Scanning WiFi networks...");
+                            char info_text[256];
+                            snprintf(info_text, sizeof(info_text), "Scanning WiFi networks...\nThis feature will show\navailable networks and\nallow connection.");
+                            ui_draw_info_screen(&display, "WiFi Scan", info_text);
+                        } else if (selected == 1) { // "WiFi Status"
+                            wifi_manager_state_t state = wifi_manager_get_state(&wifi_manager);
+                            char info_text[256];
+                            if (wifi_manager_is_connected(&wifi_manager)) {
+                                esp_ip4_addr_t ip;
+                                if (wifi_manager_get_ip_info(&wifi_manager, &ip, NULL, NULL) == ESP_OK) {
+                                    snprintf(info_text, sizeof(info_text),
+                                        "WiFi Status: %s\nIP Address: " IPSTR,
+                                        wifi_manager_state_to_string(state), IP2STR(&ip));
+                                } else {
+                                    snprintf(info_text, sizeof(info_text),
+                                        "WiFi Status: %s\nIP: Unknown",
+                                        wifi_manager_state_to_string(state));
+                                }
+                            } else {
+                                snprintf(info_text, sizeof(info_text),
+                                    "WiFi Status: %s",
+                                    wifi_manager_state_to_string(state));
+                            }
+                            ui_draw_info_screen(&display, "WiFi Status", info_text);
+                        } else if (selected == 2) { // "Start Web Portal"
+                            if (!web_server_is_running(&web_server)) {
+                                esp_err_t ret = web_server_start(&web_server);
+                                if (ret == ESP_OK) {
+                                    ESP_LOGI(TAG, "Web server started");
+                                    char info_text[256];
+                                    if (wifi_manager_is_connected(&wifi_manager)) {
+                                        esp_ip4_addr_t ip;
+                                        if (wifi_manager_get_ip_info(&wifi_manager, &ip, NULL, NULL) == ESP_OK) {
+                                            snprintf(info_text, sizeof(info_text),
+                                                "Web interface started!\nAccess at:\nhttp://picoide.local\nor http://" IPSTR,
+                                                IP2STR(&ip));
+                                        } else {
+                                            snprintf(info_text, sizeof(info_text), "Web interface started!\nCheck WiFi status for IP");
+                                        }
+                                    } else {
+                                        snprintf(info_text, sizeof(info_text),
+                                            "Web interface started!\nConnect to AP:\n%s\nThen visit:\nhttp://picoide.local\nor http://192.168.4.1",
+                                            WIFI_MANAGER_AP_SSID);
+                                    }
+                                    ui_draw_info_screen(&display, "Web Portal", info_text);
+                                } else {
+                                    ESP_LOGW(TAG, "Failed to start web server: %s", esp_err_to_name(ret));
+                                }
+                            } else {
+                                ESP_LOGI(TAG, "Web server already running");
+                            }
+                        } else if (selected == 3) { // "Disconnect"
+                            esp_err_t ret = wifi_manager_disconnect(&wifi_manager);
+                            if (ret == ESP_OK) {
+                                ESP_LOGI(TAG, "WiFi disconnected");
+                            } else {
+                                ESP_LOGW(TAG, "Failed to disconnect WiFi: %s", esp_err_to_name(ret));
+                            }
+                        } else if (selected == 4) { // "Back"
+                            current_screen = SCREEN_SETTINGS;
+                            ui_draw_menu(&display, &settings_menu);
+                        }
+                    }
+                    break;
+                case 3: // Back button (West)
+                    current_screen = SCREEN_SETTINGS;
+                    ui_draw_menu(&display, &settings_menu);
+                    break;
+            }
+            break;
+
         case SCREEN_INFO:
             if (event->type == BUTTON_EVENT_CLICK && event->button_id == 3) {
                 // Back button - return to main menu
@@ -165,7 +317,7 @@ static void handle_button_event(button_event_t *event) {
                 ui_draw_menu(&display, &main_menu);
             }
             break;
-            
+
         default:
             break;
     }
@@ -352,17 +504,17 @@ void app_main(void) {
     };
     
     // Add navigation buttons with repeat (up/down)
-    nav_button_config.gpio = GPIO_NUM_4;
+    nav_button_config.gpio = PIN_NAV_UP;
     button_handler_add_button(0, &nav_button_config); // Up (North)
     
-    nav_button_config.gpio = GPIO_NUM_6;
+    nav_button_config.gpio = PIN_NAV_DOWN;
     button_handler_add_button(2, &nav_button_config); // Down (South)
     
     // Add action buttons without repeat (select/back)
-    action_button_config.gpio = GPIO_NUM_5;
+    action_button_config.gpio = PIN_NAV_RIGHT;
     button_handler_add_button(1, &action_button_config); // Select (East)
     
-    action_button_config.gpio = GPIO_NUM_7;
+    action_button_config.gpio = PIN_NAV_LEFT;
     button_handler_add_button(3, &action_button_config); // Back (West)
     
     // Register button event handler
@@ -371,11 +523,20 @@ void app_main(void) {
     
     // Initialize menus
     menu_init(&main_menu, 8);
-    menu_set_items(&main_menu, main_menu_items, 
+    menu_set_items(&main_menu, main_menu_items,
                   sizeof(main_menu_items) / sizeof(main_menu_items[0]));
-    
+
     menu_init(&disc_menu, 8);
-    // Disc menu will be populated dynamically from I2C communication
+    // Disc menu will be populated dynamically from host communication
+
+    menu_init(&settings_menu, 8);
+    menu_set_items(&settings_menu, settings_menu_items,
+                  sizeof(settings_menu_items) / sizeof(settings_menu_items[0]));
+
+    menu_init(&wifi_menu, 8);
+    menu_set_items(&wifi_menu, wifi_menu_items,
+                  sizeof(wifi_menu_items) / sizeof(wifi_menu_items[0]));
+    
     // Initialize host communication (I2C or SPI based on compile-time config)
     transport_config_t transport_cfg = {
         .device_addr = HOST_DEVICE_ADDR,
@@ -404,7 +565,50 @@ void app_main(void) {
             ESP_LOGW(TAG, "Failed to load disc list at startup: %s", esp_err_to_name(disc_ret));
         }
     }
-    
+
+    // Initialize WiFi manager
+    ret = wifi_manager_init(&wifi_manager);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to initialize WiFi manager: %s", esp_err_to_name(ret));
+    } else {
+        ESP_LOGI(TAG, "WiFi manager initialized successfully");
+
+        // Try to load saved WiFi configuration and auto-connect
+        wifi_manager_config_t wifi_config;
+        ret = wifi_manager_get_config(&wifi_manager, &wifi_config);
+        if (ret == ESP_OK && wifi_config.auto_connect && strlen(wifi_config.ssid) > 0) {
+            ESP_LOGI(TAG, "Auto-connecting to saved WiFi: %s", wifi_config.ssid);
+            wifi_manager_connect(&wifi_manager, wifi_config.ssid, wifi_config.password);
+        } else {
+            ESP_LOGI(TAG, "Starting WiFi AP mode for configuration");
+            wifi_manager_start_ap(&wifi_manager);
+        }
+    }
+
+    // Initialize web server
+    ret = web_server_init(&web_server, WEB_SERVER_PORT);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to initialize web server: %s", esp_err_to_name(ret));
+    } else {
+        ESP_LOGI(TAG, "Web server initialized successfully");
+    }
+
+    // Setup interface context for common operations
+    interface_ctx.host_comm = &host_comm;
+    interface_ctx.wifi_manager = &wifi_manager;
+
+    // Connect web server to interface context
+    web_server_set_interface_context(&web_server, &interface_ctx);
+
+    // Auto-start web server if in AP mode
+    if (wifi_manager_get_state(&wifi_manager) == WIFI_MANAGER_STATE_AP_MODE) {
+        ESP_LOGI(TAG, "Starting web server for AP configuration portal");
+        ret = web_server_start(&web_server);
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to start web server: %s", esp_err_to_name(ret));
+        }
+    }
+
     // Switch to main menu
     current_screen = SCREEN_MAIN_MENU;
     ui_draw_menu(&display, &main_menu);
