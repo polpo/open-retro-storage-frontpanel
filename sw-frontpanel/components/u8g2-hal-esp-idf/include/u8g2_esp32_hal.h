@@ -42,6 +42,10 @@ typedef struct {
       gpio_num_t mosi;
       /* GPIO num for SPI slave/chip select. */
       gpio_num_t cs;
+      /* SPI host to use (SPI2_HOST, SPI3_HOST, etc.) */
+      spi_host_device_t host;
+      /* Use existing SPI bus instead of initializing our own */
+      bool use_existing_bus;
     } spi;
     /* I2C settings. */
     struct {
@@ -64,7 +68,9 @@ typedef struct {
   {                                                                   \
     .bus = {.spi = {.clk = U8G2_ESP32_HAL_UNDEFINED,                  \
                     .mosi = U8G2_ESP32_HAL_UNDEFINED,                 \
-                    .cs = U8G2_ESP32_HAL_UNDEFINED}},                 \
+                    .cs = U8G2_ESP32_HAL_UNDEFINED,                   \
+                    .host = SPI2_HOST,                                \
+                    .use_existing_bus = false}},                      \
     .reset = U8G2_ESP32_HAL_UNDEFINED, .dc = U8G2_ESP32_HAL_UNDEFINED \
   }
 

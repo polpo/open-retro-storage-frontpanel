@@ -4,7 +4,9 @@
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "esp_system.h"
+#include "driver/spi_master.h"
 
+#include "gpio_pins.h"
 #include "display_manager.h"
 #include "button_handler.h"
 #include "menu_system.h"
@@ -253,9 +255,27 @@ static void i2c_comm_task(void *pvParameters) {
 
 void app_main(void) {
     ESP_LOGI(TAG, "PicoIDE Front Panel Starting...");
-    
-    // Initialize display
-    esp_err_t ret = display_manager_init(&display);
+
+    // Initialize shared SPI bus with MISO enabled for host communication
+    spi_bus_config_t bus_config = {
+        .mosi_io_num = PIN_SPI_MOSI,
+        .miso_io_num = PIN_SPI_MISO,    // Enable MISO for host communication
+        .sclk_io_num = PIN_SPI_CLK,
+        .quadwp_io_num = GPIO_NUM_NC,
+        .quadhd_io_num = GPIO_NUM_NC,
+        .max_transfer_sz = 4096,        // Allow larger transfers
+    };
+
+    esp_err_t ret = spi_bus_initialize(SPI2_HOST, &bus_config, SPI_DMA_CH_AUTO);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to initialize shared SPI bus: %s", esp_err_to_name(ret));
+        return;
+    }
+    ESP_LOGI(TAG, "Shared SPI bus initialized (MISO: %d, MOSI: %d, CLK: %d)",
+             PIN_SPI_MISO, PIN_SPI_MOSI, PIN_SPI_CLK);
+
+    // Initialize display (will use existing SPI bus)
+    ret = display_manager_init(&display);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to initialize display: %s", esp_err_to_name(ret));
         return;

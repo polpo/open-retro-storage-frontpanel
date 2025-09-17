@@ -16,7 +16,7 @@ static spi_device_handle_t handle_spi;   // SPI handle.
 static i2c_cmd_handle_t handle_i2c;      // I2C handle.
 static u8g2_esp32_hal_t u8g2_esp32_hal;  // HAL state data.
 
-#define HOST    SPI2_HOST
+// SPI host is now configurable via u8g2_esp32_hal.bus.spi.host
 
 #undef ESP_ERROR_CHECK
 #define ESP_ERROR_CHECK(x)                   \
@@ -59,14 +59,19 @@ uint8_t u8g2_esp32_spi_byte_cb(u8x8_t* u8x8,
         break;
       }
 
-      spi_bus_config_t bus_config = {0};
-      bus_config.sclk_io_num = u8g2_esp32_hal.bus.spi.clk;   // CLK
-      bus_config.mosi_io_num = u8g2_esp32_hal.bus.spi.mosi;  // MOSI
-      bus_config.miso_io_num = GPIO_NUM_NC;                  // MISO
-      bus_config.quadwp_io_num = GPIO_NUM_NC;                // Not used
-      bus_config.quadhd_io_num = GPIO_NUM_NC;                // Not used
-      // ESP_LOGI(TAG, "... Initializing bus.");
-      ESP_ERROR_CHECK(spi_bus_initialize(HOST, &bus_config, SPI_DMA_CH_AUTO));
+      spi_host_device_t spi_host = u8g2_esp32_hal.bus.spi.host;
+
+      // Only initialize the bus if we're not using an existing one
+      if (!u8g2_esp32_hal.bus.spi.use_existing_bus) {
+        spi_bus_config_t bus_config = {0};
+        bus_config.sclk_io_num = u8g2_esp32_hal.bus.spi.clk;   // CLK
+        bus_config.mosi_io_num = u8g2_esp32_hal.bus.spi.mosi;  // MOSI
+        bus_config.miso_io_num = GPIO_NUM_NC;                  // MISO
+        bus_config.quadwp_io_num = GPIO_NUM_NC;                // Not used
+        bus_config.quadhd_io_num = GPIO_NUM_NC;                // Not used
+        // ESP_LOGI(TAG, "... Initializing bus.");
+        ESP_ERROR_CHECK(spi_bus_initialize(spi_host, &bus_config, SPI_DMA_CH_AUTO));
+      }
 
       spi_device_interface_config_t dev_config = {0};
       dev_config.address_bits = 0;
@@ -74,16 +79,16 @@ uint8_t u8g2_esp32_spi_byte_cb(u8x8_t* u8x8,
       dev_config.dummy_bits = 0;
       dev_config.mode = 0;
       dev_config.duty_cycle_pos = 0;
-      dev_config.cs_ena_posttrans = 0;
-      dev_config.cs_ena_pretrans = 0;
-      dev_config.clock_speed_hz = 20000000;
+      dev_config.cs_ena_posttrans = 3;  // Keep CS active for 3 cycles after transaction
+      dev_config.cs_ena_pretrans = 1;   // Keep CS active for 1 cycle before transaction
+      dev_config.clock_speed_hz = 2000000;
       dev_config.spics_io_num = u8g2_esp32_hal.bus.spi.cs;
       dev_config.flags = 0;
       dev_config.queue_size = 200;
       dev_config.pre_cb = NULL;
       dev_config.post_cb = NULL;
       // ESP_LOGI(TAG, "... Adding device bus.");
-      ESP_ERROR_CHECK(spi_bus_add_device(HOST, &dev_config, &handle_spi));
+      ESP_ERROR_CHECK(spi_bus_add_device(spi_host, &dev_config, &handle_spi));
 
       break;
     }

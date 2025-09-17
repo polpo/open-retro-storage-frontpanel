@@ -3,15 +3,14 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "driver/spi_master.h"
+#include "gpio_pins.h"
 
 static const char *TAG = "display_manager";
 
 static void dim_timer_callback(void *arg);
 static void off_timer_callback(void *arg);
 
-#define PIN_SDA GPIO_NUM_0
-#define PIN_SCL GPIO_NUM_1
-#define I2C_HW_ADDR 0x3C
 #define MIN_UPDATE_INTERVAL_MS 16  // ~60 FPS max
 
 esp_err_t display_manager_init(display_manager_t *display) {
@@ -19,14 +18,22 @@ esp_err_t display_manager_init(display_manager_t *display) {
         return ESP_ERR_INVALID_ARG;
     }
 
+    // Configure u8g2 HAL to use the existing SPI bus (initialized in main.c)
     u8g2_esp32_hal_t u8g2_esp32_hal = U8G2_ESP32_HAL_DEFAULT;
-    u8g2_esp32_hal.bus.i2c.sda = PIN_SDA;
-    u8g2_esp32_hal.bus.i2c.scl = PIN_SCL;
+    u8g2_esp32_hal.bus.spi.clk = PIN_SPI_CLK;
+    u8g2_esp32_hal.bus.spi.mosi = PIN_SPI_MOSI;
+    u8g2_esp32_hal.bus.spi.cs = PIN_OLED_CS;
+    u8g2_esp32_hal.bus.spi.host = SPI2_HOST;           // Explicitly set SPI host
+    u8g2_esp32_hal.bus.spi.use_existing_bus = true;    // Use the bus initialized in main.c
+    u8g2_esp32_hal.dc = PIN_OLED_DC;
+    u8g2_esp32_hal.reset = U8G2_ESP32_HAL_UNDEFINED;   // No reset pin
     u8g2_esp32_hal_init(u8g2_esp32_hal);
 
-    u8g2_Setup_sh1107_i2c_64x128_f(&display->u8g2, U8G2_R3, 
-                                   u8g2_esp32_i2c_byte_cb, 
-                                   u8g2_esp32_gpio_and_delay_cb);
+    // Initialize SH1107 in SPI mode with 4-wire SPI
+    // Using full frame buffer (f) for smooth updates
+    u8g2_Setup_sh1107_64x128_f(&display->u8g2, U8G2_R3, 
+                                u8g2_esp32_spi_byte_cb, 
+                                u8g2_esp32_gpio_and_delay_cb);
 
     u8g2_InitDisplay(&display->u8g2);
     u8g2_ClearDisplay(&display->u8g2);
