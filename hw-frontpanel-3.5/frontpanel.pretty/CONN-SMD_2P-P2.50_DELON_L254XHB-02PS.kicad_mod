@@ -1,0 +1,181 @@
+(footprint "CONN-SMD_2P-P2.50_DELON_L254XHB-02PS"
+	(version 20241229)
+	(generator "pcbnew")
+	(generator_version "9.0")
+	(layer "F.Cu")
+	(property "Reference" "REF**"
+		(at 0 -5.88 0)
+		(layer "F.SilkS")
+		(uuid "24b3e1d8-756f-4791-acda-21fbe828a9d5")
+		(effects
+			(font
+				(size 1 1)
+				(thickness 0.15)
+			)
+		)
+	)
+	(property "Value" "CONN-SMD_2P-P2.50_DELON_L254XHB-02PS"
+		(at 0 5.88 0)
+		(layer "F.Fab")
+		(uuid "0352f415-12ff-40ba-bbef-e20755582b9a")
+		(effects
+			(font
+				(size 1 1)
+				(thickness 0.15)
+			)
+		)
+	)
+	(property "Datasheet" ""
+		(at 0 0 0)
+		(layer "F.Fab")
+		(hide yes)
+		(uuid "8060644a-6836-4a04-941c-d6e22c538c0c")
+		(effects
+			(font
+				(size 1.27 1.27)
+				(thickness 0.15)
+			)
+		)
+	)
+	(property "Description" ""
+		(at 0 0 0)
+		(layer "F.Fab")
+		(hide yes)
+		(uuid "f34d443b-a667-4491-ab3a-60563cfdb013")
+		(effects
+			(font
+				(size 1.27 1.27)
+				(thickness 0.15)
+			)
+		)
+	)
+	(attr smd)
+	(fp_line
+		(start -5.05 -1.9)
+		(end -5.05 0.15)
+		(stroke
+			(width 0.25)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "0598ba8d-8e07-4ea4-8b06-292f8c5c400c")
+	)
+	(fp_line
+		(start -5.05 3.61)
+		(end -5.05 4.07)
+		(stroke
+			(width 0.25)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "7ebfa77b-aa6e-454b-aeea-74ce91b0fa3c")
+	)
+	(fp_line
+		(start -2.08 -1.9)
+		(end -5.05 -1.9)
+		(stroke
+			(width 0.25)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "26a57b69-012f-4ad9-a425-d35cfe3bdb6a")
+	)
+	(fp_line
+		(start 5.06 -1.9)
+		(end 2.09 -1.9)
+		(stroke
+			(width 0.25)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "0e61fbb9-56d1-4d0d-897d-5f7051bf4e64")
+	)
+	(fp_line
+		(start 5.06 0.15)
+		(end 5.06 -1.9)
+		(stroke
+			(width 0.25)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "f7194199-0771-476e-bf0b-62c8030b9366")
+	)
+	(fp_line
+		(start 5.06 3.61)
+		(end 5.06 4.07)
+		(stroke
+			(width 0.25)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "4ef98082-9b55-4e63-9544-dd4266c10e11")
+	)
+	(fp_line
+		(start 5.06 4.07)
+		(end -4.95 4.07)
+		(stroke
+			(width 0.25)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "5a5ca49d-ee53-45e5-9504-7115060cc823")
+	)
+	(fp_circle
+		(center -5 -4.27)
+		(end -4.97 -4.27)
+		(stroke
+			(width 0.06)
+			(type solid)
+		)
+		(fill no)
+		(layer "F.Fab")
+		(uuid "b66251ff-e9cb-417b-8c2c-18bd27e193a1")
+	)
+	(fp_text user "${REFERENCE}"
+		(at 0 0 0)
+		(layer "F.Fab")
+		(uuid "a9afa741-b07e-428e-a95d-0be521052052")
+		(effects
+			(font
+				(size 1 1)
+				(thickness 0.15)
+			)
+		)
+	)
+	(pad "1" smd rect
+		(at -1.25 -1.88)
+		(size 1.2 5.5)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+		(uuid "c8eddac1-8077-4435-b747-e0d6de9e4dd9")
+	)
+	(pad "2" smd rect
+		(at 1.25 -1.88)
+		(size 1.2 5.5)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+		(uuid "adf3b33c-84c9-42fe-89b9-899d334d50b2")
+	)
+	(pad "3" smd rect
+		(at 4.35 1.88)
+		(size 1.5 3)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+		(uuid "570ea8dc-e675-4028-8db5-fefad51b27d7")
+	)
+	(pad "4" smd rect
+		(at -4.35 1.88)
+		(size 1.5 3)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+		(uuid "5f878e6a-b188-4808-b7c8-fd6254e96d84")
+	)
+	(embedded_fonts no)
+	(model "${EASYEDA2KICAD}/easyeda2kicad.3dshapes/CONN-SMD_2P-P2.50_DELON_L254XHB-02PS.wrl"
+		(offset
+			(xyz 0 -0.08 -0)
+		)
+		(scale
+			(xyz 1 1 1)
+		)
+		(rotate
+			(xyz 0 0 0)
+		)
+	)
+)
