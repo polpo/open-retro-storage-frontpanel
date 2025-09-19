@@ -7,6 +7,10 @@
 
 static const char *TAG = "host_comm";
 
+// Static buffers for zero-copy operations
+static uint8_t tx_buffer[PANEL_PROTOCOL_MAX_PAYLOAD];
+static uint8_t rx_buffer[PANEL_PROTOCOL_MAX_PAYLOAD + 8];  // Extra space for status bytes
+
 esp_err_t host_comm_init(host_comm_t *comm, const transport_config_t *config) {
     if (!comm || !config) {
         return ESP_ERR_INVALID_ARG;
@@ -174,10 +178,10 @@ esp_err_t host_comm_get_status(host_comm_t *comm, host_status_t *status) {
     ESP_LOGI(TAG, "Getting disc status");
 
     uint8_t disc_status;
-    esp_err_t ret = transport_spi_two_phase_transaction(&comm->transport,
-                                                        PANEL_CMD_GET_DISC_STATUS, PANEL_ARG_IGNORED,
-                                                        NULL, 0,  // No write data
-                                                        &disc_status, 1);  // Read 1 byte
+    esp_err_t ret = transport_two_phase_transaction(&comm->transport,
+                                                    PANEL_CMD_GET_DISC_STATUS, PANEL_ARG_IGNORED,
+                                                    NULL, 0,  // No write data
+                                                    &disc_status, 1);  // Read 1 byte
     if (ret == ESP_OK) {
         *status = (host_status_t)disc_status;
     }
@@ -191,33 +195,34 @@ esp_err_t host_comm_get_disc_count(host_comm_t *comm, uint32_t *count) {
     }
 
     // Start the disc count operation
-    esp_err_t ret = transport_spi_two_phase_transaction(&comm->transport,
-                                                        PANEL_CMD_START_DISC_COUNT, PANEL_ARG_IGNORED,
-                                                        NULL, 0,  // No write data
-                                                        NULL, 0);  // No read data
+    esp_err_t ret = transport_two_phase_transaction(&comm->transport,
+                                                    PANEL_CMD_START_DISC_COUNT, PANEL_ARG_IGNORED,
+                                                    NULL, 0,  // No write data
+                                                    NULL, 0);  // No read data
     if (ret != ESP_OK) {
         return ret;
     }
 
-    // Poll until ready
+    // Poll until ready and get result in optimized single operation
     bool ready = false;
-    uint8_t response_size = 0;
+    uint16_t response_size = 0;
     int retries = 10;
 
     while (retries-- > 0 && !ready) {
         vTaskDelay(pdMS_TO_TICKS(100));  // Wait 100ms between polls
 
-        uint8_t poll_response[2];
-        ret = transport_spi_two_phase_transaction(&comm->transport,
-                                                  PANEL_CMD_POLL_OP_READY, PANEL_ARG_IGNORED,
-                                                  NULL, 0,  // No write data
-                                                  poll_response, 2);  // Read 2 bytes
+        ret = transport_two_phase_transaction(&comm->transport,
+                                              PANEL_CMD_POLL_OP_READY, PANEL_ARG_IGNORED,
+                                              NULL, 0,  // No write data
+                                              rx_buffer, sizeof(rx_buffer));  // Transport handles optimization
         if (ret != ESP_OK) {
             return ret;
         }
 
-        ready = (poll_response[0] != 0);
-        response_size = poll_response[1];
+        ready = (rx_buffer[0] != 0);
+        response_size = rx_buffer[1] | (rx_buffer[2] << 8);
+
+        ESP_LOGI(TAG, "Poll response: ready=%u, size=%u", ready, response_size);
     }
 
     if (!ready) {
@@ -230,16 +235,10 @@ esp_err_t host_comm_get_disc_count(host_comm_t *comm, uint32_t *count) {
         return ESP_ERR_INVALID_RESPONSE;
     }
 
-    // Get the result
-    uint8_t result[4];
-    ret = transport_spi_two_phase_transaction(&comm->transport,
-                                              PANEL_CMD_GET_OP_RESULT, PANEL_ARG_IGNORED,
-                                              NULL, 0,  // No write data
-                                              result, 4);  // Read result data
-    if (ret == ESP_OK) {
-        *count = (result[0] << 24) | (result[1] << 16) | (result[2] << 8) | result[3];
-        ESP_LOGI(TAG, "Disc count: %lu", *count);
-    }
+    // Result is already in rx_buffer after the 3-byte status response (zero-copy!)
+    uint8_t *result = rx_buffer + 3;
+    *count = (result[0] << 24) | (result[1] << 16) | (result[2] << 8) | result[3];
+    ESP_LOGI(TAG, "Disc count: %lu", *count);
 
     return ret;
 }
@@ -280,23 +279,21 @@ esp_err_t host_comm_select_disc(host_comm_t *comm, uint32_t disc_index) {
 
     if (disc_index <= 255) {
         // Use argument byte for small indices
-        return transport_spi_two_phase_transaction(&comm->transport,
-                                                   PANEL_CMD_SELECT_DISC, (uint8_t)disc_index,
-                                                   NULL, 0,  // No write data
-                                                   NULL, 0);  // No read data
+        return transport_two_phase_transaction(&comm->transport,
+                                               PANEL_CMD_SELECT_DISC, (uint8_t)disc_index,
+                                               NULL, 0,  // No write data
+                                               NULL, 0);  // No read data
     } else {
-        // Use extended format for large indices
-        uint8_t extended_data[4] = {
-            (disc_index >> 24) & 0xFF,
-            (disc_index >> 16) & 0xFF,
-            (disc_index >> 8) & 0xFF,
-            disc_index & 0xFF
-        };
+        // Use extended format for large indices - use static TX buffer (zero-copy!)
+        tx_buffer[0] = (disc_index >> 24) & 0xFF;
+        tx_buffer[1] = (disc_index >> 16) & 0xFF;
+        tx_buffer[2] = (disc_index >> 8) & 0xFF;
+        tx_buffer[3] = disc_index & 0xFF;
 
-        return transport_spi_two_phase_transaction(&comm->transport,
-                                                   PANEL_CMD_SELECT_DISC, PANEL_ARG_EXTENDED,
-                                                   extended_data, 4,  // Write extended index
-                                                   NULL, 0);  // No read data
+        return transport_two_phase_transaction(&comm->transport,
+                                               PANEL_CMD_SELECT_DISC, PANEL_ARG_EXTENDED,
+                                               tx_buffer, 4,  // Write from static buffer
+                                               NULL, 0);  // No read data
     }
 }
 
@@ -307,10 +304,10 @@ esp_err_t host_comm_eject_disc(host_comm_t *comm) {
 
     ESP_LOGI(TAG, "Ejecting disc");
 
-    return transport_spi_two_phase_transaction(&comm->transport,
-                                               PANEL_CMD_EJECT_DISC, PANEL_ARG_IGNORED,
-                                               NULL, 0,  // No write data
-                                               NULL, 0);  // No read data
+    return transport_two_phase_transaction(&comm->transport,
+                                           PANEL_CMD_EJECT_DISC, PANEL_ARG_IGNORED,
+                                           NULL, 0,  // No write data
+                                           NULL, 0);  // No read data
 }
 
 esp_err_t host_comm_get_disc_info(host_comm_t *comm, uint32_t disc_index,
@@ -325,48 +322,47 @@ esp_err_t host_comm_get_disc_info(host_comm_t *comm, uint32_t disc_index,
     esp_err_t ret;
     if (disc_index <= 255) {
         // Use argument byte for small indices
-        ret = transport_spi_two_phase_transaction(&comm->transport,
-                                                  PANEL_CMD_START_DISC_INFO, (uint8_t)disc_index,
-                                                  NULL, 0,  // No write data
-                                                  NULL, 0);  // No read data
+        ret = transport_two_phase_transaction(&comm->transport,
+                                              PANEL_CMD_START_DISC_INFO, (uint8_t)disc_index,
+                                              NULL, 0,  // No write data
+                                              NULL, 0);  // No read data
     } else {
-        // Use extended format for large indices
-        uint8_t extended_data[4] = {
-            (disc_index >> 24) & 0xFF,
-            (disc_index >> 16) & 0xFF,
-            (disc_index >> 8) & 0xFF,
-            disc_index & 0xFF
-        };
+        // Use extended format for large indices - use static TX buffer (zero-copy!)
+        tx_buffer[0] = (disc_index >> 24) & 0xFF;
+        tx_buffer[1] = (disc_index >> 16) & 0xFF;
+        tx_buffer[2] = (disc_index >> 8) & 0xFF;
+        tx_buffer[3] = disc_index & 0xFF;
 
-        ret = transport_spi_two_phase_transaction(&comm->transport,
-                                                  PANEL_CMD_START_DISC_INFO, PANEL_ARG_EXTENDED,
-                                                  extended_data, 4,  // Write extended index
-                                                  NULL, 0);  // No read data
+        ret = transport_two_phase_transaction(&comm->transport,
+                                              PANEL_CMD_START_DISC_INFO, PANEL_ARG_EXTENDED,
+                                              tx_buffer, 4,  // Write from static buffer
+                                              NULL, 0);  // No read data
     }
 
     if (ret != ESP_OK) {
         return ret;
     }
 
-    // Poll until ready
+    // Poll until ready and get result in optimized single operation
     bool ready = false;
-    uint8_t response_size = 0;
+    uint16_t response_size = 0;
     int retries = 10;
 
     while (retries-- > 0 && !ready) {
         vTaskDelay(pdMS_TO_TICKS(100));  // Wait 100ms between polls
 
-        uint8_t poll_response[2];
-        ret = transport_spi_two_phase_transaction(&comm->transport,
-                                                  PANEL_CMD_POLL_OP_READY, PANEL_ARG_IGNORED,
-                                                  NULL, 0,  // No write data
-                                                  poll_response, 2);  // Read 2 bytes
+        ret = transport_two_phase_transaction(&comm->transport,
+                                              PANEL_CMD_POLL_OP_READY, PANEL_ARG_IGNORED,
+                                              NULL, 0,  // No write data
+                                              rx_buffer, sizeof(rx_buffer));  // Transport handles optimization
         if (ret != ESP_OK) {
             return ret;
         }
 
-        ready = (poll_response[0] != 0);
-        response_size = poll_response[1];
+        ready = (rx_buffer[0] != 0);
+        response_size = rx_buffer[1] | (rx_buffer[2] << 8);
+
+        ESP_LOGI(TAG, "Poll response: ready=%u, size=%u", ready, response_size);
     }
 
     if (!ready) {
@@ -379,14 +375,10 @@ esp_err_t host_comm_get_disc_info(host_comm_t *comm, uint32_t disc_index,
         return ESP_ERR_INVALID_RESPONSE;
     }
 
-    // Get the result
-    ret = transport_spi_two_phase_transaction(&comm->transport,
-                                              PANEL_CMD_GET_OP_RESULT, PANEL_ARG_IGNORED,
-                                              NULL, 0,  // No write data
-                                              (uint8_t*)info, sizeof(disc_info_t));  // Read result data
-    if (ret == ESP_OK) {
-        ESP_LOGI(TAG, "Got disc info: %s", info->name);
-    }
+    // Result is already in rx_buffer after the 3-byte status response (zero-copy!)
+    disc_info_t *result = (disc_info_t*)(rx_buffer + 3);
+    memcpy(info, result, sizeof(disc_info_t));  // Copy to caller's buffer
+    ESP_LOGI(TAG, "Got disc info: %s", info->name);
 
     return ret;
 }

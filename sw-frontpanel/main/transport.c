@@ -97,6 +97,31 @@ const char* transport_get_name(transport_handle_t *handle) {
     if (!handle || !handle->ops) {
         return "Unknown";
     }
-    
+
     return handle->ops->get_name();
+}
+
+// New protocol functions for two-phase transactions
+esp_err_t transport_two_phase_transaction(transport_handle_t *handle,
+                                          uint8_t command, uint8_t argument,
+                                          const uint8_t *write_data, size_t write_len,
+                                          uint8_t *read_data, size_t read_len) {
+    if (!handle || !handle->ops) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (!handle->initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    // Route to transport-specific implementation
+#ifdef TRANSPORT_USE_SPI
+    return transport_spi_two_phase_transaction(handle, command, argument,
+                                               write_data, write_len,
+                                               read_data, read_len);
+#else
+    return transport_i2c_two_phase_transaction(handle, command, argument,
+                                               write_data, write_len,
+                                               read_data, read_len);
+#endif
 }

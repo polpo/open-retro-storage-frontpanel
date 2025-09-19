@@ -37,7 +37,7 @@ static esp_err_t transport_spi_init(transport_handle_t *handle) {
     // Try to add device to existing SPI bus (initialized in main.c)
     spi_device_interface_config_t dev_cfg = {
         .clock_speed_hz = handle->config.clock_speed,
-        .mode = 1,  // SPI mode 0 (CPOL=0, CPHA=0)
+        .mode = 1,  // SPI mode 1 (CPOL=0, CPHA=1) - the Pico seems to do better in mode 1
         .spics_io_num = handle->config.cs,
         .queue_size = 7,
         .flags = 0,
@@ -355,7 +355,13 @@ esp_err_t transport_spi_two_phase_transaction(transport_handle_t *handle,
     bool is_read = PANEL_CMD_IS_READ(command);
 
     if (is_read && read_len > 0) {
-        payload_size = read_len;
+        // Special case for POLL_OP_READY: always start with 3-byte status read
+        // The optimization logic will handle additional reads based on response_size
+        if (command == PANEL_CMD_POLL_OP_READY) {
+            payload_size = 3;  // Always read status response first
+        } else {
+            payload_size = read_len;
+        }
     } else if (!is_read && write_data && write_len > 0) {
         payload_size = write_len;
     }
@@ -377,9 +383,39 @@ esp_err_t transport_spi_two_phase_transaction(transport_handle_t *handle,
         if (is_read) {
             // Read operation
             ESP_LOGI(TAG, "Phase 2: Reading payload (%u bytes)", payload_size);
-            ret = transport_spi_read_payload(handle, read_data, read_len);
+            ret = transport_spi_read_payload(handle, read_data, payload_size);
             if (ret == ESP_OK) {
-                ESP_LOG_BUFFER_HEX_LEVEL(TAG, read_data, (read_len > 32) ? 32 : read_len, ESP_LOG_INFO);
+                ESP_LOG_BUFFER_HEX_LEVEL(TAG, read_data, (payload_size > 32) ? 32 : payload_size, ESP_LOG_INFO);
+
+                // Special handling for POLL_OP_READY: check if ready and do raw read
+                if (command == PANEL_CMD_POLL_OP_READY) {
+                    uint8_t ready_flag = read_data[0];
+                    uint16_t result_size = read_data[1] | (read_data[2] << 8);
+
+                    ESP_LOGI(TAG, "POLL_OP_READY response: ready=%u, size=%u", ready_flag, result_size);
+
+                    if (ready_flag == 1 && result_size > 0) {
+                        // Result is ready - do immediate raw read for result data
+                        ESP_LOGI(TAG, "Phase 3: Raw read for result data (%u bytes)", result_size);
+
+                        // Allocate buffer for result data (or extend read_data if caller provided enough space)
+                        uint8_t *result_buffer = read_data + 3; // Append after status response
+                        size_t max_result_size = read_len - 3;
+
+                        if (result_size <= max_result_size) {
+                            ret = transport_spi_read_payload(handle, result_buffer, result_size);
+                            if (ret == ESP_OK) {
+                                ESP_LOGI(TAG, "Raw read complete, result data:");
+                                ESP_LOG_BUFFER_HEX_LEVEL(TAG, result_buffer, (result_size > 32) ? 32 : result_size, ESP_LOG_INFO);
+                            } else {
+                                ESP_LOGE(TAG, "Raw read failed: %s", esp_err_to_name(ret));
+                            }
+                        } else {
+                            ESP_LOGW(TAG, "Result size %u exceeds available buffer space %zu", result_size, max_result_size);
+                            ret = ESP_ERR_INVALID_SIZE;
+                        }
+                    }
+                }
             }
         } else {
             // Write operation

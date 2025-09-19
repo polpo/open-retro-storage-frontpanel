@@ -51,8 +51,19 @@ esp_err_t transport_write_then_read(transport_handle_t *handle,
                                      uint8_t *read_data, size_t read_len);
 const char* transport_get_name(transport_handle_t *handle);
 
-// New protocol function for two-phase transactions (SPI only)
+// New protocol functions for two-phase transactions
+esp_err_t transport_two_phase_transaction(transport_handle_t *handle,
+                                          uint8_t command, uint8_t argument,
+                                          const uint8_t *write_data, size_t write_len,
+                                          uint8_t *read_data, size_t read_len);
+
+// Transport-specific implementations
 esp_err_t transport_spi_two_phase_transaction(transport_handle_t *handle,
+                                              uint8_t command, uint8_t argument,
+                                              const uint8_t *write_data, size_t write_len,
+                                              uint8_t *read_data, size_t read_len);
+
+esp_err_t transport_i2c_two_phase_transaction(transport_handle_t *handle,
                                               uint8_t command, uint8_t argument,
                                               const uint8_t *write_data, size_t write_len,
                                               uint8_t *read_data, size_t read_len);
