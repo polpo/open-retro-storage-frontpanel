@@ -38,15 +38,15 @@ extern const uint8_t index_html_start[] asm("_binary_index_html_start");
 extern const uint8_t index_html_end[] asm("_binary_index_html_end");
 extern const uint8_t app_js_start[] asm("_binary_app_js_start");
 extern const uint8_t app_js_end[] asm("_binary_app_js_end");
-extern const uint8_t sha256_min_js_start[] asm("_binary_sha256_min_js_start");
-extern const uint8_t sha256_min_js_end[] asm("_binary_sha256_min_js_end");
+extern const uint8_t sha256_js_start[] asm("_binary_sha256_js_start");
+extern const uint8_t sha256_js_end[] asm("_binary_sha256_js_end");
 
 
 // URI handlers
 static const httpd_uri_t uri_handlers[] = {
     { .uri = "/", .method = HTTP_GET, .handler = index_handler, .user_ctx = NULL },
     { .uri = "/app.js", .method = HTTP_GET, .handler = js_handler, .user_ctx = NULL },
-    { .uri = "/sha256.min.js", .method = HTTP_GET, .handler = sha256_js_handler, .user_ctx = NULL },
+    { .uri = "/sha256.js", .method = HTTP_GET, .handler = sha256_js_handler, .user_ctx = NULL },
     { .uri = "/api/status", .method = HTTP_GET, .handler = api_status_handler, .user_ctx = NULL },
     { .uri = "/api/discs", .method = HTTP_GET, .handler = api_discs_handler, .user_ctx = NULL },
     { .uri = "/api/select_disc", .method = HTTP_POST, .handler = api_select_disc_handler, .user_ctx = NULL },
@@ -74,8 +74,8 @@ static esp_err_t js_handler(httpd_req_t *req) {
 
 static esp_err_t sha256_js_handler(httpd_req_t *req) {
     httpd_resp_set_type(req, "application/javascript; charset=utf-8");
-    const size_t sha256_min_js_size = sha256_min_js_end - sha256_min_js_start;
-    return httpd_resp_send(req, (const char *)sha256_min_js_start, sha256_min_js_size);
+    const size_t sha256_js_size = sha256_js_end - sha256_js_start;
+    return httpd_resp_send(req, (const char *)sha256_js_start, sha256_js_size);
 }
 
 static esp_err_t api_status_handler(httpd_req_t *req) {
@@ -881,9 +881,7 @@ static esp_err_t api_upload_handler(httpd_req_t *req) {
     // Variables for parsing multipart data
     bool found_filename = false;
     bool found_file_size = false;
-    bool found_file_hash = false;
     uint32_t actual_file_size = 0;
-    uint8_t expected_hash[32] = {0}; // SHA256 binary (32 bytes)
     uint32_t file_data_start = 0;
 
     // Read first chunk to parse headers
@@ -917,34 +915,10 @@ static esp_err_t api_upload_handler(httpd_req_t *req) {
         }
     }
 
-    // Parse fileHash field (binary data)
-    char *filehash_field = strnmem(chunk_buffer, "name=\"fileHash\"", received);
-    if (filehash_field) {
-        // Find the value after the field header (look for double CRLF)
-        char *value_start = strnmem(filehash_field, "\r\n\r\n", received - (filehash_field - chunk_buffer));
-        if (value_start) {
-            value_start += 4; // Skip \r\n\r\n
-            char *value_end = strnmem(value_start, "\r\n--", received - (value_start - chunk_buffer));
-            if (value_end) {
-                size_t hash_len = value_end - value_start;
-                if (hash_len == 32) { // SHA256 is exactly 32 bytes
-                    memcpy(expected_hash, value_start, 32);
-                    found_file_hash = true;
-                    ESP_LOGI(TAG, "Found file hash (binary): %02x%02x%02x%02x...",
-                            expected_hash[0], expected_hash[1], expected_hash[2], expected_hash[3]);
-                }
-            }
-        }
-    }
-
     // Look for filename in the file data field
     char *filename_start = NULL;
-    if (filehash_field) {
-        char *filedata_field = strnmem(filehash_field, "name=\"fileData\"", received - (filehash_field - chunk_buffer));
-        if (!filedata_field) {
-            ESP_LOGE(TAG, "Huh??? %u %u %u %u\n", received, filehash_field, chunk_buffer, received - (filehash_field - chunk_buffer));
-            ESP_LOG_BUFFER_CHAR(TAG, filehash_field, received - (filehash_field - chunk_buffer));
-        }
+    char *filedata_field = strnmem(chunk_buffer, "name=\"fileData\"", received);
+    if (filedata_field) {
         filename_start = strnmem(filedata_field, "filename=\"", received - (filedata_field - chunk_buffer));
     }
     if (filename_start) {
@@ -977,14 +951,6 @@ static esp_err_t api_upload_handler(httpd_req_t *req) {
         return ESP_FAIL;
     }
 
-    if (!found_file_hash) {
-        ESP_LOGE(TAG, "Could not parse file hash from upload");
-        free(chunk_buffer);
-        httpd_resp_set_status(req, "400 Bad Request");
-        httpd_resp_send(req, "Invalid multipart data - missing file hash", 41);
-        return ESP_FAIL;
-    }
-
     // Set target path
     snprintf(g_upload_state.target_path, sizeof(g_upload_state.target_path),
              "/uploads/%s", g_upload_state.filename);
@@ -1012,8 +978,8 @@ static esp_err_t api_upload_handler(httpd_req_t *req) {
 
     host_comm_t *host_comm = g_server->interface_ctx->host_comm;
 
-    // Start file upload on RP2350 with actual file size and hash
-    esp_err_t ret = host_comm_start_file_upload(host_comm, g_upload_state.filename, actual_file_size, expected_hash);
+    // Start file upload on RP2350 with actual file size
+    esp_err_t ret = host_comm_start_file_upload(host_comm, g_upload_state.filename, actual_file_size);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start file upload: %s", esp_err_to_name(ret));
         free(chunk_buffer);
@@ -1085,9 +1051,10 @@ static esp_err_t api_upload_handler(httpd_req_t *req) {
         ESP_LOGD(TAG, "Uploaded %lu / %lu bytes", g_upload_state.bytes_received, actual_file_size);
     }
 
-    // Finish the upload
+    // Finish the upload and get file hash
     uint8_t upload_result;
-    ret = host_comm_finish_file_upload(host_comm, &upload_result);
+    uint8_t file_hash[32];
+    ret = host_comm_finish_file_upload(host_comm, &upload_result, file_hash);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to finish upload: %s", esp_err_to_name(ret));
         free(chunk_buffer);
@@ -1125,10 +1092,17 @@ static esp_err_t api_upload_handler(httpd_req_t *req) {
         return ESP_FAIL;
     }
 
-    ESP_LOGI(TAG, "File upload completed successfully: %s (%lu bytes)",
-             g_upload_state.filename, g_upload_state.bytes_received);
+    // Convert hash to hex string
+    char hash_hex[65];
+    for (int i = 0; i < 32; i++) {
+        snprintf(hash_hex + (i * 2), sizeof(hash_hex) - (i * 2), "%02x", file_hash[i]);
+    }
+    hash_hex[64] = '\0';
 
-    // Send success response
+    ESP_LOGI(TAG, "File upload completed successfully: %s (%lu bytes), SHA256: %s",
+             g_upload_state.filename, g_upload_state.bytes_received, hash_hex);
+
+    // Send success response with hash
     httpd_resp_set_type(req, "application/json");
 
     JsonStreamWriter json(req);
@@ -1145,6 +1119,9 @@ static esp_err_t api_upload_handler(httpd_req_t *req) {
     if (ret != ESP_OK) return ret;
 
     ret = json.write("size", (int)g_upload_state.bytes_received);
+    if (ret != ESP_OK) return ret;
+
+    ret = json.write("hash", hash_hex);
     if (ret != ESP_OK) return ret;
 
     ret = json.endObject();

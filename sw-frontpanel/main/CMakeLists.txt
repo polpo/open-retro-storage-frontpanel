@@ -15,5 +15,5 @@ idf_component_register(SRCS "main.c"
                             "ota_manager.c"
                     INCLUDE_DIRS "."
                     REQUIRES u8g2 u8g2-hal-esp-idf esp_timer driver led_strip esp_wifi esp_netif esp_http_server nvs_flash json app_update mbedtls
-                    EMBED_FILES "www/index.html" "www/app.js" "www/sha256.min.js"
+                    EMBED_FILES "www/index.html" "www/app.js" "www/sha256.js"
                 )

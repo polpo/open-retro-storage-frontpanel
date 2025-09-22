@@ -358,7 +358,7 @@ esp_err_t host_comm_read_firmware_chunk(host_comm_t *comm, uint32_t offset,
     return ESP_OK;
 }
 
-esp_err_t host_comm_start_file_upload(host_comm_t *comm, const char *filename, uint32_t file_size, const uint8_t *expected_hash) {
+esp_err_t host_comm_start_file_upload(host_comm_t *comm, const char *filename, uint32_t file_size) {
     if (!comm || !comm->initialized || !filename) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -375,13 +375,6 @@ esp_err_t host_comm_start_file_upload(host_comm_t *comm, const char *filename, u
     panel_file_upload_start_t *upload_start = (panel_file_upload_start_t *)tx_buffer;
     upload_start->file_size = file_size;
     upload_start->filename_len = filename_len;
-
-    // Copy SHA256 hash if provided
-    if (expected_hash) {
-        memcpy(upload_start->hash, expected_hash, 32);
-    } else {
-        memset(upload_start->hash, 0, 32); // Clear hash if not provided
-    }
 
     // Copy filename after the structure (null-terminated)
     memcpy(tx_buffer + sizeof(panel_file_upload_start_t), filename, filename_len);
@@ -444,7 +437,7 @@ esp_err_t host_comm_write_file_chunk(host_comm_t *comm, const uint8_t *data, siz
     return ESP_OK;
 }
 
-esp_err_t host_comm_finish_file_upload(host_comm_t *comm, uint8_t *result_code) {
+esp_err_t host_comm_finish_file_upload(host_comm_t *comm, uint8_t *result_code, uint8_t *file_hash) {
     if (!comm || !comm->initialized) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -462,17 +455,17 @@ esp_err_t host_comm_finish_file_upload(host_comm_t *comm, uint8_t *result_code) 
         return ret;
     }
 
-    // Poll for async result (1 byte result code)
+    // Poll for async result (33 bytes: 1 byte result code + 32 byte SHA256)
     uint8_t *result_data;
     size_t result_size;
-    ret = host_comm_poll_async_result(comm, 5000, 10, 1, &result_data, &result_size);
+    ret = host_comm_poll_async_result(comm, 5000, 10, 33, &result_data, &result_size);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to get file upload result: %s", esp_err_to_name(ret));
         return ret;
     }
 
-    if (result_size != 1) {
-        ESP_LOGE(TAG, "Upload result size mismatch: expected 1, got %d", result_size);
+    if (result_size != 33) {
+        ESP_LOGE(TAG, "Upload result size mismatch: expected 33, got %d", result_size);
         return ESP_ERR_INVALID_SIZE;
     }
 
@@ -480,8 +473,18 @@ esp_err_t host_comm_finish_file_upload(host_comm_t *comm, uint8_t *result_code) 
         *result_code = result_data[0];
     }
 
+    // Copy SHA256 hash if buffer provided
+    if (file_hash) {
+        memcpy(file_hash, result_data + 1, 32);
+    }
+
     if (result_data[0] == PANEL_UPLOAD_OK) {
-        ESP_LOGI(TAG, "File upload completed successfully");
+        // Log the hash in hex format
+        char hash_hex[65];
+        for (int i = 0; i < 32; i++) {
+            snprintf(hash_hex + (i * 2), sizeof(hash_hex) - (i * 2), "%02x", result_data[1 + i]);
+        }
+        ESP_LOGI(TAG, "File upload completed successfully. SHA256: %s", hash_hex);
     } else {
         ESP_LOGE(TAG, "File upload failed with code: 0x%02X", result_data[0]);
     }

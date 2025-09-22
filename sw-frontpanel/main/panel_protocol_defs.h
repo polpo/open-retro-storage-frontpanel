@@ -94,7 +94,6 @@ typedef struct __attribute__((packed)) {
 typedef struct __attribute__((packed)) {
     uint32_t file_size;        // Total file size in bytes
     uint16_t filename_len;     // Length of filename string
-    uint8_t hash[32];          // SHA256 hash (32 bytes binary)
     // Filename follows (null-terminated string)
 } panel_file_upload_start_t;
 

@@ -257,6 +257,8 @@ async function checkUpdateProgress() {
 // File upload variables
 let uploadXHR = null;
 let uploadStartTime = null;
+let sha256Context = null;
+let calculatedHash = null;
 
 function formatBytes(bytes) {
     if (bytes === 0) return '0 Bytes';
@@ -274,6 +276,52 @@ function formatTime(seconds) {
     const hours = Math.floor(minutes / 60);
     const mins = minutes % 60;
     return `${hours}h ${mins}m`;
+}
+
+// Calculate SHA256 incrementally using requestIdleCallback
+async function calculateSHA256Incrementally(file) {
+    const chunkSize = 256 * 1024; // 256KB chunks
+    const chunks = Math.ceil(file.size / chunkSize);
+    let processedChunks = 0;
+
+    // Initialize SHA256 context
+    sha256Context = new SHA256Context();
+
+    return new Promise((resolve, reject) => {
+        function processNextChunk() {
+            if (processedChunks >= chunks) {
+                // All chunks processed, finalize hash
+                console.log('Finalizing SHA256 calculation...');
+                const hashBuffer = sha256Context.finalize();
+                const hashArray = Array.from(new Uint8Array(hashBuffer));
+                const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+                console.log('SHA256 calculated:', hashHex);
+                resolve(hashBuffer);
+                return;
+            }
+
+            // Process next chunk
+            const start = processedChunks * chunkSize;
+            const end = Math.min(start + chunkSize, file.size);
+            const blob = file.slice(start, end);
+
+            blob.arrayBuffer().then(buffer => {
+                const data = new Uint8Array(buffer);
+                sha256Context.update(data);
+                processedChunks++;
+
+                // Schedule next chunk processing
+                if (window.requestIdleCallback) {
+                    requestIdleCallback(() => processNextChunk(), { timeout: 50 });
+                } else {
+                    setTimeout(processNextChunk, 10);
+                }
+            }).catch(reject);
+        }
+
+        // Start processing
+        processNextChunk();
+    });
 }
 
 async function uploadFile() {
@@ -297,16 +345,13 @@ async function uploadFile() {
 
     uploadStartTime = Date.now();
 
+    // Start SHA256 calculation in background
+    calculatedHash = null;
+    const hashPromise = calculateSHA256Incrementally(file);
+
     // Create FormData
     const formData = new FormData();
     formData.append('fileSize', file.size.toString());
-
-    // Add SHA256 hash as binary blob
-    if (file.hashBuffer) {
-        const hashBlob = new Blob([file.hashBuffer], { type: 'application/octet-stream' });
-        formData.append('fileHash', hashBlob, 'fileHash');
-    }
-
     formData.append('fileData', file);
 
     // Create XMLHttpRequest for progress tracking
@@ -330,15 +375,45 @@ async function uploadFile() {
     });
 
     // Handle completion
-    uploadXHR.addEventListener('load', () => {
+    uploadXHR.addEventListener('load', async () => {
         if (uploadXHR.status === 200) {
             try {
                 const response = JSON.parse(uploadXHR.responseText);
                 if (response.success) {
-                    document.getElementById('upload-status').className = 'status success';
-                    document.getElementById('upload-status').textContent = `File uploaded successfully to ${response.path || '/uploads/' + file.name}`;
+                    // Wait for SHA256 calculation to complete
+                    document.getElementById('upload-status').className = 'status';
+                    document.getElementById('upload-status').textContent = 'Verifying file integrity...';
                     document.getElementById('upload-status').style.display = 'block';
-                    showStatus('success', 'File upload completed!');
+
+                    try {
+                        calculatedHash = await hashPromise;
+
+                        // Compare hash with server response
+                        if (response.hash) {
+                            const hashArray = Array.from(new Uint8Array(calculatedHash));
+                            const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+
+                            if (response.hash.toLowerCase() === hashHex.toLowerCase()) {
+                                document.getElementById('upload-status').className = 'status success';
+                                document.getElementById('upload-status').textContent = `File uploaded and verified successfully to ${response.path || '/uploads/' + file.name}`;
+                                showStatus('success', 'File upload verified!');
+                            } else {
+                                document.getElementById('upload-status').className = 'status error';
+                                document.getElementById('upload-status').textContent = 'Hash verification failed - file may be corrupted';
+                                showStatus('error', 'Hash verification failed');
+                            }
+                        } else {
+                            // Server should always return a hash
+                            document.getElementById('upload-status').className = 'status error';
+                            document.getElementById('upload-status').textContent = 'Server did not return file hash for verification';
+                            showStatus('error', 'Missing hash from server');
+                        }
+                    } catch (hashError) {
+                        console.error('SHA256 calculation failed:', hashError);
+                        document.getElementById('upload-status').className = 'status error';
+                        document.getElementById('upload-status').textContent = 'Failed to calculate file hash for verification';
+                        showStatus('error', 'Hash calculation failed');
+                    }
                 } else {
                     throw new Error(response.error || 'Upload failed');
                 }
@@ -392,6 +467,8 @@ function resetUploadUI() {
     document.getElementById('file-input').value = '';
     uploadXHR = null;
     uploadStartTime = null;
+    calculatedHash = null;
+    sha256Context = null;
 }
 
 // Initialize the page
@@ -405,36 +482,18 @@ document.addEventListener('DOMContentLoaded', function() {
     const fileInput = document.getElementById('file-input');
     const fileSizeInput = document.getElementById('file-size');
 
-    fileInput.addEventListener('change', async function() {
+    fileInput.addEventListener('change', function() {
         if (this.files.length > 0) {
             const file = this.files[0];
             fileSizeInput.value = file.size.toString();
-
-            // Calculate SHA256 hash of the file
-            console.log('Calculating SHA256 hash...');
-            const arrayBuffer = await file.arrayBuffer();
-            let hashBuffer;
-
-            if (crypto && crypto.subtle) {
-                // Use native Web Crypto API if available (HTTPS/localhost)
-                hashBuffer = await crypto.subtle.digest('SHA-256', arrayBuffer);
-            } else {
-                // Use fallback implementation for HTTP contexts
-                console.log('crypto.subtle not available, using fallback SHA256');
-                hashBuffer = sha256(arrayBuffer);
-            }
-
-            // Store hash buffer in a data attribute (binary)
-            file.hashBuffer = hashBuffer;
-
-            // For console logging, show hex representation
-            const hashArray = Array.from(new Uint8Array(hashBuffer));
-            const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
-            console.log('File selected:', file.name, 'Size:', file.size, 'bytes', 'SHA256:', hashHex);
+            console.log('File selected:', file.name, 'Size:', file.size, 'bytes');
+            // SHA256 will be calculated during upload
+            calculatedHash = null;
+            sha256Context = null;
         } else {
             fileSizeInput.value = '';
-            const hashInput = document.getElementById('file-hash');
-            if (hashInput) hashInput.value = '';
+            calculatedHash = null;
+            sha256Context = null;
         }
     });
 
