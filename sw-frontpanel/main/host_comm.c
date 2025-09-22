@@ -1,15 +1,17 @@
 #include "host_comm.h"
 #include "panel_protocol_defs.h"
 #include "esp_log.h"
+#include "esp_rom_crc.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <string.h>
+#include <stdalign.h>
 
 static const char *TAG = "host_comm";
 
 // Static buffers for zero-copy operations
-static uint8_t tx_buffer[PANEL_PROTOCOL_MAX_PAYLOAD];
-static uint8_t rx_buffer[PANEL_PROTOCOL_MAX_PAYLOAD + 8];  // Extra space for status bytes
+alignas(4) static uint8_t tx_buffer[PANEL_PROTOCOL_MAX_PAYLOAD];
+alignas(4) static uint8_t rx_buffer[PANEL_PROTOCOL_MAX_PAYLOAD];
 
 esp_err_t host_comm_init(host_comm_t *comm, const transport_config_t *config) {
     if (!comm || !config) {
@@ -55,120 +57,50 @@ const char* host_comm_get_transport_name(host_comm_t *comm) {
     return transport_get_name(&comm->transport);
 }
 
-// Helper function to send command and wait for response
-static esp_err_t host_comm_write_command(host_comm_t *comm, host_command_t cmd,
-                                         const uint8_t *data, size_t data_len) {
-    if (!comm || !comm->initialized) {
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    ESP_LOGD(TAG, "Writing command: 0x%02x, data_len=%u", cmd, data_len);
-
-    // Prepare command buffer
-    uint8_t cmd_buffer[HOST_COMM_MAX_DATA_SIZE + 2];
-    size_t cmd_len = 0;
-    
-    // Add command byte
-    cmd_buffer[cmd_len++] = cmd;
-    
-    // Add data length (for variable length commands)
-    if (cmd == HOST_CMD_SELECT_DISC || cmd == HOST_CMD_GET_DISC_INFO) {
-        // These commands have fixed 4-byte data
-        cmd_buffer[cmd_len++] = 4;
-        if (data && data_len >= 4) {
-            memcpy(&cmd_buffer[cmd_len], data, 4);
-            cmd_len += 4;
-        }
-    } else if (data && data_len > 0) {
-        cmd_buffer[cmd_len++] = (uint8_t)data_len;
-        memcpy(&cmd_buffer[cmd_len], data, data_len);
-        cmd_len += data_len;
-    } else {
-        cmd_buffer[cmd_len++] = 0;  // No data
-    }
-
-    // Send command via transport
-    esp_err_t ret = transport_write(&comm->transport, cmd_buffer, cmd_len);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to write command 0x%02X: %s", cmd, esp_err_to_name(ret));
-    }
-
-    return ret;
-}
-
-// Helper function to read response
-static esp_err_t host_comm_read_response(host_comm_t *comm, uint8_t *response, size_t *response_len) {
-    if (!comm || !comm->initialized || !response || !response_len) {
+// Helper function to poll for async operation completion and retrieve result
+static esp_err_t host_comm_poll_async_result(host_comm_t *comm, uint32_t timeout_ms, uint32_t poll_interval_ms,
+                                             size_t expected_size, uint8_t **result_data, size_t *actual_size) {
+    if (!comm) {
         return ESP_ERR_INVALID_ARG;
     }
 
-    // Read response via transport
-    esp_err_t ret = transport_read(&comm->transport, response, *response_len);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to read response: %s", esp_err_to_name(ret));
-    }
+    uint32_t elapsed_ms = 0;
+    bool ready = false;
+    uint16_t response_size = 0;
 
-    return ret;
-}
+    while (elapsed_ms < timeout_ms && !ready) {
+        vTaskDelay(pdMS_TO_TICKS(poll_interval_ms));
+        elapsed_ms += poll_interval_ms;
 
-esp_err_t host_comm_send_command(host_comm_t *comm, host_command_t cmd,
-                                 const uint8_t *data, size_t data_len,
-                                 uint8_t *response, size_t *response_len) {
-    if (!comm || !comm->initialized) {
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    ESP_LOGI(TAG, "Sending command: 0x%02x", cmd);
-
-    // Send command
-    esp_err_t ret = host_comm_write_command(comm, cmd, data, data_len);
-    if (ret != ESP_OK) {
-        return ret;
-    }
-
-    // Wait a bit for processing
-    vTaskDelay(pdMS_TO_TICKS(1000));
-
-    // Poll for response status
-    uint8_t status = HOST_STATUS_NO_CMD;
-    size_t status_len = 1;
-    int retries = 10;
-
-    while (retries-- > 0) {
-        ret = host_comm_read_response(comm, &status, &status_len);
+        esp_err_t ret = transport_poll_async_status(&comm->transport, &ready, &response_size,
+                                                    rx_buffer, expected_size);
         if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to read status: %s", esp_err_to_name(ret));
             return ret;
         }
 
-        ESP_LOGI(TAG, "Status: 0x%02x", status);
-
-        if (status == HOST_STATUS_READY) {
-            // Response is ready, read it if requested
-            if (response && response_len && *response_len > 0) {
-                ret = host_comm_read_response(comm, response, response_len);
-                if (ret != ESP_OK) {
-                    ESP_LOGE(TAG, "Failed to read response data: %s", esp_err_to_name(ret));
-                    return ret;
-                }
-            }
-            return ESP_OK;
-        } else if (status == HOST_STATUS_ERROR || status == HOST_STATUS_INVALID_CMD) {
-            ESP_LOGE(TAG, "Command failed with status: 0x%02x", status);
-            return ESP_ERR_INVALID_RESPONSE;
-        } else if (status == HOST_STATUS_BUSY) {
-            // Still processing, wait a bit
-            vTaskDelay(pdMS_TO_TICKS(1000));
-        } else if (status == HOST_STATUS_NO_CMD) {
-            // No command received, might need to resend
-            ESP_LOGW(TAG, "No command status, retrying");
-            vTaskDelay(pdMS_TO_TICKS(1000));
-        }
+        /* ESP_LOGI(TAG, "Poll response: ready=%u, size=%u", ready, response_size); */
     }
 
-    ESP_LOGE(TAG, "Command timeout");
-    return ESP_ERR_TIMEOUT;
+    if (!ready) {
+        ESP_LOGE(TAG, "Async operation timeout after %lu ms", elapsed_ms);
+        return ESP_ERR_TIMEOUT;
+    }
+
+    if (expected_size > 0 && response_size != expected_size) {
+        ESP_LOGE(TAG, "Unexpected response size: %u (expected %zu)", response_size, expected_size);
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+
+    if (result_data) {
+        *result_data = rx_buffer;
+    }
+    if (actual_size) {
+        *actual_size = response_size;
+    }
+
+    return ESP_OK;
 }
+
 
 esp_err_t host_comm_get_status(host_comm_t *comm, host_status_t *status) {
     if (!comm || !status) {
@@ -203,44 +135,19 @@ esp_err_t host_comm_get_disc_count(host_comm_t *comm, uint32_t *count) {
         return ret;
     }
 
-    // Poll until ready and get result in optimized single operation
-    bool ready = false;
-    uint16_t response_size = 0;
-    int retries = 10;
-
-    while (retries-- > 0 && !ready) {
-        vTaskDelay(pdMS_TO_TICKS(100));  // Wait 100ms between polls
-
-        ret = transport_two_phase_transaction(&comm->transport,
-                                              PANEL_CMD_POLL_OP_READY, PANEL_ARG_IGNORED,
-                                              NULL, 0,  // No write data
-                                              rx_buffer, sizeof(rx_buffer));  // Transport handles optimization
-        if (ret != ESP_OK) {
-            return ret;
-        }
-
-        ready = (rx_buffer[0] != 0);
-        response_size = rx_buffer[1] | (rx_buffer[2] << 8);
-
-        ESP_LOGI(TAG, "Poll response: ready=%u, size=%u", ready, response_size);
+    // Poll for completion with 1 second timeout
+    uint8_t *result_data;
+    size_t result_size;
+    ret = host_comm_poll_async_result(comm, 1000, 10, 4, &result_data, &result_size);
+    if (ret != ESP_OK) {
+        return ret;
     }
 
-    if (!ready) {
-        ESP_LOGE(TAG, "Disc count operation timeout");
-        return ESP_ERR_TIMEOUT;
-    }
-
-    if (response_size != 4) {
-        ESP_LOGE(TAG, "Unexpected disc count response size: %u", response_size);
-        return ESP_ERR_INVALID_RESPONSE;
-    }
-
-    // Result is already in rx_buffer after the 3-byte status response (zero-copy!)
-    uint8_t *result = rx_buffer + 3;
-    *count = (result[0] << 24) | (result[1] << 16) | (result[2] << 8) | result[3];
+    // Parse the 4-byte big-endian disc count
+    *count = (result_data[0] << 24) | (result_data[1] << 16) | (result_data[2] << 8) | result_data[3];
     ESP_LOGI(TAG, "Disc count: %lu", *count);
 
-    return ret;
+    return ESP_OK;
 }
 
 esp_err_t host_comm_get_disc_list(host_comm_t *comm, disc_info_t *discs,
@@ -277,14 +184,14 @@ esp_err_t host_comm_select_disc(host_comm_t *comm, uint32_t disc_index) {
 
     ESP_LOGI(TAG, "Selecting disc: %lu", disc_index);
 
-    if (disc_index <= 255) {
+    if (disc_index <= 0xffff) {
         // Use argument byte for small indices
         return transport_two_phase_transaction(&comm->transport,
-                                               PANEL_CMD_SELECT_DISC, (uint8_t)disc_index,
+                                               PANEL_CMD_SELECT_DISC, (uint16_t)disc_index,
                                                NULL, 0,  // No write data
                                                NULL, 0);  // No read data
     } else {
-        // Use extended format for large indices - use static TX buffer (zero-copy!)
+        // Use extended format for large indices
         tx_buffer[0] = (disc_index >> 24) & 0xFF;
         tx_buffer[1] = (disc_index >> 16) & 0xFF;
         tx_buffer[2] = (disc_index >> 8) & 0xFF;
@@ -320,14 +227,14 @@ esp_err_t host_comm_get_disc_info(host_comm_t *comm, uint32_t disc_index,
 
     // Start the disc info operation
     esp_err_t ret;
-    if (disc_index <= 255) {
+    if (disc_index <= 0xffff) {
         // Use argument byte for small indices
         ret = transport_two_phase_transaction(&comm->transport,
-                                              PANEL_CMD_START_DISC_INFO, (uint8_t)disc_index,
+                                              PANEL_CMD_START_DISC_INFO, (uint16_t)disc_index,
                                               NULL, 0,  // No write data
                                               NULL, 0);  // No read data
     } else {
-        // Use extended format for large indices - use static TX buffer (zero-copy!)
+        // Use extended format for large indices
         tx_buffer[0] = (disc_index >> 24) & 0xFF;
         tx_buffer[1] = (disc_index >> 16) & 0xFF;
         tx_buffer[2] = (disc_index >> 8) & 0xFF;
@@ -343,43 +250,242 @@ esp_err_t host_comm_get_disc_info(host_comm_t *comm, uint32_t disc_index,
         return ret;
     }
 
-    // Poll until ready and get result in optimized single operation
-    bool ready = false;
-    uint16_t response_size = 0;
-    int retries = 10;
-
-    while (retries-- > 0 && !ready) {
-        vTaskDelay(pdMS_TO_TICKS(100));  // Wait 100ms between polls
-
-        ret = transport_two_phase_transaction(&comm->transport,
-                                              PANEL_CMD_POLL_OP_READY, PANEL_ARG_IGNORED,
-                                              NULL, 0,  // No write data
-                                              rx_buffer, sizeof(rx_buffer));  // Transport handles optimization
-        if (ret != ESP_OK) {
-            return ret;
-        }
-
-        ready = (rx_buffer[0] != 0);
-        response_size = rx_buffer[1] | (rx_buffer[2] << 8);
-
-        ESP_LOGI(TAG, "Poll response: ready=%u, size=%u", ready, response_size);
+    // Poll for completion with 1 second timeout
+    uint8_t *result_data;
+    size_t result_size;
+    ret = host_comm_poll_async_result(comm, 1000, 10, sizeof(disc_info_t), &result_data, &result_size);
+    if (ret != ESP_OK) {
+        return ret;
     }
 
-    if (!ready) {
-        ESP_LOGE(TAG, "Disc info operation timeout");
-        return ESP_ERR_TIMEOUT;
-    }
-
-    if (response_size != sizeof(disc_info_t)) {
-        ESP_LOGE(TAG, "Unexpected disc info response size: %u (expected %zu)", response_size, sizeof(disc_info_t));
-        return ESP_ERR_INVALID_RESPONSE;
-    }
-
-    // Result is already in rx_buffer after the 3-byte status response (zero-copy!)
-    disc_info_t *result = (disc_info_t*)(rx_buffer + 3);
-    memcpy(info, result, sizeof(disc_info_t));  // Copy to caller's buffer
+    // Copy result to caller's buffer
+    memcpy(info, result_data, sizeof(disc_info_t));
     ESP_LOGI(TAG, "Got disc info: %s", info->name);
 
     return ret;
+}
+
+esp_err_t host_comm_check_firmware(host_comm_t *comm) {
+    if (!comm || !comm->initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    ESP_LOGI(TAG, "Checking for firmware updates...");
+
+    // Send CHECK_FIRMWARE command (async operation)
+    return transport_two_phase_transaction(&comm->transport,
+                                           PANEL_CMD_CHECK_FIRMWARE, PANEL_ARG_IGNORED,
+                                           NULL, 0,  // No write data
+                                           NULL, 0); // No immediate read data
+}
+
+esp_err_t host_comm_get_firmware_info(host_comm_t *comm, panel_firmware_info_t *info) {
+    if (!comm || !comm->initialized || !info) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    ESP_LOGI(TAG, "Getting firmware info...");
+
+    // Poll for async result first
+    uint8_t *result_data;
+    size_t result_size;
+    esp_err_t ret = host_comm_poll_async_result(comm, 2000, 10, sizeof(panel_firmware_info_t), &result_data, &result_size);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to get firmware check result: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    // Copy result to caller's buffer
+    memcpy(info, result_data, sizeof(panel_firmware_info_t));
+
+    char sha256_hex[65];
+    for (int i = 0; i < 32; i++) {
+        snprintf(sha256_hex + (i * 2), sizeof(sha256_hex) - (i * 2), "%02x", info->sha256[i]);
+    }
+    ESP_LOGI(TAG, "Firmware info - Available: %d, Size: %lu, Version: 0x%08lx, SHA256: %s",
+             info->available, info->size, info->version, sha256_hex);
+
+    return ESP_OK;
+}
+
+esp_err_t host_comm_read_firmware_chunk(host_comm_t *comm, uint32_t offset,
+                                        uint8_t *buffer, size_t size) {
+    if (!comm || !comm->initialized || !buffer || size == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (size > PANEL_FIRMWARE_CHUNK_SIZE) {
+        ESP_LOGE(TAG, "Chunk size too large: %d > %d", size, PANEL_FIRMWARE_CHUNK_SIZE);
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    ESP_LOGD(TAG, "Reading firmware chunk at offset 0x%lx, size %d", offset, size);
+
+    // Prepare offset in tx_buffer (little endian)
+    tx_buffer[0] = offset & 0xFF;
+    tx_buffer[1] = (offset >> 8) & 0xFF;
+    tx_buffer[2] = (offset >> 16) & 0xFF;
+    tx_buffer[3] = (offset >> 24) & 0xFF;
+
+    // Send START_FIRMWARE_READ command with offset
+    esp_err_t ret = transport_two_phase_transaction(&comm->transport,
+                                                    PANEL_CMD_START_FIRMWARE_READ, PANEL_ARG_EXTENDED,
+                                                    tx_buffer, 4,  // Send offset
+                                                    NULL, 0);      // No immediate read data
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to send firmware read command: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    // Wait for chunk to be ready and read it
+    uint8_t *result_data;
+    size_t result_size;
+    ret = host_comm_poll_async_result(comm, 5000, 10, size, &result_data, &result_size);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to get firmware chunk: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    if (result_size != size) {
+        ESP_LOGE(TAG, "Firmware chunk size mismatch: expected %d, got %d", size, result_size);
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    // Copy chunk data to caller's buffer
+    memcpy(buffer, result_data, size);
+
+    ESP_LOGD(TAG, "Successfully read firmware chunk: %d bytes", size);
+    return ESP_OK;
+}
+
+esp_err_t host_comm_start_file_upload(host_comm_t *comm, const char *filename, uint32_t file_size, const uint8_t *expected_hash) {
+    if (!comm || !comm->initialized || !filename) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    ESP_LOGI(TAG, "Starting file upload: %s (%lu bytes)", filename, file_size);
+
+    // Prepare payload with file upload start structure
+    size_t filename_len = strlen(filename);
+    if (filename_len > (PANEL_PROTOCOL_MAX_PAYLOAD - sizeof(panel_file_upload_start_t) - 1)) {
+        ESP_LOGE(TAG, "Filename too long: %d bytes", filename_len);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    panel_file_upload_start_t *upload_start = (panel_file_upload_start_t *)tx_buffer;
+    upload_start->file_size = file_size;
+    upload_start->filename_len = filename_len;
+
+    // Copy SHA256 hash if provided
+    if (expected_hash) {
+        memcpy(upload_start->hash, expected_hash, 32);
+    } else {
+        memset(upload_start->hash, 0, 32); // Clear hash if not provided
+    }
+
+    // Copy filename after the structure (null-terminated)
+    memcpy(tx_buffer + sizeof(panel_file_upload_start_t), filename, filename_len);
+    tx_buffer[sizeof(panel_file_upload_start_t) + filename_len] = '\0';
+
+    size_t total_payload_size = sizeof(panel_file_upload_start_t) + filename_len + 1;
+
+    // Send START_FILE_UPLOAD command (async operation)
+    esp_err_t ret = transport_two_phase_transaction(&comm->transport,
+                                                   PANEL_CMD_START_FILE_UPLOAD, PANEL_ARG_EXTENDED,
+                                                   tx_buffer, total_payload_size,
+                                                   NULL, 0); // No immediate read data
+
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start file upload: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    ESP_LOGD(TAG, "File upload start command sent successfully");
+    return ESP_OK;
+}
+
+esp_err_t host_comm_write_file_chunk(host_comm_t *comm, const uint8_t *data, size_t size) {
+    if (!comm || !comm->initialized || !data || size == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (size > PANEL_FILE_CHUNK_SIZE) {
+        ESP_LOGE(TAG, "Chunk size too large: %d bytes (max %d)", size, PANEL_FILE_CHUNK_SIZE);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    /* ESP_LOGD(TAG, "Writing file chunk: %d bytes", size); */
+
+    // Copy chunk data to tx buffer
+    memcpy(tx_buffer, data, size);
+   
+    // Calc CRC16 of chunk 
+    uint16_t chunk_crc16 = ~esp_rom_crc16_be((uint16_t)~0xffff, data, size);
+
+    // Send WRITE_FILE_CHUNK command (async operation)
+    esp_err_t ret = transport_two_phase_transaction(&comm->transport,
+                                                   PANEL_CMD_WRITE_FILE_CHUNK, chunk_crc16,
+                                                   tx_buffer, size,
+                                                   NULL, 0); // No immediate read data
+
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to write file chunk: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    ret = host_comm_poll_async_result(comm, 1000, 1, 0, NULL, NULL);
+
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed async result after write: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    /* ESP_LOGD(TAG, "File chunk written successfully"); */
+    return ESP_OK;
+}
+
+esp_err_t host_comm_finish_file_upload(host_comm_t *comm, uint8_t *result_code) {
+    if (!comm || !comm->initialized) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    ESP_LOGI(TAG, "Finishing file upload");
+
+    // Send FINISH_FILE_UPLOAD command (async operation)
+    esp_err_t ret = transport_two_phase_transaction(&comm->transport,
+                                                   PANEL_CMD_FINISH_FILE_UPLOAD, PANEL_ARG_IGNORED,
+                                                   NULL, 0,  // No write data
+                                                   NULL, 0); // No immediate read data
+
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to send finish file upload command: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    // Poll for async result (1 byte result code)
+    uint8_t *result_data;
+    size_t result_size;
+    ret = host_comm_poll_async_result(comm, 5000, 10, 1, &result_data, &result_size);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to get file upload result: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    if (result_size != 1) {
+        ESP_LOGE(TAG, "Upload result size mismatch: expected 1, got %d", result_size);
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    if (result_code) {
+        *result_code = result_data[0];
+    }
+
+    if (result_data[0] == PANEL_UPLOAD_OK) {
+        ESP_LOGI(TAG, "File upload completed successfully");
+    } else {
+        ESP_LOGE(TAG, "File upload failed with code: 0x%02X", result_data[0]);
+    }
+
+    return ESP_OK;
 }
 

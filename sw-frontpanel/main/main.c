@@ -600,13 +600,14 @@ void app_main(void) {
     // Connect web server to interface context
     web_server_set_interface_context(&web_server, &interface_ctx);
 
-    // Auto-start web server if in AP mode
-    if (wifi_manager_get_state(&wifi_manager) == WIFI_MANAGER_STATE_AP_MODE) {
-        ESP_LOGI(TAG, "Starting web server for AP configuration portal");
-        ret = web_server_start(&web_server);
-        if (ret != ESP_OK) {
-            ESP_LOGW(TAG, "Failed to start web server: %s", esp_err_to_name(ret));
-        }
+    // Start web server (will work on any interface that becomes available)
+    ESP_LOGI(TAG, "Starting web server");
+    ret = web_server_start(&web_server);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to start web server: %s", esp_err_to_name(ret));
+    } else {
+        ESP_LOGI(TAG, "Web server started successfully");
+        ESP_LOGI(TAG, "Access web interface at: http://picoide.local (when WiFi connects)");
     }
 
     // Switch to main menu

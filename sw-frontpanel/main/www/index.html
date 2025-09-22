@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>PicoIDE Front Panel</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; background-color: #f0f0f0; }
+        .container { max-width: 800px; margin: 0 auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        .header { text-align: center; margin-bottom: 30px; }
+        .section { margin-bottom: 30px; padding: 15px; border: 1px solid #ddd; border-radius: 5px; }
+        .section h3 { margin-top: 0; color: #333; }
+        button { background-color: #007bff; color: white; border: none; padding: 10px 20px; border-radius: 4px; cursor: pointer; margin: 5px; }
+        button:hover { background-color: #0056b3; }
+        button:disabled { background-color: #6c757d; cursor: not-allowed; }
+        .disc-list { margin: 10px 0; }
+        .disc-item { display: flex; justify-content: space-between; align-items: center; padding: 8px; border: 1px solid #ddd; margin: 2px 0; border-radius: 3px; }
+        .status { padding: 10px; background-color: #e9ecef; border-radius: 4px; margin: 10px 0; }
+        .error { background-color: #f8d7da; color: #721c24; }
+        .success { background-color: #d4edda; color: #155724; }
+        .wifi-list { margin: 10px 0; }
+        .wifi-item { display: flex; justify-content: space-between; align-items: center; padding: 8px; border: 1px solid #ddd; margin: 2px 0; border-radius: 3px; }
+        .signal-strength { font-size: 12px; color: #666; }
+        input[type="text"], input[type="password"] { width: 200px; padding: 5px; margin: 5px; }
+        .refresh-btn { background-color: #28a745; }
+        .refresh-btn:hover { background-color: #1e7e34; }
+        .update-btn { background-color: #fd7e14; }
+        .update-btn:hover { background-color: #e8590c; }
+        .progress-bar { width: 100%; height: 20px; background-color: #e9ecef; border-radius: 10px; overflow: hidden; margin: 10px 0; }
+        .progress-fill { height: 100%; background-color: #007bff; transition: width 0.3s ease; }
+        .version-info { font-family: 'Courier New', monospace; font-size: 14px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🐦 PicoIDE</h1>
+            <p style="color: #666; margin: 5px 0;">Available at <strong>http://picoide.local</strong></p>
+            <div id="connection-status" class="status">Connecting...</div>
+        </div>
+
+        <div class="section">
+            <h3>💿 Disc Management</h3>
+            <div id="current-disc" class="status">Current Disc: <span id="current-disc-name">Loading...</span></div>
+            <button onclick="refreshDiscs()" class="refresh-btn">🔄 Refresh Disc List</button>
+            <button onclick="ejectDisc()">⏏️ Eject Current Disc</button>
+            <div id="disc-list" class="disc-list">
+                <div>Loading disc list...</div>
+            </div>
+        </div>
+
+        <div class="section">
+            <h3>📶 WiFi Configuration</h3>
+            <div id="wifi-status" class="status">WiFi Status: <span id="wifi-state">Unknown</span></div>
+            <button onclick="scanWiFi()" class="refresh-btn">🔍 Scan Networks</button>
+            <div id="wifi-list" class="wifi-list">
+                <div>Click "Scan Networks" to see available WiFi networks</div>
+            </div>
+            <div style="margin-top: 15px;">
+                <h4>Manual Connection</h4>
+                <input type="text" id="manual-ssid" placeholder="Network Name (SSID)" />
+                <input type="password" id="manual-password" placeholder="Password" />
+                <button onclick="connectToWiFi(document.getElementById('manual-ssid').value, document.getElementById('manual-password').value)">🔗 Connect</button>
+            </div>
+        </div>
+
+        <div class="section">
+            <h3>🔄 Firmware Update</h3>
+            <div id="firmware-status" class="status">
+                <div class="version-info">
+                    <strong>Current Version:</strong> <span id="current-version">Loading...</span><br>
+                    <strong>Available Version:</strong> <span id="available-version">Checking...</span>
+                </div>
+            </div>
+            <button onclick="checkFirmwareUpdate()" class="refresh-btn">🔍 Check for Updates</button>
+            <button onclick="startFirmwareUpdate()" class="update-btn" id="update-btn" disabled>📥 Update Firmware</button>
+            <div id="update-progress" class="progress-bar" style="display: none;">
+                <div id="update-progress-fill" class="progress-fill" style="width: 0%;"></div>
+            </div>
+            <div id="update-status" class="status" style="display: none;"></div>
+        </div>
+
+        <div class="section">
+            <h3>📁 File Upload to SD Card</h3>
+            <div class="status">
+                <input type="hidden" id="file-size" name="fileSize" value="" />
+                <input type="file" id="file-input" style="margin: 10px 0;" />
+                <button onclick="uploadFile()" id="upload-btn">📤 Upload to SD Card</button>
+                <button onclick="cancelUpload()" id="cancel-upload-btn" style="display: none; background-color: #dc3545;">❌ Cancel Upload</button>
+            </div>
+            <div id="upload-info" style="display: none; margin-top: 15px;">
+                <div class="status">
+                    <strong>File:</strong> <span id="upload-filename">-</span><br>
+                    <strong>Size:</strong> <span id="upload-filesize">-</span><br>
+                    <strong>Speed:</strong> <span id="upload-speed">-</span><br>
+                    <strong>ETA:</strong> <span id="upload-eta">-</span>
+                </div>
+                <div class="progress-bar">
+                    <div id="upload-progress-fill" class="progress-fill" style="width: 0%;"></div>
+                </div>
+                <div id="upload-percent" style="text-align: center; font-weight: bold;">0%</div>
+            </div>
+            <div id="upload-status" class="status" style="display: none; margin-top: 10px;"></div>
+        </div>
+
+        <div class="section">
+            <h3>ℹ️ System Information</h3>
+            <div id="system-info" class="status">Loading system information...</div>
+        </div>
+    </div>
+
+    <script src="/sha256.min.js"></script>
+    <script src="/app.js"></script>
+</body>
+</html>

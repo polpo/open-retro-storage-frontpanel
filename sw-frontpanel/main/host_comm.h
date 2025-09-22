@@ -5,6 +5,7 @@
 #include <stdbool.h>
 #include "esp_err.h"
 #include "transport.h"
+#include "panel_protocol_defs.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -13,26 +14,12 @@ extern "C" {
 #define HOST_COMM_MAX_DATA_SIZE 256
 #define HOST_COMM_TIMEOUT_MS 1000
 
-// Command definitions for host communication protocol
+// Status codes for disc operations
 typedef enum {
-    HOST_CMD_GET_STATUS = 0x01,
-    HOST_CMD_GET_DISC_COUNT = 0x02,
-    HOST_CMD_GET_DISC_LIST = 0x03,
-    HOST_CMD_SELECT_DISC = 0x04,
-    HOST_CMD_EJECT_DISC = 0x05,
-    HOST_CMD_GET_DISC_INFO = 0x06,
-    HOST_CMD_SET_CONFIG = 0x10,
-    HOST_CMD_GET_CONFIG = 0x11,
-    HOST_CMD_RESET = 0xFF
-} host_command_t;
-
-// Status codes
-typedef enum {
-    HOST_STATUS_NO_CMD = 0x00,      // No command pending
-    HOST_STATUS_BUSY = 0x01,        // Command processing
-    HOST_STATUS_READY = 0x02,       // Response ready
-    HOST_STATUS_ERROR = 0x03,       // Command failed
-    HOST_STATUS_INVALID_CMD = 0x04  // Invalid command
+    HOST_STATUS_NO_DISC = 0x00,     // No disc loaded
+    HOST_STATUS_DISC_LOADED = 0x01, // Disc loaded and ready
+    HOST_STATUS_LOADING = 0x02,     // Disc loading in progress
+    HOST_STATUS_ERROR = 0x03        // Disc error
 } host_status_t;
 
 // Disc information structure
@@ -58,11 +45,19 @@ esp_err_t host_comm_get_disc_list(host_comm_t *comm, disc_info_t *discs,
                                   size_t max_discs, size_t *disc_count);
 esp_err_t host_comm_select_disc(host_comm_t *comm, uint32_t disc_index);
 esp_err_t host_comm_eject_disc(host_comm_t *comm);
-esp_err_t host_comm_get_disc_info(host_comm_t *comm, uint32_t disc_index, 
+esp_err_t host_comm_get_disc_info(host_comm_t *comm, uint32_t disc_index,
                                    disc_info_t *info);
-esp_err_t host_comm_send_command(host_comm_t *comm, host_command_t cmd, 
-                                 const uint8_t *data, size_t data_len,
-                                 uint8_t *response, size_t *response_len);
+
+// Firmware update functions
+esp_err_t host_comm_check_firmware(host_comm_t *comm);
+esp_err_t host_comm_get_firmware_info(host_comm_t *comm, panel_firmware_info_t *info);
+esp_err_t host_comm_read_firmware_chunk(host_comm_t *comm, uint32_t offset,
+                                        uint8_t *buffer, size_t size);
+
+// File upload functions
+esp_err_t host_comm_start_file_upload(host_comm_t *comm, const char *filename, uint32_t file_size, const uint8_t *expected_hash);
+esp_err_t host_comm_write_file_chunk(host_comm_t *comm, const uint8_t *data, size_t size);
+esp_err_t host_comm_finish_file_upload(host_comm_t *comm, uint8_t *result_code);
 
 const char* host_comm_get_transport_name(host_comm_t *comm);
 

@@ -14,11 +14,13 @@ typedef struct transport_handle transport_handle_t;
 typedef struct {
     esp_err_t (*init)(transport_handle_t *handle);
     esp_err_t (*deinit)(transport_handle_t *handle);
-    esp_err_t (*write)(transport_handle_t *handle, const uint8_t *data, size_t len);
-    esp_err_t (*read)(transport_handle_t *handle, uint8_t *data, size_t len);
-    esp_err_t (*write_then_read)(transport_handle_t *handle, 
-                                  const uint8_t *write_data, size_t write_len,
-                                  uint8_t *read_data, size_t read_len);
+    esp_err_t (*two_phase_transaction)(transport_handle_t *handle, 
+               uint8_t command, uint16_t argument,
+               const uint8_t *write_data, size_t write_len,
+               uint8_t *read_data, size_t read_len);
+    esp_err_t (*poll_async_status)(transport_handle_t *handle,
+                                   bool *ready, uint16_t *response_size,
+                                   uint8_t *result_data, size_t max_result_size);
     const char* (*get_name)(void);
 } transport_ops_t;
 
@@ -44,29 +46,14 @@ struct transport_handle {
 // Public API functions
 esp_err_t transport_init(transport_handle_t *handle, const transport_config_t *config);
 esp_err_t transport_deinit(transport_handle_t *handle);
-esp_err_t transport_write(transport_handle_t *handle, const uint8_t *data, size_t len);
-esp_err_t transport_read(transport_handle_t *handle, uint8_t *data, size_t len);
-esp_err_t transport_write_then_read(transport_handle_t *handle,
-                                     const uint8_t *write_data, size_t write_len,
-                                     uint8_t *read_data, size_t read_len);
-const char* transport_get_name(transport_handle_t *handle);
-
-// New protocol functions for two-phase transactions
 esp_err_t transport_two_phase_transaction(transport_handle_t *handle,
-                                          uint8_t command, uint8_t argument,
+                                          uint8_t command, uint16_t argument,
                                           const uint8_t *write_data, size_t write_len,
                                           uint8_t *read_data, size_t read_len);
-
-// Transport-specific implementations
-esp_err_t transport_spi_two_phase_transaction(transport_handle_t *handle,
-                                              uint8_t command, uint8_t argument,
-                                              const uint8_t *write_data, size_t write_len,
-                                              uint8_t *read_data, size_t read_len);
-
-esp_err_t transport_i2c_two_phase_transaction(transport_handle_t *handle,
-                                              uint8_t command, uint8_t argument,
-                                              const uint8_t *write_data, size_t write_len,
-                                              uint8_t *read_data, size_t read_len);
+esp_err_t transport_poll_async_status(transport_handle_t *handle,
+                                      bool *ready, uint16_t *response_size,
+                                      uint8_t *result_data, size_t max_result_size);
+const char* transport_get_name(transport_handle_t *handle);
 
 // Factory function to get the appropriate transport implementation
 const transport_ops_t* transport_get_ops(void);

@@ -7,11 +7,14 @@
 #include "cJSON.h"
 #include "interface_common.h"
 #include "json_stream.h"
+#include "ota_manager.h"
 
 static const char *TAG = "web_server";
 
 // Forward declarations
 static esp_err_t index_handler(httpd_req_t *req);
+static esp_err_t js_handler(httpd_req_t *req);
+static esp_err_t sha256_js_handler(httpd_req_t *req);
 static esp_err_t api_status_handler(httpd_req_t *req);
 static esp_err_t api_discs_handler(httpd_req_t *req);
 static esp_err_t api_select_disc_handler(httpd_req_t *req);
@@ -19,247 +22,60 @@ static esp_err_t api_eject_disc_handler(httpd_req_t *req);
 static esp_err_t api_wifi_scan_handler(httpd_req_t *req);
 static esp_err_t api_wifi_connect_handler(httpd_req_t *req);
 static esp_err_t api_wifi_status_handler(httpd_req_t *req);
+static esp_err_t api_firmware_check_handler(httpd_req_t *req);
+static esp_err_t api_firmware_update_handler(httpd_req_t *req);
+static esp_err_t api_firmware_status_handler(httpd_req_t *req);
+static esp_err_t api_upload_handler(httpd_req_t *req);
 
 // Global server instance for handlers
 static web_server_t *g_server = NULL;
 
-// HTML content for the web interface
-static const char index_html[] = R"HTML(
-<!DOCTYPE html>
-<html>
-<head>
-    <title>PicoIDE Front Panel</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <style>
-        body { font-family: Arial, sans-serif; margin: 20px; background-color: #f0f0f0; }
-        .container { max-width: 800px; margin: 0 auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
-        .header { text-align: center; margin-bottom: 30px; }
-        .section { margin-bottom: 30px; padding: 15px; border: 1px solid #ddd; border-radius: 5px; }
-        .section h3 { margin-top: 0; color: #333; }
-        button { background-color: #007bff; color: white; border: none; padding: 10px 20px; border-radius: 4px; cursor: pointer; margin: 5px; }
-        button:hover { background-color: #0056b3; }
-        button:disabled { background-color: #6c757d; cursor: not-allowed; }
-        .disc-list { margin: 10px 0; }
-        .disc-item { display: flex; justify-content: space-between; align-items: center; padding: 8px; border: 1px solid #ddd; margin: 2px 0; border-radius: 3px; }
-        .status { padding: 10px; background-color: #e9ecef; border-radius: 4px; margin: 10px 0; }
-        .error { background-color: #f8d7da; color: #721c24; }
-        .success { background-color: #d4edda; color: #155724; }
-        .wifi-list { margin: 10px 0; }
-        .wifi-item { display: flex; justify-content: space-between; align-items: center; padding: 8px; border: 1px solid #ddd; margin: 2px 0; border-radius: 3px; }
-        .signal-strength { font-size: 12px; color: #666; }
-        input[type="text"], input[type="password"] { width: 200px; padding: 5px; margin: 5px; }
-        .refresh-btn { background-color: #28a745; }
-        .refresh-btn:hover { background-color: #1e7e34; }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="header">
-            <h1>🐦 PicoIDE</h1>
-            <p style="color: #666; margin: 5px 0;">Available at <strong>http://picoide.local</strong></p>
-            <div id="connection-status" class="status">Connecting...</div>
-        </div>
+// Global OTA manager instance
+static ota_manager_t g_ota_manager;
 
-        <div class="section">
-            <h3>💿 Disc Management</h3>
-            <div id="current-disc" class="status">Current Disc: <span id="current-disc-name">Loading...</span></div>
-            <button onclick="refreshDiscs()" class="refresh-btn">🔄 Refresh Disc List</button>
-            <button onclick="ejectDisc()">⏏️ Eject Current Disc</button>
-            <div id="disc-list" class="disc-list">
-                <div>Loading disc list...</div>
-            </div>
-        </div>
+// Embedded file content (these symbols will be created by CMakeLists.txt)
+extern const uint8_t index_html_start[] asm("_binary_index_html_start");
+extern const uint8_t index_html_end[] asm("_binary_index_html_end");
+extern const uint8_t app_js_start[] asm("_binary_app_js_start");
+extern const uint8_t app_js_end[] asm("_binary_app_js_end");
+extern const uint8_t sha256_min_js_start[] asm("_binary_sha256_min_js_start");
+extern const uint8_t sha256_min_js_end[] asm("_binary_sha256_min_js_end");
 
-        <div class="section">
-            <h3>📶 WiFi Configuration</h3>
-            <div id="wifi-status" class="status">WiFi Status: <span id="wifi-state">Unknown</span></div>
-            <button onclick="scanWiFi()" class="refresh-btn">🔍 Scan Networks</button>
-            <div id="wifi-list" class="wifi-list">
-                <div>Click "Scan Networks" to see available WiFi networks</div>
-            </div>
-            <div style="margin-top: 15px;">
-                <h4>Manual Connection</h4>
-                <input type="text" id="manual-ssid" placeholder="Network Name (SSID)" />
-                <input type="password" id="manual-password" placeholder="Password" />
-                <button onclick="connectToWiFi(document.getElementById('manual-ssid').value, document.getElementById('manual-password').value)">🔗 Connect</button>
-            </div>
-        </div>
-
-        <div class="section">
-            <h3>ℹ️ System Information</h3>
-            <div id="system-info" class="status">Loading system information...</div>
-        </div>
-    </div>
-
-    <script>
-        let currentDisc = "No disc loaded";
-
-        // API helper function
-        async function apiCall(endpoint, options = {}) {
-            try {
-                const response = await fetch('/api' + endpoint, {
-                    headers: {
-                        'Content-Type': 'application/json',
-                        ...options.headers
-                    },
-                    ...options
-                });
-
-                if (!response.ok) {
-                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-                }
-
-                return await response.json();
-            } catch (error) {
-                console.error('API call failed:', error);
-                showStatus('error', `API Error: ${error.message}`);
-                return null;
-            }
-        }
-
-        function showStatus(type, message) {
-            const statusDiv = document.getElementById('connection-status');
-            statusDiv.className = `status ${type}`;
-            statusDiv.textContent = message;
-        }
-
-        async function loadSystemInfo() {
-            const data = await apiCall('/status');
-            if (data) {
-                document.getElementById('system-info').innerHTML = `
-                    <strong>Firmware:</strong> ${data.firmware || 'v0.1.0'}<br>
-                    <strong>Hardware:</strong> ${data.hardware || 'ESP32-C3'}<br>
-                    <strong>Host Communication:</strong> ${data.transport || 'Unknown'} - ${data.host_connected ? 'Connected' : 'Disconnected'}<br>
-                    <strong>Free Memory:</strong> ${data.free_memory || 'Unknown'} bytes<br>
-                    <strong>Uptime:</strong> ${data.uptime || 'Unknown'} seconds
-                `;
-                showStatus('success', 'Connected to front panel');
-            } else {
-                showStatus('error', 'Failed to connect to front panel');
-            }
-        }
-
-        async function refreshDiscs() {
-            const data = await apiCall('/discs');
-            if (data) {
-                const listDiv = document.getElementById('disc-list');
-                if (data.discs && data.discs.length > 0) {
-                    listDiv.innerHTML = data.discs.map((disc, index) =>
-                        `<div class="disc-item">
-                            <span><strong>${disc.name}</strong> (${(disc.size / 1000000).toFixed(1)} MB, ${disc.tracks} tracks)</span>
-                            <button onclick="selectDisc(${index})">📀 Select</button>
-                        </div>`
-                    ).join('');
-                } else {
-                    listDiv.innerHTML = '<div>No discs available</div>';
-                }
-
-                // Update current disc status
-                document.getElementById('current-disc-name').textContent = data.current_disc || 'No disc loaded';
-            }
-        }
-
-        async function selectDisc(index) {
-            const data = await apiCall('/select_disc', {
-                method: 'POST',
-                body: JSON.stringify({ disc_index: index })
-            });
-            if (data && data.success) {
-                await refreshDiscs();
-                showStatus('success', `Selected disc ${index}`);
-            }
-        }
-
-        async function ejectDisc() {
-            const data = await apiCall('/eject_disc', { method: 'POST' });
-            if (data && data.success) {
-                await refreshDiscs();
-                showStatus('success', 'Disc ejected');
-            }
-        }
-
-        async function loadWiFiStatus() {
-            const data = await apiCall('/wifi/status');
-            if (data) {
-                document.getElementById('wifi-state').textContent = data.state || 'Unknown';
-                if (data.ip_address) {
-                    document.getElementById('wifi-status').innerHTML = `WiFi Status: <strong>${data.state}</strong> (IP: ${data.ip_address})`;
-                }
-            }
-        }
-
-        async function scanWiFi() {
-            showStatus('', 'Scanning WiFi networks...');
-            const data = await apiCall('/wifi/scan');
-            if (data && data.networks) {
-                const listDiv = document.getElementById('wifi-list');
-                if (data.networks.length > 0) {
-                    listDiv.innerHTML = data.networks.map(network =>
-                        `<div class="wifi-item">
-                            <span><strong>${network.ssid}</strong> <span class="signal-strength">(${network.rssi} dBm, ${network.auth_mode})</span></span>
-                            <button onclick="connectToWiFi('${network.ssid}', null, ${!network.has_password})">🔗 Connect</button>
-                        </div>`
-                    ).join('');
-                } else {
-                    listDiv.innerHTML = '<div>No networks found</div>';
-                }
-                showStatus('success', `Found ${data.networks.length} networks`);
-            }
-        }
-
-        async function connectToWiFi(ssid, password, isOpen = false) {
-            if (!isOpen && !password) {
-                password = prompt(`Enter password for ${ssid}:`);
-                if (!password) return;
-            }
-
-            showStatus('', `Connecting to ${ssid}...`);
-            const data = await apiCall('/wifi/connect', {
-                method: 'POST',
-                body: JSON.stringify({ ssid: ssid, password: password || '' })
-            });
-
-            if (data) {
-                if (data.success) {
-                    showStatus('success', `Connected to ${ssid}`);
-                    setTimeout(loadWiFiStatus, 2000);
-                } else {
-                    showStatus('error', `Failed to connect: ${data.error || 'Unknown error'}`);
-                }
-            }
-        }
-
-        // Initialize the page
-        document.addEventListener('DOMContentLoaded', function() {
-            loadSystemInfo();
-            refreshDiscs();
-            loadWiFiStatus();
-
-            // Refresh data every 10 seconds
-            setInterval(() => {
-                loadWiFiStatus();
-            }, 10000);
-        });
-    </script>
-</body>
-</html>
-)HTML";
 
 // URI handlers
 static const httpd_uri_t uri_handlers[] = {
     { .uri = "/", .method = HTTP_GET, .handler = index_handler, .user_ctx = NULL },
+    { .uri = "/app.js", .method = HTTP_GET, .handler = js_handler, .user_ctx = NULL },
+    { .uri = "/sha256.min.js", .method = HTTP_GET, .handler = sha256_js_handler, .user_ctx = NULL },
     { .uri = "/api/status", .method = HTTP_GET, .handler = api_status_handler, .user_ctx = NULL },
     { .uri = "/api/discs", .method = HTTP_GET, .handler = api_discs_handler, .user_ctx = NULL },
     { .uri = "/api/select_disc", .method = HTTP_POST, .handler = api_select_disc_handler, .user_ctx = NULL },
     { .uri = "/api/eject_disc", .method = HTTP_POST, .handler = api_eject_disc_handler, .user_ctx = NULL },
     { .uri = "/api/wifi/scan", .method = HTTP_GET, .handler = api_wifi_scan_handler, .user_ctx = NULL },
     { .uri = "/api/wifi/connect", .method = HTTP_POST, .handler = api_wifi_connect_handler, .user_ctx = NULL },
-    { .uri = "/api/wifi/status", .method = HTTP_GET, .handler = api_wifi_status_handler, .user_ctx = NULL }
+    { .uri = "/api/wifi/status", .method = HTTP_GET, .handler = api_wifi_status_handler, .user_ctx = NULL },
+    { .uri = "/api/firmware/check", .method = HTTP_GET, .handler = api_firmware_check_handler, .user_ctx = NULL },
+    { .uri = "/api/firmware/update", .method = HTTP_POST, .handler = api_firmware_update_handler, .user_ctx = NULL },
+    { .uri = "/api/firmware/status", .method = HTTP_GET, .handler = api_firmware_status_handler, .user_ctx = NULL },
+    { .uri = "/api/upload", .method = HTTP_POST, .handler = api_upload_handler, .user_ctx = NULL }
 };
 
 static esp_err_t index_handler(httpd_req_t *req) {
     httpd_resp_set_type(req, "text/html; charset=utf-8");
-    return httpd_resp_send(req, index_html, HTTPD_RESP_USE_STRLEN);
+    const size_t index_html_size = index_html_end - index_html_start;
+    return httpd_resp_send(req, (const char *)index_html_start, index_html_size);
+}
+
+static esp_err_t js_handler(httpd_req_t *req) {
+    httpd_resp_set_type(req, "application/javascript; charset=utf-8");
+    const size_t app_js_size = app_js_end - app_js_start;
+    return httpd_resp_send(req, (const char *)app_js_start, app_js_size);
+}
+
+static esp_err_t sha256_js_handler(httpd_req_t *req) {
+    httpd_resp_set_type(req, "application/javascript; charset=utf-8");
+    const size_t sha256_min_js_size = sha256_min_js_end - sha256_min_js_start;
+    return httpd_resp_send(req, (const char *)sha256_min_js_start, sha256_min_js_size);
 }
 
 static esp_err_t api_status_handler(httpd_req_t *req) {
@@ -866,4 +682,473 @@ uint16_t web_server_get_port(web_server_t *server) {
         return 0;
     }
     return server->port;
+}
+
+static esp_err_t api_firmware_check_handler(httpd_req_t *req) {
+    httpd_resp_set_type(req, "application/json");
+
+    JsonStreamWriter json(req);
+    esp_err_t ret = json.beginObject();
+    if (ret != ESP_OK) return ret;
+
+    // Initialize OTA manager if needed
+    if (g_server && g_server->interface_ctx && g_server->interface_ctx->host_comm) {
+        ota_manager_init(&g_ota_manager, g_server->interface_ctx->host_comm);
+
+        // Get current version
+        uint32_t current_version = ota_manager_get_current_version();
+        ret = json.write("current_version", current_version);
+        if (ret != ESP_OK) return ret;
+
+        // Check for update
+        bool update_available = false;
+        esp_err_t check_ret = ota_manager_check_update(&g_ota_manager, &update_available);
+
+        if (check_ret == ESP_OK) {
+            ret = json.write("update_available", update_available ? 1 : 0);
+            if (ret != ESP_OK) return ret;
+
+            if (update_available) {
+                ret = json.write("available_version", g_ota_manager.firmware_info.version);
+                if (ret != ESP_OK) return ret;
+
+                ret = json.write("firmware_size", g_ota_manager.firmware_info.size);
+                if (ret != ESP_OK) return ret;
+            }
+        } else {
+            ret = json.write("update_available", 0);
+            if (ret != ESP_OK) return ret;
+
+            ret = json.write("error", esp_err_to_name(check_ret));
+            if (ret != ESP_OK) return ret;
+        }
+    } else {
+        ret = json.write("current_version", 0x00010000);
+        if (ret != ESP_OK) return ret;
+
+        ret = json.write("update_available", 0);
+        if (ret != ESP_OK) return ret;
+
+        ret = json.write("error", "Interface not available");
+        if (ret != ESP_OK) return ret;
+    }
+
+    ret = json.endObject();
+    if (ret != ESP_OK) return ret;
+
+    return json.finalize();
+}
+
+static esp_err_t api_firmware_update_handler(httpd_req_t *req) {
+    httpd_resp_set_type(req, "application/json");
+
+    JsonStreamWriter json(req);
+    esp_err_t ret = json.beginObject();
+    if (ret != ESP_OK) return ret;
+
+    bool success = false;
+    if (g_server && g_server->interface_ctx && g_server->interface_ctx->host_comm) {
+        esp_err_t update_ret = ota_manager_start_update(&g_ota_manager);
+        success = (update_ret == ESP_OK);
+
+        if (!success) {
+            ret = json.write("error", esp_err_to_name(update_ret));
+            if (ret != ESP_OK) return ret;
+        }
+    } else {
+        ret = json.write("error", "Interface not available");
+        if (ret != ESP_OK) return ret;
+    }
+
+    ret = json.write("success", success ? 1 : 0);
+    if (ret != ESP_OK) return ret;
+
+    ret = json.endObject();
+    if (ret != ESP_OK) return ret;
+
+    return json.finalize();
+}
+
+static esp_err_t api_firmware_status_handler(httpd_req_t *req) {
+    httpd_resp_set_type(req, "application/json");
+
+    JsonStreamWriter json(req);
+    esp_err_t ret = json.beginObject();
+    if (ret != ESP_OK) return ret;
+
+    // Process OTA manager to update state
+    ota_manager_process(&g_ota_manager);
+
+    // Get current state
+    ota_state_t state = ota_manager_get_state(&g_ota_manager);
+    uint8_t progress = ota_manager_get_progress(&g_ota_manager);
+
+    // Convert state to string
+    const char* state_str;
+    switch (state) {
+        case OTA_STATE_IDLE:
+            state_str = "idle";
+            break;
+        case OTA_STATE_CHECKING:
+            state_str = "checking";
+            break;
+        case OTA_STATE_DOWNLOADING:
+            state_str = "downloading";
+            break;
+        case OTA_STATE_VERIFYING:
+            state_str = "verifying";
+            break;
+        case OTA_STATE_APPLYING:
+            state_str = "applying";
+            break;
+        case OTA_STATE_SUCCESS:
+            state_str = "success";
+            break;
+        case OTA_STATE_ERROR:
+            state_str = "error";
+            break;
+        default:
+            state_str = "unknown";
+    }
+
+    ret = json.write("state", state_str);
+    if (ret != ESP_OK) return ret;
+
+    ret = json.write("progress", progress);
+    if (ret != ESP_OK) return ret;
+
+    if (state == OTA_STATE_ERROR) {
+        ret = json.write("error", esp_err_to_name(g_ota_manager.last_error));
+        if (ret != ESP_OK) return ret;
+    }
+
+    ret = json.endObject();
+    if (ret != ESP_OK) return ret;
+
+    return json.finalize();
+}
+
+// File upload state
+typedef struct {
+    char filename[256];
+    char target_path[512];
+    uint32_t total_size;
+    uint32_t bytes_received;
+    bool upload_started;
+    bool upload_finished;
+} upload_state_t;
+
+static upload_state_t g_upload_state = {
+    .filename = {0},
+    .target_path = {0},
+    .total_size = 0,
+    .bytes_received = 0,
+    .upload_started = false,
+    .upload_finished = false
+};
+
+static inline char* strnmem(const void* haystack, const char* needle, size_t haystacklen) {
+    return (char *)memmem(haystack, haystacklen, needle, strlen(needle));
+}
+
+static esp_err_t api_upload_handler(httpd_req_t *req) {
+    ESP_LOGI(TAG, "Upload request received");
+
+    // Reset upload state
+    memset(&g_upload_state, 0, sizeof(g_upload_state));
+
+    // Get content length
+    size_t content_length = req->content_len;
+    if (content_length == 0) {
+        ESP_LOGE(TAG, "No content in upload request");
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_send(req, "No content", 10);
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "Upload content length: %zu bytes", content_length);
+
+    // Allocate buffer for reading chunks (match protocol chunk size)
+    const size_t chunk_size = PANEL_FILE_CHUNK_SIZE;
+    char *chunk_buffer = (char*)malloc(chunk_size);
+    if (!chunk_buffer) {
+        ESP_LOGE(TAG, "Failed to allocate upload buffer");
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_send(req, "Memory allocation failed", 23);
+        return ESP_FAIL;
+    }
+
+    // Variables for parsing multipart data
+    bool found_filename = false;
+    bool found_file_size = false;
+    bool found_file_hash = false;
+    uint32_t actual_file_size = 0;
+    uint8_t expected_hash[32] = {0}; // SHA256 binary (32 bytes)
+    uint32_t file_data_start = 0;
+
+    // Read first chunk to parse headers
+    int received = httpd_req_recv(req, chunk_buffer, chunk_size);
+    if (received <= 0) {
+        ESP_LOGE(TAG, "Failed to receive upload data");
+        free(chunk_buffer);
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_send(req, "Failed to receive data", 22);
+        return ESP_FAIL;
+    }
+
+    // Parse multipart data - look for fileSize field first
+    char *filesize_field = strnmem(chunk_buffer, "name=\"fileSize\"", received);
+    if (filesize_field) {
+        // Find the value after the field header
+        char *value_start = strnmem(filesize_field, "\r\n\r\n", received - (filesize_field - chunk_buffer));
+        if (value_start) {
+            value_start += 4; // Skip \r\n\r\n
+            char *value_end = strnmem(value_start, "\r\n--", received - (value_start - chunk_buffer));
+            if (value_end) {
+                char size_str[32] = {0};
+                size_t size_len = value_end - value_start;
+                if (size_len < sizeof(size_str)) {
+                    strncpy(size_str, value_start, size_len);
+                    actual_file_size = strtoul(size_str, NULL, 10);
+                    found_file_size = true;
+                    ESP_LOGI(TAG, "Found file size: %lu bytes", actual_file_size);
+                }
+            }
+        }
+    }
+
+    // Parse fileHash field (binary data)
+    char *filehash_field = strnmem(chunk_buffer, "name=\"fileHash\"", received);
+    if (filehash_field) {
+        // Find the value after the field header (look for double CRLF)
+        char *value_start = strnmem(filehash_field, "\r\n\r\n", received - (filehash_field - chunk_buffer));
+        if (value_start) {
+            value_start += 4; // Skip \r\n\r\n
+            char *value_end = strnmem(value_start, "\r\n--", received - (value_start - chunk_buffer));
+            if (value_end) {
+                size_t hash_len = value_end - value_start;
+                if (hash_len == 32) { // SHA256 is exactly 32 bytes
+                    memcpy(expected_hash, value_start, 32);
+                    found_file_hash = true;
+                    ESP_LOGI(TAG, "Found file hash (binary): %02x%02x%02x%02x...",
+                            expected_hash[0], expected_hash[1], expected_hash[2], expected_hash[3]);
+                }
+            }
+        }
+    }
+
+    // Look for filename in the file data field
+    char *filename_start = NULL;
+    if (filehash_field) {
+        char *filedata_field = strnmem(filehash_field, "name=\"fileData\"", received - (filehash_field - chunk_buffer));
+        if (!filedata_field) {
+            ESP_LOGE(TAG, "Huh??? %u %u %u %u\n", received, filehash_field, chunk_buffer, received - (filehash_field - chunk_buffer));
+            ESP_LOG_BUFFER_CHAR(TAG, filehash_field, received - (filehash_field - chunk_buffer));
+        }
+        filename_start = strnmem(filedata_field, "filename=\"", received - (filedata_field - chunk_buffer));
+    }
+    if (filename_start) {
+        filename_start += 10; // Skip 'filename="'
+        char *filename_end = strchr(filename_start, '"');
+        if (filename_end) {
+            size_t filename_len = filename_end - filename_start;
+            if (filename_len < sizeof(g_upload_state.filename)) {
+                strncpy(g_upload_state.filename, filename_start, filename_len);
+                g_upload_state.filename[filename_len] = '\0';
+                found_filename = true;
+                ESP_LOGI(TAG, "Found filename: %s", g_upload_state.filename);
+            }
+        }
+    }
+
+    if (!found_filename) {
+        ESP_LOGE(TAG, "Could not parse filename from upload");
+        free(chunk_buffer);
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_send(req, "Invalid multipart data - missing filename", 40);
+        return ESP_FAIL;
+    }
+
+    if (!found_file_size) {
+        ESP_LOGE(TAG, "Could not parse file size from upload");
+        free(chunk_buffer);
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_send(req, "Invalid multipart data - missing file size", 41);
+        return ESP_FAIL;
+    }
+
+    if (!found_file_hash) {
+        ESP_LOGE(TAG, "Could not parse file hash from upload");
+        free(chunk_buffer);
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_send(req, "Invalid multipart data - missing file hash", 41);
+        return ESP_FAIL;
+    }
+
+    // Set target path
+    snprintf(g_upload_state.target_path, sizeof(g_upload_state.target_path),
+             "/uploads/%s", g_upload_state.filename);
+
+    // Look for start of file data (after the file field headers)
+    if (filename_start) {
+        // Now search for \r\n\r\n after filename_start
+        char *data_start = strnmem(filename_start, "\r\n\r\n", received - (filename_start - chunk_buffer));
+        if (data_start) {
+            data_start += 4; // Skip \r\n\r\n
+            file_data_start = data_start - chunk_buffer;
+            ESP_LOGI(TAG, "File data starts at offset: %lu", file_data_start);
+        }
+        // ESP_LOGI(TAG, "buffer starting at data_start: %c\n", tmp);
+    }
+
+    // Start file upload to RP2350
+    if (!g_server || !g_server->interface_ctx->host_comm) {
+        ESP_LOGE(TAG, "Host communication not available");
+        free(chunk_buffer);
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        httpd_resp_send(req, "Host not connected", 18);
+        return ESP_FAIL;
+    }
+
+    host_comm_t *host_comm = g_server->interface_ctx->host_comm;
+
+    // Start file upload on RP2350 with actual file size and hash
+    esp_err_t ret = host_comm_start_file_upload(host_comm, g_upload_state.filename, actual_file_size, expected_hash);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start file upload: %s", esp_err_to_name(ret));
+        free(chunk_buffer);
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_send(req, "Failed to start upload", 21);
+        return ESP_FAIL;
+    }
+
+    // Process file data from the first chunk
+    if (file_data_start > 0 && file_data_start < received) {
+        size_t first_chunk_data_size = received - file_data_start;
+        ESP_LOGI(TAG, "Processing first chunk data: %d bytes", first_chunk_data_size);
+
+        // Since we're now reading in 256-byte chunks, this should always fit
+        // But let's be safe and check anyway
+        if (first_chunk_data_size > PANEL_FILE_CHUNK_SIZE) {
+            ESP_LOGE(TAG, "First chunk data too large: %d bytes (max %d)",
+                     first_chunk_data_size, PANEL_FILE_CHUNK_SIZE);
+            free(chunk_buffer);
+            httpd_resp_set_status(req, "400 Bad Request");
+            httpd_resp_send(req, "Multipart header too large", 26);
+            return ESP_FAIL;
+        }
+
+        ret = host_comm_write_file_chunk(host_comm,
+                                        (uint8_t*)(chunk_buffer + file_data_start),
+                                        first_chunk_data_size);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to write first chunk: %s", esp_err_to_name(ret));
+            free(chunk_buffer);
+            httpd_resp_set_status(req, "500 Internal Server Error");
+            httpd_resp_send(req, "Upload failed", 13);
+            return ESP_FAIL;
+        }
+
+        g_upload_state.bytes_received += first_chunk_data_size;
+    }
+
+    // Calculate how much file data remains after first chunk
+    size_t file_data_sent = (file_data_start > 0 && file_data_start < received) ?
+                           (received - file_data_start) : 0;
+    size_t remaining = actual_file_size - file_data_sent;
+    while (remaining > 0) {
+        size_t to_read = (remaining > chunk_size) ? chunk_size : remaining;
+
+        int chunk_received = httpd_req_recv(req, chunk_buffer, to_read);
+        if (chunk_received <= 0) {
+            ESP_LOGE(TAG, "Failed to receive chunk data");
+            free(chunk_buffer);
+            httpd_resp_set_status(req, "400 Bad Request");
+            httpd_resp_send(req, "Failed to receive data", 22);
+            return ESP_FAIL;
+        }
+
+        // Write chunk to RP2350
+        ret = host_comm_write_file_chunk(host_comm, (uint8_t*)chunk_buffer, chunk_received);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to write chunk: %s", esp_err_to_name(ret));
+            free(chunk_buffer);
+            httpd_resp_set_status(req, "500 Internal Server Error");
+            httpd_resp_send(req, "Upload failed", 13);
+            return ESP_FAIL;
+        }
+
+        g_upload_state.bytes_received += chunk_received;
+
+        remaining -= chunk_received;
+
+        ESP_LOGD(TAG, "Uploaded %lu / %lu bytes", g_upload_state.bytes_received, actual_file_size);
+    }
+
+    // Finish the upload
+    uint8_t upload_result;
+    ret = host_comm_finish_file_upload(host_comm, &upload_result);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to finish upload: %s", esp_err_to_name(ret));
+        free(chunk_buffer);
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_send(req, "Upload failed", 13);
+        return ESP_FAIL;
+    }
+
+    free(chunk_buffer);
+
+    // Check upload result
+    if (upload_result != PANEL_UPLOAD_OK) {
+        ESP_LOGE(TAG, "Upload failed on RP2350 with code: 0x%02X", upload_result);
+        httpd_resp_set_status(req, "500 Internal Server Error");
+
+        const char* error_msg;
+        switch (upload_result) {
+            case PANEL_UPLOAD_ERROR_DISK:
+                error_msg = "Disk error";
+                break;
+            case PANEL_UPLOAD_ERROR_SPACE:
+                error_msg = "Insufficient space";
+                break;
+            case PANEL_UPLOAD_ERROR_WRITE:
+                error_msg = "Write error";
+                break;
+            case PANEL_UPLOAD_ERROR_PATH:
+                error_msg = "Invalid path";
+                break;
+            default:
+                error_msg = "Unknown error";
+        }
+
+        httpd_resp_send(req, error_msg, strlen(error_msg));
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "File upload completed successfully: %s (%lu bytes)",
+             g_upload_state.filename, g_upload_state.bytes_received);
+
+    // Send success response
+    httpd_resp_set_type(req, "application/json");
+
+    JsonStreamWriter json(req);
+    ret = json.beginObject();
+    if (ret != ESP_OK) return ret;
+
+    ret = json.write("success", true);
+    if (ret != ESP_OK) return ret;
+
+    ret = json.write("filename", g_upload_state.filename);
+    if (ret != ESP_OK) return ret;
+
+    ret = json.write("path", g_upload_state.target_path);
+    if (ret != ESP_OK) return ret;
+
+    ret = json.write("size", (int)g_upload_state.bytes_received);
+    if (ret != ESP_OK) return ret;
+
+    ret = json.endObject();
+    if (ret != ESP_OK) return ret;
+
+    return json.finalize();
 }

@@ -79,97 +79,13 @@ static esp_err_t transport_i2c_deinit(transport_handle_t *handle) {
     return ESP_OK;
 }
 
-static esp_err_t transport_i2c_write(transport_handle_t *handle, const uint8_t *data, size_t len) {
-    if (!handle || !handle->priv || !data) {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    transport_i2c_priv_t *priv = (transport_i2c_priv_t *)handle->priv;
-    
-    i2c_cmd_handle_t cmd = i2c_cmd_link_create();
-    if (!cmd) {
-        return ESP_ERR_NO_MEM;
-    }
-
-    i2c_master_start(cmd);
-    i2c_master_write_byte(cmd, (handle->config.device_addr << 1) | I2C_MASTER_WRITE, true);
-    i2c_master_write(cmd, data, len, true);
-    i2c_master_stop(cmd);
-
-    esp_err_t ret = i2c_master_cmd_begin(priv->port, cmd, pdMS_TO_TICKS(handle->config.timeout_ms));
-    i2c_cmd_link_delete(cmd);
-
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "I2C write failed: %s", esp_err_to_name(ret));
-    }
-
-    return ret;
-}
-
-static esp_err_t transport_i2c_read(transport_handle_t *handle, uint8_t *data, size_t len) {
-    if (!handle || !handle->priv || !data) {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    transport_i2c_priv_t *priv = (transport_i2c_priv_t *)handle->priv;
-    
-    i2c_cmd_handle_t cmd = i2c_cmd_link_create();
-    if (!cmd) {
-        return ESP_ERR_NO_MEM;
-    }
-
-    i2c_master_start(cmd);
-    i2c_master_write_byte(cmd, (handle->config.device_addr << 1) | I2C_MASTER_READ, true);
-    if (len > 1) {
-        i2c_master_read(cmd, data, len - 1, I2C_MASTER_ACK);
-    }
-    i2c_master_read_byte(cmd, data + len - 1, I2C_MASTER_NACK);
-    i2c_master_stop(cmd);
-
-    esp_err_t ret = i2c_master_cmd_begin(priv->port, cmd, pdMS_TO_TICKS(handle->config.timeout_ms));
-    i2c_cmd_link_delete(cmd);
-
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "I2C read failed: %s", esp_err_to_name(ret));
-    }
-
-    return ret;
-}
-
-static esp_err_t transport_i2c_write_then_read(transport_handle_t *handle,
-                                                const uint8_t *write_data, size_t write_len,
-                                                uint8_t *read_data, size_t read_len) {
-    if (!handle || !handle->priv) {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    // For I2C, we perform write and read as separate transactions
-    esp_err_t ret = ESP_OK;
-    
-    if (write_data && write_len > 0) {
-        ret = transport_i2c_write(handle, write_data, write_len);
-        if (ret != ESP_OK) {
-            return ret;
-        }
-        
-        // Small delay between write and read
-        vTaskDelay(pdMS_TO_TICKS(1));
-    }
-    
-    if (read_data && read_len > 0) {
-        ret = transport_i2c_read(handle, read_data, read_len);
-    }
-    
-    return ret;
-}
-
 static const char* transport_i2c_get_name(void) {
     return "I2C";
 }
 
 // High-level two-phase transaction function (matching SPI interface)
 esp_err_t transport_i2c_two_phase_transaction(transport_handle_t *handle,
-                                              uint8_t command, uint8_t argument,
+                                              uint8_t command, uint16_t argument,
                                               const uint8_t *write_data, size_t write_len,
                                               uint8_t *read_data, size_t read_len) {
     if (!handle || !handle->priv) {
@@ -313,8 +229,7 @@ esp_err_t transport_i2c_two_phase_transaction(transport_handle_t *handle,
 const transport_ops_t transport_i2c_ops = {
     .init = transport_i2c_init,
     .deinit = transport_i2c_deinit,
-    .write = transport_i2c_write,
-    .read = transport_i2c_read,
-    .write_then_read = transport_i2c_write_then_read,
+    .two_phase_transaction = transport_i2c_two_phase_transaction,
+    .poll_async_status = NULL, // FIXME implement
     .get_name = transport_i2c_get_name,
 };
