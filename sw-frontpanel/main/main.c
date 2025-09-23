@@ -18,6 +18,7 @@
 #include "web_server.h"
 #include "interface_common.h"
 #include "esp_netif_ip_addr.h"
+#include "ota_manager.h"
 
 static const char *TAG = "main";
 
@@ -32,6 +33,7 @@ static wifi_manager_t wifi_manager;
 static web_server_t web_server;
 static interface_context_t interface_ctx;
 static screen_type_t current_screen = SCREEN_SPLASH;
+static ota_manager_t ota_manager;
 
 // Dynamic disc list - populated from I2C communication
 static bool disc_list_loaded = false;
@@ -318,6 +320,11 @@ static void handle_button_event(button_event_t *event) {
             }
             break;
 
+        case SCREEN_FIRMWARE_UPDATE:
+            // During firmware update, ignore all button presses
+            ESP_LOGI(TAG, "Firmware update in progress - ignoring button input");
+            break;
+
         default:
             break;
     }
@@ -380,6 +387,118 @@ static esp_err_t refresh_disc_list(void) {
     
     disc_list_loaded = true;
     ESP_LOGI(TAG, "Disc list refreshed successfully");
+    return ESP_OK;
+}
+
+// Firmware update task
+static void firmware_update_task(void *pvParameters) {
+    ota_manager_t *ota = (ota_manager_t *)pvParameters;
+
+    while (1) {
+        esp_err_t ret = ota_manager_process(ota);
+        if (ret != ESP_OK && ret != ESP_ERR_NOT_FINISHED) {
+            ESP_LOGE(TAG, "OTA process error: %s", esp_err_to_name(ret));
+            break;
+        }
+
+        // Update display based on OTA state
+        ota_state_t state = ota_manager_get_state(ota);
+        uint8_t progress = ota_manager_get_progress(ota);
+
+        const char *status_msg = "Initializing...";
+        switch (state) {
+            case OTA_STATE_CHECKING:
+                status_msg = "Checking for updates...";
+                break;
+            case OTA_STATE_DOWNLOADING:
+                status_msg = "Downloading firmware...";
+                break;
+            case OTA_STATE_VERIFYING:
+                status_msg = "Verifying firmware...";
+                break;
+            case OTA_STATE_APPLYING:
+                status_msg = "Applying update...";
+                break;
+            case OTA_STATE_SUCCESS:
+                status_msg = "Update complete!";
+                break;
+            case OTA_STATE_ERROR:
+                status_msg = "Update failed!";
+                break;
+            default:
+                break;
+        }
+
+        // Update OLED display
+        if (state != OTA_STATE_IDLE) {
+            ui_draw_firmware_update(&display, status_msg, progress);
+        }
+
+        // Exit on completion or error
+        if (state == OTA_STATE_SUCCESS) {
+            ESP_LOGI(TAG, "Firmware update successful, restarting in 3 seconds...");
+            vTaskDelay(pdMS_TO_TICKS(3000));
+            esp_restart();
+        } else if (state == OTA_STATE_ERROR) {
+            ESP_LOGE(TAG, "Firmware update failed");
+            vTaskDelay(pdMS_TO_TICKS(3000));
+            break;
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+
+    // Clean up and return to main menu
+    current_screen = SCREEN_MAIN_MENU;
+    ui_draw_menu(&display, &main_menu);
+    vTaskDelete(NULL);
+}
+
+// Check and perform firmware update if available
+static esp_err_t check_and_update_firmware(void) {
+    ESP_LOGI(TAG, "Checking for firmware updates...");
+
+    // Show checking status on OLED
+    ui_draw_firmware_update(&display, "Checking for updates...", 0);
+
+    bool update_available = false;
+    esp_err_t ret = ota_manager_check_update(&ota_manager, &update_available);
+
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to check for updates: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    if (!update_available) {
+        ESP_LOGI(TAG, "No firmware update available");
+        return ESP_OK;
+    }
+
+    ESP_LOGI(TAG, "Firmware update available! Version: %lu", ota_manager.firmware_info.version);
+
+    // Show update available status
+    char status_msg[64];
+    snprintf(status_msg, sizeof(status_msg), "Update v%lu available", ota_manager.firmware_info.version);
+    ui_draw_firmware_update(&display, status_msg, 0);
+    vTaskDelay(pdMS_TO_TICKS(2000));
+
+    // Start the update
+    ret = ota_manager_start_update(&ota_manager);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start update: %s", esp_err_to_name(ret));
+        ui_draw_firmware_update(&display, "Update failed to start!", 0);
+        vTaskDelay(pdMS_TO_TICKS(3000));
+        return ret;
+    }
+
+    // Create task to handle the update process
+    current_screen = SCREEN_FIRMWARE_UPDATE;
+    xTaskCreate(firmware_update_task, "firmware_update", 8192, &ota_manager, 10, NULL);
+
+    while (ota_manager_get_progress(&ota_manager) != 100) {
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+
     return ESP_OK;
 }
 
@@ -553,9 +672,23 @@ void app_main(void) {
         ESP_LOGW(TAG, "Failed to initialize host comm: %s", esp_err_to_name(ret));
         // Continue anyway - host might not be connected
     } else {
-        ESP_LOGI(TAG, "Host comm initialized successfully using %s", 
+        ESP_LOGI(TAG, "Host comm initialized successfully using %s",
                  host_comm_get_transport_name(&host_comm));
-        
+
+        // Initialize OTA manager
+        ret = ota_manager_init(&ota_manager, &host_comm);
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to initialize OTA manager: %s", esp_err_to_name(ret));
+        } else {
+            // Check for firmware updates before proceeding
+            ret = check_and_update_firmware();
+            if (ret == ESP_OK) {
+                // If update was started, the task will handle everything
+                // and restart the device when done
+                ESP_LOGI(TAG, "Firmware check completed");
+            }
+        }
+
         // Manually fetch disc list at startup
         ESP_LOGI(TAG, "Fetching disc list at startup...");
         esp_err_t disc_ret = refresh_disc_list();

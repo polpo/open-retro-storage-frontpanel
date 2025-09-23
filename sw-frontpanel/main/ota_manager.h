@@ -77,8 +77,6 @@ esp_err_t ota_manager_mark_valid(void);
 // Get current firmware version
 uint32_t ota_manager_get_current_version(void);
 
-// Set current firmware version (save to NVS)
-esp_err_t ota_manager_set_current_version(uint32_t version);
 
 #ifdef __cplusplus
 }

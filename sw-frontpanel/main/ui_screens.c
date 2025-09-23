@@ -195,8 +195,43 @@ esp_err_t ui_draw_info_screen(display_manager_t *display, const char *title, con
         
         if (*p == '\n') p++;
     }
-    
+
     display_manager_request_update(display);
-    
+
+    return ESP_OK;
+}
+
+esp_err_t ui_draw_firmware_update(display_manager_t *display, const char *status, uint8_t progress) {
+    if (!display || !status) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    display_manager_clear(display);
+
+    // Draw title
+    display_manager_set_font(display, u8g2_font_amstrad_cpc_extended_8f);
+    display_manager_draw_text(display, 10, 12, "Firmware Update");
+
+    // Draw status text
+    display_manager_set_font(display, u8g2_font_6x10_tr);
+    display_manager_draw_text(display, 5, 28, status);
+
+    // Draw progress bar frame
+    display_manager_draw_frame(display, 10, 40, 108, 12);
+
+    // Draw progress bar fill
+    if (progress > 0) {
+        uint8_t fill_width = (progress * 104) / 100;
+        display_manager_set_draw_color(display, 1);
+        display_manager_draw_box(display, 12, 42, fill_width, 8);
+    }
+
+    // Draw progress percentage
+    char progress_text[16];
+    snprintf(progress_text, sizeof(progress_text), "%d%%", progress);
+    display_manager_draw_text(display, 54, 62, progress_text);
+
+    display_manager_update(display);
+
     return ESP_OK;
 }

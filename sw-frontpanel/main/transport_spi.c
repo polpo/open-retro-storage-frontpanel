@@ -2,7 +2,7 @@
 #include "panel_protocol_defs.h"
 #include "driver/spi_master.h"
 #include "driver/gpio.h"
-#define LOG_LOCAL_LEVEL ESP_LOG_NONE
+/* #define LOG_LOCAL_LEVEL ESP_LOG_NONE */
 #include "esp_log.h"
 #include <string.h>
 
@@ -290,6 +290,7 @@ esp_err_t transport_spi_poll_async_status(transport_handle_t *handle,
 
     *ready = (status.ready_flag == PANEL_ASYNC_READY);
     *response_size = status.response_size;
+    ESP_LOGI(TAG, "Ready: %u", status.ready_flag);
 
     // If ready and result data requested, read the result data separately
     if (*ready && *response_size > 0 && result_data && max_result_size > 0) {
