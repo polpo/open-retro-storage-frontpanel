@@ -1,11 +1,4 @@
 dependencies:
-  bblanchon/arduinojson:
-    component_hash: b1c2f0b0bc26969af19809cee80b220fb882481d59cc75f8e79ebceecdc69f06
-    dependencies: []
-    source:
-      registry_url: https://components.espressif.com/
-      type: service
-    version: 7.4.2
   espressif/led_strip:
     component_hash: 223998f10cae6d81f2ad2dd3c1103c2221be298c708e37917482b0153f3ec64e
     dependencies:
@@ -30,20 +23,10 @@ dependencies:
     source:
       type: idf
     version: 5.5.0
-  u8g2:
-    component_hash: b7e1cf1bb2efb19875115d5f275439966de5ab30d9dfbf3d2a12f3aa3481a137
-    dependencies: []
-    source:
-      git: https://github.com/olikraus/u8g2.git
-      path: .
-      type: git
-    version: a549a13b13b5fd568111557c1dd7ca3d06fbe21a
 direct_dependencies:
-- bblanchon/arduinojson
 - espressif/led_strip
 - espressif/mdns
 - idf
-- u8g2
-manifest_hash: 1272b2ce69baea91ac64860d99523ffcd637c52cef5507c865af1fa4e1922b83
+manifest_hash: f073107ab1beea7f524a092670c26f47d03d52dc636b5c8628cc8d5ad2dd6414
 target: esp32c3
 version: 2.0.0
