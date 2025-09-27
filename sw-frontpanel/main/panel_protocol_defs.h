@@ -32,6 +32,7 @@
 #define PANEL_CMD_POLL_OP_READY        0x81  // Check if async operation ready (3 bytes: ready, size low, size high)
 #define PANEL_CMD_GET_DISC_STATUS      0x83  // Get disc loaded status (1 byte response)
 #define PANEL_CMD_GET_FIRMWARE_INFO    0x84  // Get firmware info after CHECK_FIRMWARE (16 bytes)
+#define PANEL_CMD_GET_PLAYBACK_STATUS  0x85  // Get current playback status (panel_playback_status_t)
 
 // Status codes for POLL_STATUS
 #define PANEL_STATUS_OK                0x00  // System OK
@@ -103,3 +104,31 @@ typedef struct __attribute__((packed)) {
 #define PANEL_UPLOAD_ERROR_SPACE   0x02
 #define PANEL_UPLOAD_ERROR_WRITE   0x03
 #define PANEL_UPLOAD_ERROR_PATH    0x04
+
+// Disc type codes for playback status
+#define PANEL_DISC_TYPE_NO_DISC    0x00
+#define PANEL_DISC_TYPE_DATA       0x01
+#define PANEL_DISC_TYPE_AUDIO      0x02
+#define PANEL_DISC_TYPE_MIXED      0x03
+
+// Audio playback status codes (matches CDRomAudioStatus)
+#define PANEL_AUDIO_STATUS_DATA_ONLY          0x00
+#define PANEL_AUDIO_STATUS_PLAYING            0x11
+#define PANEL_AUDIO_STATUS_PAUSED             0x12
+#define PANEL_AUDIO_STATUS_PLAYING_COMPLETED  0x13
+#define PANEL_AUDIO_STATUS_PLAY_ERROR         0x14
+#define PANEL_AUDIO_STATUS_NONE               0x15
+
+// Playback status structure (76 bytes)
+typedef struct __attribute__((packed)) {
+    uint8_t disc_inserted;    // 1 if disc loaded, 0 if not
+    uint8_t disc_type;        // PANEL_DISC_TYPE_*
+    uint8_t is_playing;       // 1 if currently playing audio, 0 if not
+    uint8_t audio_status;     // PANEL_AUDIO_STATUS_*
+    uint8_t current_track;    // Current track number (1-99)
+    uint8_t track_position_m; // Track position: minutes
+    uint8_t track_position_s; // Track position: seconds
+    uint8_t track_position_f; // Track position: frames
+    char disc_name[64];       // Current disc name (null-terminated)
+    uint8_t reserved[4];      // Reserved for future use
+} panel_playback_status_t;

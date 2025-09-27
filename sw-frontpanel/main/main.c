@@ -40,9 +40,11 @@ static ota_manager_t ota_manager;
 // Dynamic disc list - populated from I2C communication
 static bool disc_list_loaded = false;
 static char current_disc_name[64] = "No disc loaded";
+static playback_status_t current_playback_status = {0};
 
 // Forward declarations
 static esp_err_t refresh_disc_list(void);
+static void refresh_playback_status(void);
 
 static menu_item_t main_menu_items[] = {
     {.text = "Select Disc", .action = MENU_ACTION_CUSTOM, .selectable = true},
@@ -82,6 +84,19 @@ static void handle_button_event(button_event_t *event) {
     
     // Handle navigation based on current screen
     switch (current_screen) {
+        case SCREEN_STATUS:
+            switch (event->button_id) {
+                case 1: // Right button (East) - Go to main menu
+                    if (event->type == BUTTON_EVENT_CLICK) {
+                        current_screen = SCREEN_MAIN_MENU;
+                        ui_draw_menu(&display, &main_menu);
+                    }
+                    break;
+                default:
+                    break;
+            }
+            break;
+
         case SCREEN_MAIN_MENU:
             switch (event->button_id) {
                 case 0: // Up button (North)
@@ -134,7 +149,11 @@ static void handle_button_event(button_event_t *event) {
                     }
                     break;
                 case 3: // Back button (West)
-                    // Already at main menu - no action needed
+                    if (event->type == BUTTON_EVENT_CLICK) {
+                        current_screen = SCREEN_STATUS;
+                        refresh_playback_status();
+                        ui_draw_status_screen(&display, current_disc_name, &current_playback_status);
+                    }
                     break;
             }
             break;
@@ -344,6 +363,53 @@ static void display_update_task(void *pvParameters) {
             display_manager_update(&display);
         }
         vTaskDelay(pdMS_TO_TICKS(16)); // 60 FPS to match display manager rate
+    }
+}
+
+// Status screen refresh task
+static void status_refresh_task(void *pvParameters) {
+    while (1) {
+        // Only refresh if on status screen
+        if (current_screen == SCREEN_STATUS && host_comm.initialized) {
+            refresh_playback_status();
+            ui_draw_status_screen(&display, current_disc_name, &current_playback_status);
+        }
+        vTaskDelay(pdMS_TO_TICKS(1000)); // Refresh every second
+    }
+}
+
+// Function to refresh playback status from host
+static void refresh_playback_status(void) {
+    if (!host_comm.initialized) {
+        memset(&current_playback_status, 0, sizeof(current_playback_status));
+        strncpy(current_disc_name, "No disc loaded", sizeof(current_disc_name) - 1);
+        current_disc_name[sizeof(current_disc_name) - 1] = '\0';
+        return;
+    }
+
+    esp_err_t ret = host_comm_get_playback_status(&host_comm, &current_playback_status);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to get playback status: %s", esp_err_to_name(ret));
+        memset(&current_playback_status, 0, sizeof(current_playback_status));
+        strncpy(current_disc_name, "No disc loaded", sizeof(current_disc_name) - 1);
+        current_disc_name[sizeof(current_disc_name) - 1] = '\0';
+    } else if (!current_playback_status.disc_inserted) {
+        ESP_LOGI(TAG, "Playback status: No disc inserted");
+        strncpy(current_disc_name, "No disc loaded", sizeof(current_disc_name) - 1);
+        current_disc_name[sizeof(current_disc_name) - 1] = '\0';
+    } else {
+        // Copy disc name from playback status
+        strncpy(current_disc_name, current_playback_status.disc_name, sizeof(current_disc_name) - 1);
+        current_disc_name[sizeof(current_disc_name) - 1] = '\0';
+
+        ESP_LOGI(TAG, "Playback status: disc='%s' type=%d playing=%d audio_status=0x%02x track=%d pos=%02d:%02d",
+                current_disc_name,
+                current_playback_status.disc_type,
+                current_playback_status.is_playing,
+                current_playback_status.audio_status,
+                current_playback_status.current_track,
+                current_playback_status.track_position_m,
+                current_playback_status.track_position_s);
     }
 }
 
@@ -579,6 +645,7 @@ void app_main(void) {
     }
 
     xTaskCreate(display_update_task, "display_update", 4096, NULL, 5, NULL);
+    xTaskCreate(status_refresh_task, "status_refresh", 4096, NULL, 4, NULL);
 
     ui_show_splash_screen(&display);
     ui_update_splash_progress(&display, "Init display...", 10);
@@ -789,9 +856,9 @@ void app_main(void) {
 
     led_stop_pulse();
 
-    current_screen = SCREEN_MAIN_MENU;
-    ui_draw_menu(&display, &main_menu);
-    ui_draw_status_bar(&display, current_disc_name);
+    current_screen = SCREEN_STATUS;
+    refresh_playback_status();
+    ui_draw_status_screen(&display, current_disc_name, &current_playback_status);
 
     int initial_act_state = gpio_get_level(PIN_ACT_IN);
     led_set_color(initial_act_state ? COLOR_ORANGE : COLOR_CYAN);

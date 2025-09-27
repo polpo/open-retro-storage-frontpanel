@@ -5,12 +5,14 @@
 #include "esp_err.h"
 #include "display_manager.h"
 #include "menu_system.h"
+#include "host_comm.h"
 
 // Logo bitmap (converted from the existing picoide array)
 extern const uint8_t picoide_logo[];
 
 typedef enum {
     SCREEN_SPLASH,
+    SCREEN_STATUS,
     SCREEN_MAIN_MENU,
     SCREEN_DISC_LIST,
     SCREEN_SETTINGS,
@@ -27,5 +29,7 @@ esp_err_t ui_draw_disc_list(display_manager_t *display, menu_t *menu);
 esp_err_t ui_draw_status_bar(display_manager_t *display, const char *status);
 esp_err_t ui_draw_info_screen(display_manager_t *display, const char *title, const char *info);
 esp_err_t ui_draw_firmware_update(display_manager_t *display, const char *status, uint8_t progress);
+esp_err_t ui_draw_status_screen(display_manager_t *display, const char *disc_name,
+                               const playback_status_t *playback_status);
 
 #endif

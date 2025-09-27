@@ -37,7 +37,7 @@ esp_err_t display_manager_draw_box(display_manager_t *display, uint8_t x, uint8_
 esp_err_t display_manager_draw_frame(display_manager_t *display, uint8_t x, uint8_t y, uint8_t width, uint8_t height);
 esp_err_t display_manager_wake(display_manager_t *display);
 
-#define DISPLAY_DIM_TIMEOUT_MS (30 * 1000)    // 30 seconds
-#define DISPLAY_OFF_TIMEOUT_MS (120 * 1000)   // 2 minutes
+#define DISPLAY_DIM_TIMEOUT_MS (120 * 1000)    // 2 minutes
+#define DISPLAY_OFF_TIMEOUT_MS (600 * 1000)   // 10 minutes
 
 #endif

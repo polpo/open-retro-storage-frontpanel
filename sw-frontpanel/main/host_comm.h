@@ -29,6 +29,20 @@ typedef struct {
     uint32_t tracks;
 } disc_info_t;
 
+// Playback status structure (must match panel_playback_status_t)
+typedef struct {
+    uint8_t disc_inserted;
+    uint8_t disc_type;
+    uint8_t is_playing;
+    uint8_t audio_status;
+    uint8_t current_track;
+    uint8_t track_position_m;
+    uint8_t track_position_s;
+    uint8_t track_position_f;
+    char disc_name[64];
+    uint8_t reserved[4];
+} playback_status_t;
+
 // Host communication handle
 typedef struct {
     transport_handle_t transport;
@@ -47,6 +61,7 @@ esp_err_t host_comm_select_disc(host_comm_t *comm, uint32_t disc_index);
 esp_err_t host_comm_eject_disc(host_comm_t *comm);
 esp_err_t host_comm_get_disc_info(host_comm_t *comm, uint32_t disc_index,
                                    disc_info_t *info);
+esp_err_t host_comm_get_playback_status(host_comm_t *comm, playback_status_t *status);
 
 // Firmware update functions
 esp_err_t host_comm_check_firmware(host_comm_t *comm);

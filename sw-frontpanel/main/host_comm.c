@@ -265,6 +265,25 @@ esp_err_t host_comm_get_disc_info(host_comm_t *comm, uint32_t disc_index,
     return ret;
 }
 
+esp_err_t host_comm_get_playback_status(host_comm_t *comm, playback_status_t *status) {
+    if (!comm || !status) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    ESP_LOGD(TAG, "Getting playback status");
+
+    esp_err_t ret = transport_two_phase_transaction(&comm->transport,
+                                                    PANEL_CMD_GET_PLAYBACK_STATUS, PANEL_ARG_IGNORED,
+                                                    NULL, 0,
+                                                    (uint8_t*)status, sizeof(playback_status_t));
+    if (ret == ESP_OK) {
+        ESP_LOGD(TAG, "Playback status: disc_inserted=%d, type=%d, playing=%d, track=%d",
+                status->disc_inserted, status->disc_type, status->is_playing, status->current_track);
+    }
+
+    return ret;
+}
+
 esp_err_t host_comm_check_firmware(host_comm_t *comm) {
     if (!comm || !comm->initialized) {
         return ESP_ERR_INVALID_STATE;

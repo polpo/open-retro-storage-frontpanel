@@ -243,3 +243,90 @@ esp_err_t ui_draw_firmware_update(display_manager_t *display, const char *status
 
     return ESP_OK;
 }
+
+esp_err_t ui_draw_status_screen(display_manager_t *display, const char *disc_name,
+                               const playback_status_t *playback_status) {
+    if (!display) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    display_manager_clear(display);
+
+    // Draw title bar with disc name or "No Disc Loaded"
+    const char *title = (disc_name && disc_name[0]) ? disc_name : "No Disc Loaded";
+    display_manager_set_font(display, u8g2_font_amstrad_cpc_extended_8f);
+    display_manager_draw_box(display, 0, 0, 128, 10);
+    display_manager_set_draw_color(display, 0);
+    display_manager_draw_text(display, 2, 8, title);
+    display_manager_set_draw_color(display, 1);
+
+    // If no disc inserted, just show title bar
+    if (!playback_status || !playback_status->disc_inserted) {
+        display_manager_request_update(display);
+        return ESP_OK;
+    }
+
+    int y = 20;
+    display_manager_set_font(display, u8g2_font_6x10_tf);
+
+    // Draw disc type
+    const char *type_str = "Unknown";
+    switch (playback_status->disc_type) {
+        case PANEL_DISC_TYPE_DATA:  type_str = "Data"; break;
+        case PANEL_DISC_TYPE_AUDIO: type_str = "Audio"; break;
+        case PANEL_DISC_TYPE_MIXED: type_str = "Mixed"; break;
+    }
+    char type_line[32];
+    snprintf(type_line, sizeof(type_line), "Type: %s", type_str);
+    display_manager_draw_text(display, 2, y, type_line);
+    y += 12;
+
+    // For audio/mixed discs, show playback status
+    if (playback_status->disc_type == PANEL_DISC_TYPE_AUDIO ||
+        playback_status->disc_type == PANEL_DISC_TYPE_MIXED) {
+
+        const char *status_icon = " ";
+        const char *status_str = "Stopped";
+
+        switch (playback_status->audio_status) {
+            case PANEL_AUDIO_STATUS_PLAYING:
+                status_icon = "\x10";  // Play icon
+                status_str = "Playing";
+                break;
+            case PANEL_AUDIO_STATUS_PAUSED:
+                status_icon = "\x11";  // Pause icon
+                status_str = "Paused";
+                break;
+            case PANEL_AUDIO_STATUS_PLAYING_COMPLETED:
+                status_str = "Completed";
+                break;
+            case PANEL_AUDIO_STATUS_NONE:
+                status_str = "Stopped";
+                break;
+        }
+
+        char status_line[32];
+        snprintf(status_line, sizeof(status_line), "%s %s", status_icon, status_str);
+        display_manager_draw_text(display, 2, y, status_line);
+        y += 12;
+
+        // Show track and time if playing or paused
+        if (playback_status->is_playing ||
+            playback_status->audio_status == PANEL_AUDIO_STATUS_PAUSED) {
+            char track_line[32];
+            snprintf(track_line, sizeof(track_line), "Track: %02d", playback_status->current_track);
+            display_manager_draw_text(display, 2, y, track_line);
+            y += 10;
+
+            char time_line[32];
+            snprintf(time_line, sizeof(time_line), "Time: %02d:%02d",
+                    playback_status->track_position_m,
+                    playback_status->track_position_s);
+            display_manager_draw_text(display, 2, y, time_line);
+        }
+    }
+
+    display_manager_request_update(display);
+
+    return ESP_OK;
+}
