@@ -24,6 +24,7 @@ extern const rgb_color_t COLOR_GREEN;
 extern const rgb_color_t COLOR_BLUE;
 extern const rgb_color_t COLOR_WHITE;
 extern const rgb_color_t COLOR_YELLOW;
+extern const rgb_color_t COLOR_ORANGE;
 extern const rgb_color_t COLOR_CYAN;
 extern const rgb_color_t COLOR_MAGENTA;
 
@@ -38,6 +39,8 @@ esp_err_t led_refresh(void);
 // Effect functions
 esp_err_t led_demo_rainbow(uint32_t duration_ms);
 esp_err_t led_flash_color(rgb_color_t color, uint32_t duration_ms);
+esp_err_t led_start_pulse(rgb_color_t color);
+esp_err_t led_stop_pulse(void);
 
 // Activity indication functions (for future use)
 esp_err_t led_activity_read(void);

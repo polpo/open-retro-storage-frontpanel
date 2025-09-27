@@ -16,9 +16,9 @@
 
 // Navigation button pins
 #define PIN_NAV_UP      GPIO_NUM_4
-#define PIN_NAV_RIGHT   GPIO_NUM_5
-#define PIN_NAV_DOWN    GPIO_NUM_8
-#define PIN_NAV_LEFT    GPIO_NUM_9
+#define PIN_NAV_RIGHT   GPIO_NUM_9
+#define PIN_NAV_DOWN    GPIO_NUM_5
+#define PIN_NAV_LEFT    GPIO_NUM_8
 
 // Host interface chip select
 #define PIN_HOST_CS     GPIO_NUM_10

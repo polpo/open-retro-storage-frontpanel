@@ -2,7 +2,7 @@
 #include "panel_protocol_defs.h"
 #include "driver/spi_master.h"
 #include "driver/gpio.h"
-/* #define LOG_LOCAL_LEVEL ESP_LOG_NONE */
+#define LOG_LOCAL_LEVEL ESP_LOG_NONE
 #include "esp_log.h"
 #include <string.h>
 
@@ -176,7 +176,7 @@ static esp_err_t transport_spi_send_payload(transport_handle_t *handle, const ui
         .rx_buffer = NULL,
     };
 
-    ESP_LOGI(TAG, "Sending payload: %zu bytes", len);
+    ESP_LOGI(TAG, "Sending payload: %u bytes", len);
     esp_err_t ret = spi_device_transmit(priv->spi_device, &trans);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "SPI payload send failed: %s", esp_err_to_name(ret));
@@ -196,11 +196,11 @@ static esp_err_t transport_spi_read_payload(transport_handle_t *handle, uint8_t 
 
     // Check if length exceeds our dummy buffer size
     /* if (len > sizeof(priv->dummy_tx_buffer)) { */
-    /*     ESP_LOGE(TAG, "Payload read length %zu exceeds dummy buffer size %zu", len, sizeof(priv->dummy_tx_buffer)); */
+    /*     ESP_LOGE(TAG, "Payload read length %u exceeds dummy buffer size %u", len, sizeof(priv->dummy_tx_buffer)); */
     /*     return ESP_ERR_INVALID_SIZE; */
     /* } */
 
-    ESP_LOGI(TAG, "Reading payload: %zu bytes", len);
+    ESP_LOGI(TAG, "Reading payload: %u bytes", len);
     spi_transaction_t trans = {
         .length = len * 8,  // Length in bits
         .tx_buffer = NULL, //priv->dummy_tx_buffer,  // Use static buffer

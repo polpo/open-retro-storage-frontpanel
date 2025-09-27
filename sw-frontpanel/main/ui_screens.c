@@ -1,5 +1,6 @@
 #include "ui_screens.h"
 #include "esp_log.h"
+#include "esp_app_desc.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <string.h>
@@ -30,41 +31,48 @@ const uint8_t picoide_logo[] = {
   0xFE, 0xFF, 0xC0, 0xFF, 0x7F, 0xF0, 0xC3, 0xFF, 0x3F, 0xF8, 0xFF, 0x0F
 };
 
-esp_err_t ui_show_splash_screen(display_manager_t *display, uint32_t duration_ms) {
+
+
+esp_err_t ui_show_splash_screen(display_manager_t *display) {
     if (!display) {
         return ESP_ERR_INVALID_ARG;
     }
 
-    // Clear display
     display_manager_clear(display);
-    
-    // Draw logo
     display_manager_draw_bitmap(display, 0, 0, 128, 15, picoide_logo);
-    
-    // Set font and draw version
+
     display_manager_set_font(display, u8g2_font_amstrad_cpc_extended_8f);
-    
-    // Center the version text
-    char version_text[32];
-    snprintf(version_text, sizeof(version_text), "FW %s", FIRMWARE_VERSION);
+
+    const esp_app_desc_t* app_desc = esp_app_get_description();
+    char version_text[64];
+    snprintf(version_text, sizeof(version_text), "FW v%s", app_desc->version);
     display_manager_draw_text(display, 30, 32, version_text);
-    
-    // Draw a simple progress bar
+
     display_manager_draw_frame(display, 20, 40, 88, 8);
-    
-    // Request display update
+
     display_manager_request_update(display);
-    display_manager_update(display);
-    
-    // Animate progress bar
-    for (int i = 0; i <= 84; i += 4) {
-        display_manager_draw_box(display, 22, 42, i, 4);
-        display_manager_request_update(display);
-        display_manager_update(display);
-        vTaskDelay(pdMS_TO_TICKS(duration_ms / 25));
+
+    ESP_LOGI(TAG, "Splash screen initialized");
+    return ESP_OK;
+}
+
+esp_err_t ui_update_splash_progress(display_manager_t *display, const char *step_text, uint8_t progress) {
+    if (!display) {
+        return ESP_ERR_INVALID_ARG;
     }
-    
-    ESP_LOGI(TAG, "Splash screen displayed");
+
+    display_manager_set_draw_color(display, 0);
+    display_manager_draw_box(display, 20, 50, 128, 12);
+
+    display_manager_set_draw_color(display, 1);
+    display_manager_set_font(display, u8g2_font_6x10_tf);
+    display_manager_draw_text(display, 22, 60, step_text ? step_text : "");
+
+    uint8_t fill_width = (progress * 84) / 100;
+    display_manager_draw_box(display, 22, 42, fill_width, 4);
+
+    display_manager_request_update(display);
+
     return ESP_OK;
 }
 
@@ -231,7 +239,7 @@ esp_err_t ui_draw_firmware_update(display_manager_t *display, const char *status
     snprintf(progress_text, sizeof(progress_text), "%d%%", progress);
     display_manager_draw_text(display, 54, 62, progress_text);
 
-    display_manager_update(display);
+    display_manager_request_update(display);
 
     return ESP_OK;
 }

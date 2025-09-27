@@ -37,16 +37,16 @@ esp_err_t interface_get_disc_list(interface_context_t *ctx, disc_info_t *discs, 
         if (ret == ESP_OK) {
             (*disc_count)++;
         } else {
-            ESP_LOGW(TAG, "Failed to get info for disc %zu: %s", i, esp_err_to_name(ret));
+            ESP_LOGW(TAG, "Failed to get info for disc %u: %s", i, esp_err_to_name(ret));
             // Create a fallback entry
-            snprintf(discs[i].name, sizeof(discs[i].name), "Disc %zu (error)", i);
+            snprintf(discs[i].name, sizeof(discs[i].name), "Disc %u (error)", i);
             discs[i].size = 0;
             discs[i].tracks = 0;
             (*disc_count)++;
         }
     }
 
-    ESP_LOGI(TAG, "Retrieved info for %zu discs", *disc_count);
+    ESP_LOGI(TAG, "Retrieved info for %u discs", *disc_count);
     return ESP_OK;
 }
 
@@ -62,9 +62,9 @@ esp_err_t interface_select_disc(interface_context_t *ctx, uint32_t disc_index) {
 
     esp_err_t ret = host_comm_select_disc(ctx->host_comm, disc_index);
     if (ret == ESP_OK) {
-        ESP_LOGI(TAG, "Selected disc %lu", disc_index);
+        ESP_LOGI(TAG, "Selected disc %u", disc_index);
     } else {
-        ESP_LOGW(TAG, "Failed to select disc %lu: %s", disc_index, esp_err_to_name(ret));
+        ESP_LOGW(TAG, "Failed to select disc %u: %s", disc_index, esp_err_to_name(ret));
     }
 
     return ret;
@@ -117,7 +117,7 @@ esp_err_t interface_wifi_scan(interface_context_t *ctx, wifi_ap_info_t *networks
 
     esp_err_t ret = wifi_manager_scan_networks(ctx->wifi_manager, networks, max_networks, found_networks);
     if (ret == ESP_OK) {
-        ESP_LOGI(TAG, "WiFi scan found %zu networks", *found_networks);
+        ESP_LOGI(TAG, "WiFi scan found %u networks", *found_networks);
     } else {
         ESP_LOGW(TAG, "WiFi scan failed: %s", esp_err_to_name(ret));
     }

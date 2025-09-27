@@ -8,16 +8,20 @@
 static const char *TAG = "led_driver";
 
 static led_strip_handle_t led_strip = NULL;
+static TaskHandle_t pulse_task_handle = NULL;
+static bool pulse_running = false;
+static rgb_color_t pulse_color;
 
 // Predefined colors
 const rgb_color_t COLOR_OFF =     {0,   0,   0};
-const rgb_color_t COLOR_RED =     {255, 0,   0};
-const rgb_color_t COLOR_GREEN =   {0,   255, 0};
-const rgb_color_t COLOR_BLUE =    {0,   0,   255};
-const rgb_color_t COLOR_WHITE =   {255, 255, 255};
-const rgb_color_t COLOR_YELLOW =  {255, 255, 0};
-const rgb_color_t COLOR_CYAN =    {0,   255, 255};
-const rgb_color_t COLOR_MAGENTA = {255, 0,   255};
+const rgb_color_t COLOR_RED =     {128, 0,   0};
+const rgb_color_t COLOR_GREEN =   {0,   128, 0};
+const rgb_color_t COLOR_BLUE =    {0,   0,   128};
+const rgb_color_t COLOR_WHITE =   {128, 128, 128};
+const rgb_color_t COLOR_YELLOW =  {128, 128, 0};
+const rgb_color_t COLOR_ORANGE =  {128, 64, 0};
+const rgb_color_t COLOR_CYAN =    {0,   128, 128};
+const rgb_color_t COLOR_MAGENTA = {128, 0,   128};
 
 esp_err_t led_driver_init(void) {
     if (led_strip != NULL) {
@@ -220,4 +224,58 @@ esp_err_t led_activity_write(void) {
 
 esp_err_t led_activity_idle(void) {
     return led_clear();
+}
+
+static void pulse_task(void *pvParameters) {
+    const uint32_t cycle_ms = 2000;
+    const uint32_t step_ms = 20;
+    const uint32_t steps = cycle_ms / step_ms;
+
+    while (pulse_running) {
+        for (uint32_t i = 0; i < steps && pulse_running; i++) {
+            float phase = (float)i / steps * 2.0f * M_PI;
+            float brightness = (sinf(phase) + 1.0f) / 2.0f;
+            brightness = brightness * 0.8f + 0.2f;
+
+            uint8_t r = (uint8_t)(pulse_color.r * brightness);
+            uint8_t g = (uint8_t)(pulse_color.g * brightness);
+            uint8_t b = (uint8_t)(pulse_color.b * brightness);
+
+            led_set_rgb(r, g, b);
+            vTaskDelay(pdMS_TO_TICKS(step_ms));
+        }
+    }
+
+    led_clear();
+    pulse_task_handle = NULL;
+    vTaskDelete(NULL);
+}
+
+esp_err_t led_start_pulse(rgb_color_t color) {
+    if (led_strip == NULL) {
+        ESP_LOGE(TAG, "LED driver not initialized");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    led_stop_pulse();
+
+    pulse_color = color;
+    pulse_running = true;
+
+    BaseType_t ret = xTaskCreate(pulse_task, "led_pulse", 2048, NULL, 3, &pulse_task_handle);
+    if (ret != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create pulse task");
+        pulse_running = false;
+        return ESP_FAIL;
+    }
+
+    return ESP_OK;
+}
+
+esp_err_t led_stop_pulse(void) {
+    if (pulse_task_handle != NULL) {
+        pulse_running = false;
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    return ESP_OK;
 }

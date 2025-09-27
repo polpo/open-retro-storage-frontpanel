@@ -7,8 +7,8 @@
 #include "driver/spi_master.h"
 
 #include "gpio_pins.h"
+#include "gpio_handler.h"
 #include "display_manager.h"
-#include "button_handler.h"
 #include "menu_system.h"
 #include "host_comm.h"  // Modular transport layer (I2C/SPI)
 #include "transport_config.h" // Transport configuration
@@ -19,6 +19,8 @@
 #include "interface_common.h"
 #include "esp_netif_ip_addr.h"
 #include "ota_manager.h"
+#include "driver/gpio.h"
+#include "freertos/queue.h"
 
 static const char *TAG = "main";
 
@@ -216,8 +218,10 @@ static void handle_button_event(button_event_t *event) {
                     }
                     break;
                 case 3: // Back button (West)
-                    current_screen = SCREEN_MAIN_MENU;
-                    ui_draw_menu(&display, &main_menu);
+                    if (event->type == BUTTON_EVENT_CLICK) {
+                        current_screen = SCREEN_MAIN_MENU;
+                        ui_draw_menu(&display, &main_menu);
+                    }
                     break;
             }
             break;
@@ -306,8 +310,10 @@ static void handle_button_event(button_event_t *event) {
                     }
                     break;
                 case 3: // Back button (West)
-                    current_screen = SCREEN_SETTINGS;
-                    ui_draw_menu(&display, &settings_menu);
+                    if (event->type == BUTTON_EVENT_CLICK) {
+                        current_screen = SCREEN_SETTINGS;
+                        ui_draw_menu(&display, &settings_menu);
+                    }
                     break;
             }
             break;
@@ -394,6 +400,11 @@ static esp_err_t refresh_disc_list(void) {
 static void firmware_update_task(void *pvParameters) {
     ota_manager_t *ota = (ota_manager_t *)pvParameters;
 
+    led_start_pulse(COLOR_RED);
+
+    uint32_t last_display_update_ms = 0;
+    uint8_t last_progress = 0;
+
     while (1) {
         esp_err_t ret = ota_manager_process(ota);
         if (ret != ESP_OK && ret != ESP_ERR_NOT_FINISHED) {
@@ -401,54 +412,67 @@ static void firmware_update_task(void *pvParameters) {
             break;
         }
 
-        // Update display based on OTA state
         ota_state_t state = ota_manager_get_state(ota);
         uint8_t progress = ota_manager_get_progress(ota);
 
-        const char *status_msg = "Initializing...";
-        switch (state) {
-            case OTA_STATE_CHECKING:
-                status_msg = "Checking for updates...";
-                break;
-            case OTA_STATE_DOWNLOADING:
-                status_msg = "Downloading firmware...";
-                break;
-            case OTA_STATE_VERIFYING:
-                status_msg = "Verifying firmware...";
-                break;
-            case OTA_STATE_APPLYING:
-                status_msg = "Applying update...";
-                break;
-            case OTA_STATE_SUCCESS:
-                status_msg = "Update complete!";
-                break;
-            case OTA_STATE_ERROR:
-                status_msg = "Update failed!";
-                break;
-            default:
-                break;
-        }
+        // Update display only every 100ms or when progress changes
+        uint32_t current_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
+        if (state != OTA_STATE_DOWNLOADING ||
+            progress != last_progress ||
+            (current_ms - last_display_update_ms) >= 100) {
 
-        // Update OLED display
-        if (state != OTA_STATE_IDLE) {
-            ui_draw_firmware_update(&display, status_msg, progress);
+            const char *status_msg = "Initializing...";
+            switch (state) {
+                case OTA_STATE_CHECKING:
+                    status_msg = "Checking for updates...";
+                    break;
+                case OTA_STATE_DOWNLOADING:
+                    status_msg = "Downloading firmware...";
+                    break;
+                case OTA_STATE_VERIFYING:
+                    status_msg = "Verifying firmware...";
+                    break;
+                case OTA_STATE_APPLYING:
+                    status_msg = "Applying update...";
+                    break;
+                case OTA_STATE_SUCCESS:
+                    status_msg = "Update complete!";
+                    break;
+                case OTA_STATE_ERROR:
+                    status_msg = "Update failed!";
+                    break;
+                default:
+                    break;
+            }
+
+            if (state != OTA_STATE_IDLE) {
+                ui_draw_firmware_update(&display, status_msg, progress);
+            }
+
+            last_display_update_ms = current_ms;
+            last_progress = progress;
         }
 
         // Exit on completion or error
         if (state == OTA_STATE_SUCCESS) {
             ESP_LOGI(TAG, "Firmware update successful, restarting in 3 seconds...");
+            led_stop_pulse();
+            led_set_color(COLOR_GREEN);
             vTaskDelay(pdMS_TO_TICKS(3000));
             esp_restart();
         } else if (state == OTA_STATE_ERROR) {
             ESP_LOGE(TAG, "Firmware update failed");
+            led_stop_pulse();
+            led_set_color(COLOR_RED);
             vTaskDelay(pdMS_TO_TICKS(3000));
             break;
         }
 
-        vTaskDelay(pdMS_TO_TICKS(100));
+        // Only yield briefly to other tasks, don't sleep
+        taskYIELD();
     }
 
-    // Clean up and return to main menu
+    led_stop_pulse();
     current_screen = SCREEN_MAIN_MENU;
     ui_draw_menu(&display, &main_menu);
     vTaskDelete(NULL);
@@ -457,9 +481,6 @@ static void firmware_update_task(void *pvParameters) {
 // Check and perform firmware update if available
 static esp_err_t check_and_update_firmware(void) {
     ESP_LOGI(TAG, "Checking for firmware updates...");
-
-    // Show checking status on OLED
-    ui_draw_firmware_update(&display, "Checking for updates...", 0);
 
     bool update_available = false;
     esp_err_t ret = ota_manager_check_update(&ota_manager, &update_available);
@@ -474,32 +495,30 @@ static esp_err_t check_and_update_firmware(void) {
         return ESP_OK;
     }
 
-    ESP_LOGI(TAG, "Firmware update available! Version: %lu", ota_manager.firmware_info.version);
+    char version_str[14];
+    ota_manager_format_version_string(version_str, ota_manager.firmware_info.version);
+    ESP_LOGI(TAG, "Firmware update available! Version: %s", version_str);
 
-    // Show update available status
-    char status_msg[64];
-    snprintf(status_msg, sizeof(status_msg), "Update v%lu available", ota_manager.firmware_info.version);
-    ui_draw_firmware_update(&display, status_msg, 0);
-    vTaskDelay(pdMS_TO_TICKS(2000));
-
-    // Start the update
     ret = ota_manager_start_update(&ota_manager);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start update: %s", esp_err_to_name(ret));
-        ui_draw_firmware_update(&display, "Update failed to start!", 0);
-        vTaskDelay(pdMS_TO_TICKS(3000));
         return ret;
     }
 
-    // Create task to handle the update process
     current_screen = SCREEN_FIRMWARE_UPDATE;
+
+    char status_msg[64];
+    snprintf(status_msg, sizeof(status_msg), "Found new fw: v%s", version_str);
+    ui_draw_firmware_update(&display, status_msg, 0);
+    vTaskDelay(pdMS_TO_TICKS(1500));
+
     xTaskCreate(firmware_update_task, "firmware_update", 8192, &ota_manager, 10, NULL);
 
-    while (ota_manager_get_progress(&ota_manager) != 100) {
+    while (ota_manager_get_state(&ota_manager) != OTA_STATE_ERROR) {
         vTaskDelay(pdMS_TO_TICKS(100));
     }
 
-    return ESP_OK;
+    return ESP_ERR_INVALID_STATE;
 }
 
 // Host communication task (currently unused)
@@ -532,18 +551,17 @@ static void host_comm_task(void *pvParameters) {
 }
 #endif
 
-
 void app_main(void) {
     ESP_LOGI(TAG, "PicoIDE Front Panel Starting...");
 
     // Initialize shared SPI bus with MISO enabled for host communication
     spi_bus_config_t bus_config = {
         .mosi_io_num = PIN_SPI_MOSI,
-        .miso_io_num = PIN_SPI_MISO,    // Enable MISO for host communication
+        .miso_io_num = PIN_SPI_MISO,
         .sclk_io_num = PIN_SPI_CLK,
         .quadwp_io_num = GPIO_NUM_NC,
         .quadhd_io_num = GPIO_NUM_NC,
-        .max_transfer_sz = 4096,        // Allow larger transfers
+        .max_transfer_sz = 4096,
     };
 
     esp_err_t ret = spi_bus_initialize(SPI2_HOST, &bus_config, SPI_DMA_CH_AUTO);
@@ -554,57 +572,61 @@ void app_main(void) {
     ESP_LOGI(TAG, "Shared SPI bus initialized (MISO: %d, MOSI: %d, CLK: %d)",
              PIN_SPI_MISO, PIN_SPI_MOSI, PIN_SPI_CLK);
 
-    // Initialize display (will use existing SPI bus)
     ret = display_manager_init(&display);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to initialize display: %s", esp_err_to_name(ret));
         return;
     }
 
-    /*    
-    // Initialize LED driver
+    xTaskCreate(display_update_task, "display_update", 4096, NULL, 5, NULL);
+
+    ui_show_splash_screen(&display);
+    ui_update_splash_progress(&display, "Init display...", 10);
+
+    ui_update_splash_progress(&display, "Init LED...", 20);
     ret = led_driver_init();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to initialize LED driver: %s", esp_err_to_name(ret));
         return;
     }
-    
-    // Rainbow demo for 10 seconds to indicate startup
-    // led_demo_rainbow(0xffffffff);
+    led_start_pulse(COLOR_CYAN);
 
-    for(;;) {
-        led_set_color(COLOR_RED);
-        vTaskDelay(pdMS_TO_TICKS(250));
-        led_set_color(COLOR_GREEN);
-        vTaskDelay(pdMS_TO_TICKS(250));
-        led_set_color(COLOR_BLUE);
-        vTaskDelay(pdMS_TO_TICKS(250));
-        led_set_color(COLOR_YELLOW);
-        vTaskDelay(pdMS_TO_TICKS(250));
-        led_set_color(COLOR_CYAN);
-        vTaskDelay(pdMS_TO_TICKS(250));
-        led_set_color(COLOR_MAGENTA);
-        vTaskDelay(pdMS_TO_TICKS(250));
-    }
-    */
-    
-    // Show splash screen
-    ui_show_splash_screen(&display, 2000);
-    
-    // Initialize button handler
-    ret = button_handler_init();
+    ui_update_splash_progress(&display, "Init GPIO...", 30);
+    ret = gpio_handler_init();
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to initialize button handler: %s", esp_err_to_name(ret));
+        ESP_LOGE(TAG, "Failed to initialize gpio handler: %s", esp_err_to_name(ret));
         return;
     }
+
+    ret = gpio_handler_configure_activity_pin(PIN_ACT_IN);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to configure activity pin: %s", esp_err_to_name(ret));
+        return;
+    }
+
+    ret = gpio_handler_install_activity_isr(PIN_ACT_IN);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to install activity ISR: %s", esp_err_to_name(ret));
+        return;
+    }
+
+    int initial_state = gpio_get_level(PIN_ACT_IN);
+    if (initial_state) {
+        led_set_color(COLOR_ORANGE);
+        ESP_LOGI(TAG, "Initial PIN_ACT_IN state: HIGH (LED: Orange)");
+    } else {
+        led_set_color(COLOR_CYAN);
+        ESP_LOGI(TAG, "Initial PIN_ACT_IN state: LOW (LED: Cyan)");
+    }
     
+    ui_update_splash_progress(&display, "Init buttons...", 40);
     // Configure buttons with repeat for up/down navigation
     button_config_t nav_button_config = {
         .active_low = true,
         .enable_double_click = false,
         .enable_long_press = true,
         .enable_repeat = true,
-        .debounce_ms = 50,
+        .debounce_ms = 100,
         .double_click_ms = 300,
         .long_press_ms = 300,  // Start repeating after 300ms
         .repeat_ms = 80        // Repeat every 80ms
@@ -616,37 +638,33 @@ void app_main(void) {
         .enable_double_click = false,
         .enable_long_press = false,
         .enable_repeat = false,
-        .debounce_ms = 50,
+        .debounce_ms = 100,
         .double_click_ms = 300,
         .long_press_ms = 1000,
         .repeat_ms = 100
     };
     
-    // Add navigation buttons with repeat (up/down)
     nav_button_config.gpio = PIN_NAV_UP;
-    button_handler_add_button(0, &nav_button_config); // Up (North)
-    
+    gpio_handler_add_button(0, &nav_button_config);
+
     nav_button_config.gpio = PIN_NAV_DOWN;
-    button_handler_add_button(2, &nav_button_config); // Down (South)
-    
-    // Add action buttons without repeat (select/back)
+    gpio_handler_add_button(2, &nav_button_config);
+
     action_button_config.gpio = PIN_NAV_RIGHT;
-    button_handler_add_button(1, &action_button_config); // Select (East)
-    
+    gpio_handler_add_button(1, &action_button_config);
+
     action_button_config.gpio = PIN_NAV_LEFT;
-    button_handler_add_button(3, &action_button_config); // Back (West)
-    
-    // Register button event handler
-    button_handler_register_callback(handle_button_event);
-    button_handler_start();
-    
-    // Initialize menus
+    gpio_handler_add_button(3, &action_button_config);
+
+    gpio_handler_register_button_callback(handle_button_event);
+    gpio_handler_start();
+
+    ui_update_splash_progress(&display, "Init menus...", 50);
     menu_init(&main_menu, 8);
     menu_set_items(&main_menu, main_menu_items,
                   sizeof(main_menu_items) / sizeof(main_menu_items[0]));
 
     menu_init(&disc_menu, 8);
-    // Disc menu will be populated dynamically from host communication
 
     menu_init(&settings_menu, 8);
     menu_set_items(&settings_menu, settings_menu_items,
@@ -655,58 +673,84 @@ void app_main(void) {
     menu_init(&wifi_menu, 8);
     menu_set_items(&wifi_menu, wifi_menu_items,
                   sizeof(wifi_menu_items) / sizeof(wifi_menu_items[0]));
-    
-    // Initialize host communication (I2C or SPI based on compile-time config)
+
     transport_config_t transport_cfg = {
         .device_addr = HOST_DEVICE_ADDR,
-        .sda_miso = PIN_SDA,          // I2C SDA or SPI MISO
-        .scl_clk = PIN_SCL,           // I2C SCL or SPI CLK
-        .cs = PIN_HOST_CS,            // SPI CS (ignored for I2C)
-        .mosi = PIN_SPI_MOSI,         // SPI MOSI (ignored for I2C)
+        .sda_miso = PIN_SDA,
+        .scl_clk = PIN_SCL,
+        .cs = PIN_HOST_CS,
+        .mosi = PIN_SPI_MOSI,
         .clock_speed = HOST_CLOCK_SPEED,
         .timeout_ms = HOST_TIMEOUT_MS,
     };
-    
+
+    ui_update_splash_progress(&display, "Establish comms...", 55);
+    vTaskDelay(pdMS_TO_TICKS(1000));
     ret = host_comm_init(&host_comm, &transport_cfg);
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "Failed to initialize host comm: %s", esp_err_to_name(ret));
-        // Continue anyway - host might not be connected
     } else {
         ESP_LOGI(TAG, "Host comm initialized successfully using %s",
                  host_comm_get_transport_name(&host_comm));
 
-        // Initialize OTA manager
-        ret = ota_manager_init(&ota_manager, &host_comm);
+        host_status_t test_status;
+        ret = host_comm_get_status(&host_comm, &test_status);
         if (ret != ESP_OK) {
-            ESP_LOGW(TAG, "Failed to initialize OTA manager: %s", esp_err_to_name(ret));
-        } else {
-            // Check for firmware updates before proceeding
-            ret = check_and_update_firmware();
-            if (ret == ESP_OK) {
-                // If update was started, the task will handle everything
-                // and restart the device when done
-                ESP_LOGI(TAG, "Firmware check completed");
-            }
-        }
+            ESP_LOGE(TAG, "Failed to communicate with main board: %s", esp_err_to_name(ret));
+            led_stop_pulse();
 
-        // Manually fetch disc list at startup
-        ESP_LOGI(TAG, "Fetching disc list at startup...");
-        esp_err_t disc_ret = refresh_disc_list();
-        if (disc_ret == ESP_OK) {
-            ESP_LOGI(TAG, "Disc list loaded successfully at startup");
+            for (int i = 0; i < 6; i++) {
+                led_set_color(COLOR_RED);
+                vTaskDelay(pdMS_TO_TICKS(200));
+                led_clear();
+                vTaskDelay(pdMS_TO_TICKS(200));
+            }
+
+            display_manager_clear(&display);
+            display_manager_set_font(&display, u8g2_font_amstrad_cpc_extended_8f);
+            display_manager_draw_text(&display, 10, 16, "Communication");
+            display_manager_draw_text(&display, 30, 32, "Error!");
+            display_manager_set_font(&display, u8g2_font_6x10_tf);
+            display_manager_draw_text(&display, 8, 48, "Cannot reach");
+            display_manager_draw_text(&display, 8, 58, "main board");
+            display_manager_request_update(&display);
+            display_manager_update(&display);
+
+            vTaskDelay(pdMS_TO_TICKS(3000));
+            led_start_pulse(COLOR_CYAN);
+            host_comm.initialized = false;
         } else {
-            ESP_LOGW(TAG, "Failed to load disc list at startup: %s", esp_err_to_name(disc_ret));
+            ESP_LOGI(TAG, "Communication with main board verified (status: 0x%02X)", test_status);
+
+            ret = ota_manager_init(&ota_manager, &host_comm);
+            if (ret != ESP_OK) {
+                ESP_LOGW(TAG, "Failed to initialize OTA manager: %s", esp_err_to_name(ret));
+            } else {
+                ui_update_splash_progress(&display, "Check firmware...", 60);
+                ret = check_and_update_firmware();
+                if (ret == ESP_OK) {
+                    ESP_LOGI(TAG, "Firmware check completed");
+                }
+            }
+
+            ESP_LOGI(TAG, "Fetching disc list at startup...");
+            ui_update_splash_progress(&display, "Load disc list...", 70);
+            esp_err_t disc_ret = refresh_disc_list();
+            if (disc_ret == ESP_OK) {
+                ESP_LOGI(TAG, "Disc list loaded successfully at startup");
+            } else {
+                ESP_LOGW(TAG, "Failed to load disc list at startup: %s", esp_err_to_name(disc_ret));
+            }
         }
     }
 
-    // Initialize WiFi manager
+    ui_update_splash_progress(&display, "Init WiFi...", 80);
     ret = wifi_manager_init(&wifi_manager);
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "Failed to initialize WiFi manager: %s", esp_err_to_name(ret));
     } else {
         ESP_LOGI(TAG, "WiFi manager initialized successfully");
 
-        // Try to load saved WiFi configuration and auto-connect
         wifi_manager_config_t wifi_config;
         ret = wifi_manager_get_config(&wifi_manager, &wifi_config);
         if (ret == ESP_OK && wifi_config.auto_connect && strlen(wifi_config.ssid) > 0) {
@@ -718,7 +762,6 @@ void app_main(void) {
         }
     }
 
-    // Initialize web server
     ret = web_server_init(&web_server, WEB_SERVER_PORT);
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "Failed to initialize web server: %s", esp_err_to_name(ret));
@@ -726,14 +769,12 @@ void app_main(void) {
         ESP_LOGI(TAG, "Web server initialized successfully");
     }
 
-    // Setup interface context for common operations
     interface_ctx.host_comm = &host_comm;
     interface_ctx.wifi_manager = &wifi_manager;
 
-    // Connect web server to interface context
     web_server_set_interface_context(&web_server, &interface_ctx);
 
-    // Start web server (will work on any interface that becomes available)
+    ui_update_splash_progress(&display, "Start services...", 90);
     ESP_LOGI(TAG, "Starting web server");
     ret = web_server_start(&web_server);
     if (ret != ESP_OK) {
@@ -743,17 +784,18 @@ void app_main(void) {
         ESP_LOGI(TAG, "Access web interface at: http://picoide.local (when WiFi connects)");
     }
 
-    // Switch to main menu
+    ui_update_splash_progress(&display, "Ready!", 100);
+    vTaskDelay(pdMS_TO_TICKS(500));
+
+    led_stop_pulse();
+
     current_screen = SCREEN_MAIN_MENU;
     ui_draw_menu(&display, &main_menu);
     ui_draw_status_bar(&display, current_disc_name);
-    
-    // Create display update task
-    xTaskCreate(display_update_task, "display_update", 4096, NULL, 5, NULL);
-    
-    // Create I2C communication task (commented out to reduce debug noise)
-    // xTaskCreate(host_comm_task, "host_comm", 4096, NULL, 3, NULL);
-    
+
+    int initial_act_state = gpio_get_level(PIN_ACT_IN);
+    led_set_color(initial_act_state ? COLOR_ORANGE : COLOR_CYAN);
+
     ESP_LOGI(TAG, "System initialized successfully");
     
     // Main loop can be used for other tasks or left empty

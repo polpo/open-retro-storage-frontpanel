@@ -1,6 +1,6 @@
 idf_component_register(SRCS "main.c"
                             "display_manager.c"
-                            "button_handler.c"
+                            "gpio_handler.c"
                             "menu_system.c"
                             "host_comm.c"
                             "transport.c"

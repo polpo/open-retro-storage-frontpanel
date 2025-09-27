@@ -866,7 +866,7 @@ static esp_err_t api_upload_handler(httpd_req_t *req) {
         return ESP_FAIL;
     }
 
-    ESP_LOGI(TAG, "Upload content length: %zu bytes", content_length);
+    ESP_LOGI(TAG, "Upload content length: %u bytes", content_length);
 
     // Allocate buffer for reading chunks (match protocol chunk size)
     const size_t chunk_size = PANEL_FILE_CHUNK_SIZE;
@@ -909,7 +909,7 @@ static esp_err_t api_upload_handler(httpd_req_t *req) {
                     strncpy(size_str, value_start, size_len);
                     actual_file_size = strtoul(size_str, NULL, 10);
                     found_file_size = true;
-                    ESP_LOGI(TAG, "Found file size: %lu bytes", actual_file_size);
+                    ESP_LOGI(TAG, "Found file size: %u bytes", actual_file_size);
                 }
             }
         }
@@ -962,7 +962,7 @@ static esp_err_t api_upload_handler(httpd_req_t *req) {
         if (data_start) {
             data_start += 4; // Skip \r\n\r\n
             file_data_start = data_start - chunk_buffer;
-            ESP_LOGI(TAG, "File data starts at offset: %lu", file_data_start);
+            ESP_LOGI(TAG, "File data starts at offset: %u", file_data_start);
         }
         // ESP_LOGI(TAG, "buffer starting at data_start: %c\n", tmp);
     }
@@ -1048,7 +1048,7 @@ static esp_err_t api_upload_handler(httpd_req_t *req) {
 
         remaining -= chunk_received;
 
-        ESP_LOGD(TAG, "Uploaded %lu / %lu bytes", g_upload_state.bytes_received, actual_file_size);
+        ESP_LOGD(TAG, "Uploaded %u / %u bytes", g_upload_state.bytes_received, actual_file_size);
     }
 
     // Finish the upload and get file hash
@@ -1099,7 +1099,7 @@ static esp_err_t api_upload_handler(httpd_req_t *req) {
     }
     hash_hex[64] = '\0';
 
-    ESP_LOGI(TAG, "File upload completed successfully: %s (%lu bytes), SHA256: %s",
+    ESP_LOGI(TAG, "File upload completed successfully: %s (%u bytes), SHA256: %s",
              g_upload_state.filename, g_upload_state.bytes_received, hash_hex);
 
     // Send success response with hash

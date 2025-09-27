@@ -125,7 +125,7 @@ esp_err_t transport_i2c_two_phase_transaction(transport_handle_t *handle,
 
     // If write command with payload, append it to the same transaction
     if (!is_read && write_data && write_len > 0) {
-        ESP_LOGI(TAG, "Appending write payload (%zu bytes)", write_len);
+        ESP_LOGI(TAG, "Appending write payload (%u bytes)", write_len);
         i2c_master_write(cmd, write_data, write_len, true);
     }
 
@@ -145,7 +145,7 @@ esp_err_t transport_i2c_two_phase_transaction(transport_handle_t *handle,
         // Small delay to let slave prepare response
         vTaskDelay(pdMS_TO_TICKS(1));
 
-        ESP_LOGI(TAG, "Phase 2: Reading response (%zu bytes)", read_len);
+        ESP_LOGI(TAG, "Phase 2: Reading response (%u bytes)", read_len);
 
         cmd = i2c_cmd_link_create();
         if (!cmd) {
@@ -215,7 +215,7 @@ esp_err_t transport_i2c_two_phase_transaction(transport_handle_t *handle,
                         ESP_LOGE(TAG, "Additional read failed: %s", esp_err_to_name(ret));
                     }
                 } else {
-                    ESP_LOGW(TAG, "Result size %u exceeds available buffer space %zu", result_size, max_result_size);
+                    ESP_LOGW(TAG, "Result size %u exceeds available buffer space %u", result_size, max_result_size);
                     ret = ESP_ERR_INVALID_SIZE;
                 }
             }

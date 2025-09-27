@@ -30,7 +30,7 @@
 #ifdef TRANSPORT_USE_SPI
 #define HOST_DEVICE_ADDR    -1         // SPI has no device addr
 #define SPI_MODE            0          // SPI mode (0-3)
-#define HOST_CLOCK_SPEED    2000000    // 2MHz for SPI
+#define HOST_CLOCK_SPEED    10000000    // 5MHz for SPI
 #define SPI_MAX_TRANSFER    4096       // Maximum transfer size in bytes
 #endif
 

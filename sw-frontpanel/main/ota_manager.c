@@ -85,23 +85,13 @@ static uint32_t parse_version_string(const char* version_str) {
         return 0x00000000; // Default v0.0.0
     }
 
-    uint32_t major = 1, minor = 0, patch = 0;
-    const char* parse_str = version_str;
-
-    // Skip 'v' prefix if present
-    if (parse_str[0] == 'v' || parse_str[0] == 'V') {
-        parse_str++;
-    }
+    uint32_t major, minor, patch;
 
     // Try to parse major.minor.patch format
-    int parsed = sscanf(parse_str, "%lu.%lu.%lu", &major, &minor, &patch);
-    if (parsed < 2) {
-        // Try to parse just major.minor
-        parsed = sscanf(parse_str, "%lu.%lu", &major, &minor);
-        if (parsed < 1) {
-            ESP_LOGW(TAG, "Failed to parse version string '%s', using default", version_str);
-            return 0x00000000;
-        }
+    int parsed = sscanf(version_str, "%lu.%lu.%lu", &major, &minor, &patch);
+    if (parsed < 3) {
+        ESP_LOGW(TAG, "Failed to parse version string '%s', using default", version_str);
+        return 0x00000000;
     }
 
     // Validate version components (reasonable limits)
@@ -476,3 +466,10 @@ uint32_t ota_manager_get_current_version(void) {
     return version;
 }
 
+void ota_manager_format_version_string(char *version_str, uint32_t version_num) {
+    // Version number (major.minor.patch as 0xMMmmpppp)
+    uint8_t major = version_num >> 24;
+    uint8_t minor = (version_num >> 16) & 0xff;
+    uint16_t patch = version_num & 0xffff;
+    sprintf(version_str, "%u.%u.%u", major, minor, patch);
+}

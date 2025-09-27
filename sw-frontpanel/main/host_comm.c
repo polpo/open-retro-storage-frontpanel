@@ -82,12 +82,12 @@ static esp_err_t host_comm_poll_async_result(host_comm_t *comm, uint32_t timeout
     }
 
     if (!ready) {
-        ESP_LOGE(TAG, "Async operation timeout after %lu ms", elapsed_ms);
+        ESP_LOGE(TAG, "Async operation timeout after %u ms", elapsed_ms);
         return ESP_ERR_TIMEOUT;
     }
 
     if (expected_size > 0 && response_size != expected_size) {
-        ESP_LOGE(TAG, "Unexpected response size: %u (expected %zu)", response_size, expected_size);
+        ESP_LOGE(TAG, "Unexpected response size: %u (expected %u)", response_size, expected_size);
         return ESP_ERR_INVALID_RESPONSE;
     }
 
@@ -145,7 +145,7 @@ esp_err_t host_comm_get_disc_count(host_comm_t *comm, uint32_t *count) {
 
     // Parse the 4-byte big-endian disc count
     *count = (result_data[0] << 24) | (result_data[1] << 16) | (result_data[2] << 8) | result_data[3];
-    ESP_LOGI(TAG, "Disc count: %lu", *count);
+    ESP_LOGI(TAG, "Disc count: %u", *count);
 
     return ESP_OK;
 }
@@ -363,7 +363,7 @@ esp_err_t host_comm_start_file_upload(host_comm_t *comm, const char *filename, u
         return ESP_ERR_INVALID_ARG;
     }
 
-    ESP_LOGI(TAG, "Starting file upload: %s (%lu bytes)", filename, file_size);
+    ESP_LOGI(TAG, "Starting file upload: %s (%u bytes)", filename, file_size);
 
     // Prepare payload with file upload start structure
     size_t filename_len = strlen(filename);

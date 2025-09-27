@@ -1,4 +1,6 @@
-#include "button_handler.h"
+#include "gpio_handler.h"
+#include "gpio_pins.h"
+#include "led_driver.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -6,7 +8,7 @@
 #include "esp_timer.h"
 #include <string.h>
 
-static const char *TAG = "button_handler";
+static const char *TAG = "gpio_handler";
 
 typedef struct {
     button_config_t config;
@@ -24,9 +26,15 @@ typedef struct {
 
 static button_state_t buttons[MAX_BUTTONS];
 static QueueHandle_t event_queue = NULL;
+static QueueHandle_t activity_queue = NULL;
 static TaskHandle_t event_task_handle = NULL;
 static button_event_handler_t user_handler = NULL;
+static activity_event_handler_t activity_handler = NULL;
 static bool handler_running = false;
+
+// Forward declarations
+static void activity_led_handler(activity_event_t *event);
+static esp_err_t gpio_handler_send_activity_event_from_isr(int pin_state, BaseType_t *pxHigherPriorityTaskWoken);
 
 static void IRAM_ATTR gpio_isr_handler(void *arg) {
     button_state_t *button = (button_state_t *)arg;
@@ -143,21 +151,30 @@ static void repeat_timer_callback(void *arg) {
     xQueueSend(event_queue, &event, 0);
 }
 
-static void button_event_task(void *arg) {
-    button_event_t event;
-    
+static void gpio_event_task(void *arg) {
+    button_event_t button_event;
+    activity_event_t activity_event;
+
     while (handler_running) {
-        if (xQueueReceive(event_queue, &event, portMAX_DELAY) == pdTRUE) {
+        // Check button queue with short timeout
+        if (xQueueReceive(event_queue, &button_event, pdMS_TO_TICKS(10)) == pdTRUE) {
             if (user_handler) {
-                user_handler(&event);
+                user_handler(&button_event);
+            }
+        }
+
+        // Check activity queue (non-blocking)
+        if (xQueueReceive(activity_queue, &activity_event, 0) == pdTRUE) {
+            if (activity_handler) {
+                activity_handler(&activity_event);
             }
         }
     }
-    
+
     vTaskDelete(NULL);
 }
 
-esp_err_t button_handler_init(void) {
+esp_err_t gpio_handler_init(void) {
     if (event_queue != NULL) {
         return ESP_ERR_INVALID_STATE;
     }
@@ -166,17 +183,27 @@ esp_err_t button_handler_init(void) {
     if (!event_queue) {
         return ESP_ERR_NO_MEM;
     }
-    
+
+    activity_queue = xQueueCreate(ACTIVITY_EVENT_QUEUE_SIZE, sizeof(activity_event_t));
+    if (!activity_queue) {
+        vQueueDelete(event_queue);
+        event_queue = NULL;
+        return ESP_ERR_NO_MEM;
+    }
+
     memset(buttons, 0, sizeof(buttons));
     
     // Install GPIO ISR service here so it's ready when we add buttons
     gpio_install_isr_service(0);
-    
-    ESP_LOGI(TAG, "Button handler initialized");
+
+    // Register default activity handler for LED control
+    activity_handler = activity_led_handler;
+
+    ESP_LOGI(TAG, "GPIO handler initialized");
     return ESP_OK;
 }
 
-esp_err_t button_handler_add_button(uint8_t button_id, const button_config_t *config) {
+esp_err_t gpio_handler_add_button(uint8_t button_id, const button_config_t *config) {
     if (button_id >= MAX_BUTTONS || !config) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -235,7 +262,7 @@ esp_err_t button_handler_add_button(uint8_t button_id, const button_config_t *co
     return ESP_OK;
 }
 
-esp_err_t button_handler_remove_button(uint8_t button_id) {
+esp_err_t gpio_handler_remove_button(uint8_t button_id) {
     if (button_id >= MAX_BUTTONS) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -270,12 +297,12 @@ esp_err_t button_handler_remove_button(uint8_t button_id) {
     return ESP_OK;
 }
 
-esp_err_t button_handler_register_callback(button_event_handler_t handler) {
+esp_err_t gpio_handler_register_button_callback(button_event_handler_t handler) {
     user_handler = handler;
     return ESP_OK;
 }
 
-esp_err_t button_handler_start(void) {
+esp_err_t gpio_handler_start(void) {
     if (handler_running) {
         return ESP_ERR_INVALID_STATE;
     }
@@ -283,13 +310,13 @@ esp_err_t button_handler_start(void) {
     // ISR service already installed in init()
     
     handler_running = true;
-    xTaskCreate(button_event_task, "button_event", 4096, NULL, 10, &event_task_handle);
+    xTaskCreate(gpio_event_task, "gpio_event", 4096, NULL, 10, &event_task_handle);
     
-    ESP_LOGI(TAG, "Button handler started");
+    ESP_LOGI(TAG, "GPIO handler started");
     return ESP_OK;
 }
 
-esp_err_t button_handler_stop(void) {
+esp_err_t gpio_handler_stop(void) {
     if (!handler_running) {
         return ESP_ERR_INVALID_STATE;
     }
@@ -306,21 +333,100 @@ esp_err_t button_handler_stop(void) {
     // Note: gpio_uninstall_isr_service() should be called if we're completely done
     // But keeping it installed allows for restart
     
-    ESP_LOGI(TAG, "Button handler stopped");
+    ESP_LOGI(TAG, "GPIO handler stopped");
     return ESP_OK;
 }
 
-button_event_t button_handler_get_last_event(void) {
+button_event_t gpio_handler_get_last_event(void) {
     button_event_t event = {0};
     xQueuePeek(event_queue, &event, 0);
     return event;
 }
 
-bool button_handler_has_events(void) {
+bool gpio_handler_has_events(void) {
     return uxQueueMessagesWaiting(event_queue) > 0;
 }
 
-esp_err_t button_handler_clear_events(void) {
+esp_err_t gpio_handler_clear_events(void) {
     xQueueReset(event_queue);
+    return ESP_OK;
+}
+
+// Activity LED handler - sets LED color based on activity pin state
+static void activity_led_handler(activity_event_t *event) {
+    if (!event) return;
+
+    if (event->pin_state) {
+        // Pin is HIGH - set LED to orange
+        led_set_color(COLOR_ORANGE);
+    } else {
+        // Pin is LOW - set LED to cyan
+        led_set_color(COLOR_CYAN);
+    }
+}
+
+// Activity ISR handler
+static void IRAM_ATTR activity_gpio_isr_handler(void* arg) {
+    gpio_num_t gpio_num = (gpio_num_t)(intptr_t)arg;
+    int pin_state = gpio_get_level(gpio_num);
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+
+    gpio_handler_send_activity_event_from_isr(pin_state, &xHigherPriorityTaskWoken);
+
+    if (xHigherPriorityTaskWoken == pdTRUE) {
+        portYIELD_FROM_ISR();
+    }
+}
+
+// Activity indicator functions
+esp_err_t gpio_handler_register_activity_callback(activity_event_handler_t handler) {
+    activity_handler = handler;
+    return ESP_OK;
+}
+
+esp_err_t gpio_handler_configure_activity_pin(gpio_num_t gpio_num) {
+    // Configure the GPIO pin as input with interrupt on both edges
+    gpio_config_t io_conf = {
+        .pin_bit_mask = (1ULL << gpio_num),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_ANYEDGE
+    };
+
+    esp_err_t ret = gpio_config(&io_conf);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to configure activity pin: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    ESP_LOGI(TAG, "Activity pin configured on GPIO%d", gpio_num);
+    return ESP_OK;
+}
+
+static esp_err_t gpio_handler_send_activity_event_from_isr(int pin_state, BaseType_t *pxHigherPriorityTaskWoken) {
+    if (activity_queue == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    activity_event_t event = {
+        .pin_state = pin_state
+    };
+
+    if (xQueueSendFromISR(activity_queue, &event, pxHigherPriorityTaskWoken) != pdTRUE) {
+        return ESP_FAIL;
+    }
+
+    return ESP_OK;
+}
+
+esp_err_t gpio_handler_install_activity_isr(gpio_num_t gpio_num) {
+    esp_err_t ret = gpio_isr_handler_add(gpio_num, activity_gpio_isr_handler, (void*)(intptr_t)gpio_num);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to add ISR handler for activity pin: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    ESP_LOGI(TAG, "Activity ISR handler installed on GPIO%d", gpio_num);
     return ESP_OK;
 }
