@@ -35,6 +35,7 @@ typedef struct {
     bool needs_redraw;
     void (*on_select)(uint32_t index, menu_item_t *item);
     void (*on_change)(uint32_t index, menu_item_t *item);
+    void *text_scroll_state; // Opaque pointer to text_scroll_state_t for selected item
 } menu_t;
 
 esp_err_t menu_init(menu_t *menu, uint32_t visible_items);

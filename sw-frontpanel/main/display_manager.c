@@ -48,6 +48,13 @@ esp_err_t display_manager_init(display_manager_t *display) {
     display->last_activity_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
     display->state = DISPLAY_STATE_FULL_BRIGHTNESS;
 
+    // Create mutex for SPI bus protection
+    display->spi_mutex = xSemaphoreCreateMutex();
+    if (!display->spi_mutex) {
+        ESP_LOGE(TAG, "Failed to create SPI mutex");
+        return ESP_ERR_NO_MEM;
+    }
+
     // Create power management timers
     esp_timer_create_args_t dim_timer_args = {
         .callback = &dim_timer_callback,
@@ -105,11 +112,18 @@ esp_err_t display_manager_update(display_manager_t *display) {
         return ESP_OK;  // Skip update if too soon
     }
 
-    u8g2_SendBuffer(&display->u8g2);
-    display->needs_update = false;
-    display->last_update_ms = current_ms;
+    // Protect SPI access with mutex
+    if (xSemaphoreTake(display->spi_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        u8g2_SendBuffer(&display->u8g2);
+        xSemaphoreGive(display->spi_mutex);
 
-    return ESP_OK;
+        display->needs_update = false;
+        display->last_update_ms = current_ms;
+        return ESP_OK;
+    } else {
+        ESP_LOGW(TAG, "Failed to acquire SPI mutex for update");
+        return ESP_ERR_TIMEOUT;
+    }
 }
 
 esp_err_t display_manager_draw_bitmap(display_manager_t *display, uint8_t x, uint8_t y, 
@@ -128,6 +142,15 @@ esp_err_t display_manager_draw_text(display_manager_t *display, uint8_t x, uint8
     }
 
     u8g2_DrawStr(&display->u8g2, x, y, text);
+    return ESP_OK;
+}
+
+esp_err_t display_manager_draw_glyph(display_manager_t *display, uint8_t x, uint8_t y, uint16_t glyph) {
+    if (!display || !display->initialized || !glyph) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    u8g2_DrawGlyph(&display->u8g2, x, y, glyph);
     return ESP_OK;
 }
 
@@ -174,8 +197,13 @@ static void dim_timer_callback(void *arg) {
     if (display && display->initialized && display->state == DISPLAY_STATE_FULL_BRIGHTNESS) {
         ESP_LOGI(TAG, "Dimming display after 30s idle - setting contrast to 25");
         display->state = DISPLAY_STATE_DIMMED;
-        u8g2_SetContrast(&display->u8g2, 25); // Try much lower value
-        
+
+        // Protect SPI access with mutex
+        if (xSemaphoreTake(display->spi_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+            u8g2_SetContrast(&display->u8g2, 25);
+            xSemaphoreGive(display->spi_mutex);
+        }
+
         // Start the off timer
         esp_timer_start_once(display->off_timer, (DISPLAY_OFF_TIMEOUT_MS - DISPLAY_DIM_TIMEOUT_MS) * 1000);
     }
@@ -186,7 +214,12 @@ static void off_timer_callback(void *arg) {
     if (display && display->initialized && display->state == DISPLAY_STATE_DIMMED) {
         ESP_LOGI(TAG, "Turning off display after 2min idle");
         display->state = DISPLAY_STATE_OFF;
-        u8g2_SetPowerSave(&display->u8g2, 1); // Turn off display
+
+        // Protect SPI access with mutex
+        if (xSemaphoreTake(display->spi_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+            u8g2_SetPowerSave(&display->u8g2, 1);
+            xSemaphoreGive(display->spi_mutex);
+        }
     }
 }
 
@@ -196,16 +229,22 @@ esp_err_t display_manager_wake(display_manager_t *display) {
     }
 
     bool was_off = (display->state == DISPLAY_STATE_OFF);
-    
+
     // Stop any running timers
     esp_timer_stop(display->dim_timer);
     esp_timer_stop(display->off_timer);
-    
+
     if (display->state != DISPLAY_STATE_FULL_BRIGHTNESS) {
         ESP_LOGI(TAG, "Waking display to full brightness - setting contrast to 255");
         display->state = DISPLAY_STATE_FULL_BRIGHTNESS;
-        u8g2_SetPowerSave(&display->u8g2, 0);  // Wake up display
-        u8g2_SetContrast(&display->u8g2, 255); // Full brightness
+
+        // Protect SPI access with mutex
+        if (xSemaphoreTake(display->spi_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+            u8g2_SetPowerSave(&display->u8g2, 0);  // Wake up display
+            u8g2_SetContrast(&display->u8g2, 255); // Full brightness
+            xSemaphoreGive(display->spi_mutex);
+        }
+
         display->needs_update = true;
     }
 

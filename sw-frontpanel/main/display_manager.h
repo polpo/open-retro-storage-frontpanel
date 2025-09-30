@@ -6,6 +6,8 @@
 #include "u8g2.h"
 #include "esp_err.h"
 #include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 
 typedef enum {
     DISPLAY_STATE_FULL_BRIGHTNESS,
@@ -23,6 +25,7 @@ typedef struct {
     display_state_t state;
     esp_timer_handle_t dim_timer;
     esp_timer_handle_t off_timer;
+    SemaphoreHandle_t spi_mutex;
 } display_manager_t;
 
 esp_err_t display_manager_init(display_manager_t *display);
@@ -31,6 +34,7 @@ esp_err_t display_manager_request_update(display_manager_t *display);
 esp_err_t display_manager_update(display_manager_t *display);
 esp_err_t display_manager_draw_bitmap(display_manager_t *display, uint8_t x, uint8_t y, uint8_t width, uint8_t height, const uint8_t *bitmap);
 esp_err_t display_manager_draw_text(display_manager_t *display, uint8_t x, uint8_t y, const char *text);
+esp_err_t display_manager_draw_glyph(display_manager_t *display, uint8_t x, uint8_t y, uint16_t glyph);
 esp_err_t display_manager_set_font(display_manager_t *display, const uint8_t *font);
 esp_err_t display_manager_set_draw_color(display_manager_t *display, uint8_t color);
 esp_err_t display_manager_draw_box(display_manager_t *display, uint8_t x, uint8_t y, uint8_t width, uint8_t height);

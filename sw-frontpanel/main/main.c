@@ -30,6 +30,7 @@ static menu_t main_menu;
 static menu_t disc_menu;
 static menu_t wifi_menu;
 static menu_t settings_menu;
+static menu_t *active_menu = NULL;  // Pointer to currently displayed menu
 static host_comm_t host_comm;
 static wifi_manager_t wifi_manager;
 static web_server_t web_server;
@@ -41,6 +42,7 @@ static ota_manager_t ota_manager;
 static bool disc_list_loaded = false;
 static char current_disc_name[64] = "No disc loaded";
 static playback_status_t current_playback_status = {0};
+static bool disc_name_changed = true;  // Flag to signal title changed
 
 // Forward declarations
 static esp_err_t refresh_disc_list(void);
@@ -89,7 +91,7 @@ static void handle_button_event(button_event_t *event) {
                 case 1: // Right button (East) - Go to main menu
                     if (event->type == BUTTON_EVENT_CLICK) {
                         current_screen = SCREEN_MAIN_MENU;
-                        ui_draw_menu(&display, &main_menu);
+                        active_menu = &main_menu;
                     }
                     break;
                 default:
@@ -102,13 +104,11 @@ static void handle_button_event(button_event_t *event) {
                 case 0: // Up button (North)
                     if (event->type == BUTTON_EVENT_CLICK || event->type == BUTTON_EVENT_REPEAT) {
                         menu_navigate_up(&main_menu);
-                        ui_draw_menu(&display, &main_menu);
                     }
                     break;
                 case 2: // Down button (South)
                     if (event->type == BUTTON_EVENT_CLICK || event->type == BUTTON_EVENT_REPEAT) {
                         menu_navigate_down(&main_menu);
-                        ui_draw_menu(&display, &main_menu);
                     }
                     break;
                 case 1: // Select button (East)
@@ -121,7 +121,7 @@ static void handle_button_event(button_event_t *event) {
                                 refresh_disc_list();
                             }
                             current_screen = SCREEN_DISC_LIST;
-                            ui_draw_menu(&display, &disc_menu);
+                            active_menu = &disc_menu;
                         } else if (selected == 1) { // "Eject Disc"
                             if (host_comm.initialized) {
                                 esp_err_t ret = host_comm_eject_disc(&host_comm);
@@ -136,9 +136,10 @@ static void handle_button_event(button_event_t *event) {
                             }
                         } else if (selected == 2) { // "Settings"
                             current_screen = SCREEN_SETTINGS;
-                            ui_draw_menu(&display, &settings_menu);
+                            active_menu = &settings_menu;
                         } else if (selected == 3) { // "System Info"
                             current_screen = SCREEN_INFO;
+                            active_menu = NULL;
                             char info_text[128];
                             snprintf(info_text, sizeof(info_text),
                                 "PicoIDE Front Panel\nFW: v0.1.0\nESP32-C3\n%s: %s",
@@ -151,8 +152,10 @@ static void handle_button_event(button_event_t *event) {
                 case 3: // Back button (West)
                     if (event->type == BUTTON_EVENT_CLICK) {
                         current_screen = SCREEN_STATUS;
+                        active_menu = NULL;
                         refresh_playback_status();
-                        ui_draw_status_screen(&display, current_disc_name, &current_playback_status);
+                        ui_draw_status_screen(&display, current_disc_name, &current_playback_status, disc_name_changed);
+                        disc_name_changed = false;
                     }
                     break;
             }
@@ -163,13 +166,11 @@ static void handle_button_event(button_event_t *event) {
                 case 0: // Up button (North)
                     if (event->type == BUTTON_EVENT_CLICK || event->type == BUTTON_EVENT_REPEAT) {
                         menu_navigate_up(&disc_menu);
-                        ui_draw_menu(&display, &disc_menu);
                     }
                     break;
                 case 2: // Down button (South)
                     if (event->type == BUTTON_EVENT_CLICK || event->type == BUTTON_EVENT_REPEAT) {
                         menu_navigate_down(&disc_menu);
-                        ui_draw_menu(&display, &disc_menu);
                     }
                     break;
                 case 1: // Select button (East)
@@ -190,7 +191,7 @@ static void handle_button_event(button_event_t *event) {
                             }
                             // Go back to main menu
                             current_screen = SCREEN_MAIN_MENU;
-                            ui_draw_menu(&display, &main_menu);
+                            active_menu = &main_menu;
                             ui_draw_status_bar(&display, current_disc_name);
                         }
                     }
@@ -198,7 +199,7 @@ static void handle_button_event(button_event_t *event) {
                 case 3: // Back button (West)
                     if (event->type == BUTTON_EVENT_CLICK) {
                         current_screen = SCREEN_MAIN_MENU;
-                        ui_draw_menu(&display, &main_menu);
+                        active_menu = &main_menu;
                     }
                     break;
             }
@@ -209,13 +210,11 @@ static void handle_button_event(button_event_t *event) {
                 case 0: // Up button (North)
                     if (event->type == BUTTON_EVENT_CLICK || event->type == BUTTON_EVENT_REPEAT) {
                         menu_navigate_up(&settings_menu);
-                        ui_draw_menu(&display, &settings_menu);
                     }
                     break;
                 case 2: // Down button (South)
                     if (event->type == BUTTON_EVENT_CLICK || event->type == BUTTON_EVENT_REPEAT) {
                         menu_navigate_down(&settings_menu);
-                        ui_draw_menu(&display, &settings_menu);
                     }
                     break;
                 case 1: // Select button (East)
@@ -223,7 +222,7 @@ static void handle_button_event(button_event_t *event) {
                         uint32_t selected = menu_get_selected_index(&settings_menu);
                         if (selected == 0) { // "WiFi Setup"
                             current_screen = SCREEN_WIFI_MENU;
-                            ui_draw_menu(&display, &wifi_menu);
+                            active_menu = &wifi_menu;
                         } else if (selected == 1) { // "Web Interface"
                             // TODO: Implement web interface settings
                             ESP_LOGI(TAG, "Web interface settings not implemented yet");
@@ -232,14 +231,14 @@ static void handle_button_event(button_event_t *event) {
                             ESP_LOGI(TAG, "Display settings not implemented yet");
                         } else if (selected == 3) { // "Back"
                             current_screen = SCREEN_MAIN_MENU;
-                            ui_draw_menu(&display, &main_menu);
+                            active_menu = &main_menu;
                         }
                     }
                     break;
                 case 3: // Back button (West)
                     if (event->type == BUTTON_EVENT_CLICK) {
                         current_screen = SCREEN_MAIN_MENU;
-                        ui_draw_menu(&display, &main_menu);
+                        active_menu = &main_menu;
                     }
                     break;
             }
@@ -250,13 +249,11 @@ static void handle_button_event(button_event_t *event) {
                 case 0: // Up button (North)
                     if (event->type == BUTTON_EVENT_CLICK || event->type == BUTTON_EVENT_REPEAT) {
                         menu_navigate_up(&wifi_menu);
-                        ui_draw_menu(&display, &wifi_menu);
                     }
                     break;
                 case 2: // Down button (South)
                     if (event->type == BUTTON_EVENT_CLICK || event->type == BUTTON_EVENT_REPEAT) {
                         menu_navigate_down(&wifi_menu);
-                        ui_draw_menu(&display, &wifi_menu);
                     }
                     break;
                 case 1: // Select button (East)
@@ -324,14 +321,14 @@ static void handle_button_event(button_event_t *event) {
                             }
                         } else if (selected == 4) { // "Back"
                             current_screen = SCREEN_SETTINGS;
-                            ui_draw_menu(&display, &settings_menu);
+                            active_menu = &settings_menu;
                         }
                     }
                     break;
                 case 3: // Back button (West)
                     if (event->type == BUTTON_EVENT_CLICK) {
                         current_screen = SCREEN_SETTINGS;
-                        ui_draw_menu(&display, &settings_menu);
+                        active_menu = &settings_menu;
                     }
                     break;
             }
@@ -341,6 +338,7 @@ static void handle_button_event(button_event_t *event) {
             if (event->type == BUTTON_EVENT_CLICK && event->button_id == 3) {
                 // Back button - return to main menu
                 current_screen = SCREEN_MAIN_MENU;
+                active_menu = &main_menu;
                 ui_draw_menu(&display, &main_menu);
             }
             break;
@@ -353,37 +351,59 @@ static void handle_button_event(button_event_t *event) {
         default:
             break;
     }
+
+    // Trigger redraw of active menu when switching screens
+    if (active_menu) {
+        active_menu->needs_redraw = true;
+    }
 }
 
 // Display update task
 static void display_update_task(void *pvParameters) {
     while (1) {
-        // Update display if needed
-        if (display.initialized && display.needs_update) {
-            display_manager_update(&display);
+        if (display.initialized) {
+            // Handle screen-specific continuous redraws for scrolling
+            if (current_screen == SCREEN_STATUS) {
+                // Status screen scrolling
+                ui_draw_status_screen(&display, current_disc_name, &current_playback_status, disc_name_changed);
+                disc_name_changed = false;
+            } else if (active_menu && menu_needs_redraw(active_menu)) {
+                // Menu scrolling
+                ui_draw_menu(&display, active_menu);
+            }
+
+            // Send buffer to display if needed
+            if (display.needs_update) {
+                display_manager_update(&display);
+            }
         }
-        vTaskDelay(pdMS_TO_TICKS(16)); // 60 FPS to match display manager rate
+
+        vTaskDelay(pdMS_TO_TICKS(33)); // 30 FPS to avoid visual glitches
     }
 }
 
-// Status screen refresh task
+// Status screen refresh task - updates playback data from host
 static void status_refresh_task(void *pvParameters) {
     while (1) {
-        // Only refresh if on status screen
+        // Only refresh if on status screen and host is initialized
         if (current_screen == SCREEN_STATUS && host_comm.initialized) {
             refresh_playback_status();
-            ui_draw_status_screen(&display, current_disc_name, &current_playback_status);
         }
-        vTaskDelay(pdMS_TO_TICKS(1000)); // Refresh every second
+        vTaskDelay(pdMS_TO_TICKS(1000)); // Update every 1 second
     }
 }
 
 // Function to refresh playback status from host
 static void refresh_playback_status(void) {
+    char old_disc_name[64];
+    strncpy(old_disc_name, current_disc_name, sizeof(old_disc_name) - 1);
+    old_disc_name[sizeof(old_disc_name) - 1] = '\0';
+
     if (!host_comm.initialized) {
         memset(&current_playback_status, 0, sizeof(current_playback_status));
         strncpy(current_disc_name, "No disc loaded", sizeof(current_disc_name) - 1);
         current_disc_name[sizeof(current_disc_name) - 1] = '\0';
+        disc_name_changed = (strcmp(old_disc_name, current_disc_name) != 0);
         return;
     }
 
@@ -393,14 +413,17 @@ static void refresh_playback_status(void) {
         memset(&current_playback_status, 0, sizeof(current_playback_status));
         strncpy(current_disc_name, "No disc loaded", sizeof(current_disc_name) - 1);
         current_disc_name[sizeof(current_disc_name) - 1] = '\0';
+        disc_name_changed = (strcmp(old_disc_name, current_disc_name) != 0);
     } else if (!current_playback_status.disc_inserted) {
         ESP_LOGI(TAG, "Playback status: No disc inserted");
         strncpy(current_disc_name, "No disc loaded", sizeof(current_disc_name) - 1);
         current_disc_name[sizeof(current_disc_name) - 1] = '\0';
+        disc_name_changed = (strcmp(old_disc_name, current_disc_name) != 0);
     } else {
         // Copy disc name from playback status
         strncpy(current_disc_name, current_playback_status.disc_name, sizeof(current_disc_name) - 1);
         current_disc_name[sizeof(current_disc_name) - 1] = '\0';
+        disc_name_changed = (strcmp(old_disc_name, current_disc_name) != 0);
 
         ESP_LOGI(TAG, "Playback status: disc='%s' type=%d playing=%d audio_status=0x%02x track=%d pos=%02d:%02d",
                 current_disc_name,
@@ -540,6 +563,7 @@ static void firmware_update_task(void *pvParameters) {
 
     led_stop_pulse();
     current_screen = SCREEN_MAIN_MENU;
+    active_menu = &main_menu;
     ui_draw_menu(&display, &main_menu);
     vTaskDelete(NULL);
 }
@@ -644,8 +668,8 @@ void app_main(void) {
         return;
     }
 
-    xTaskCreate(display_update_task, "display_update", 4096, NULL, 5, NULL);
-    xTaskCreate(status_refresh_task, "status_refresh", 4096, NULL, 4, NULL);
+    xTaskCreate(display_update_task, "display_update", 2048, NULL, 5, NULL);
+    xTaskCreate(status_refresh_task, "status_refresh", 2048, NULL, 4, NULL);
 
     ui_show_splash_screen(&display);
     ui_update_splash_progress(&display, "Init display...", 10);
@@ -857,8 +881,10 @@ void app_main(void) {
     led_stop_pulse();
 
     current_screen = SCREEN_STATUS;
+    active_menu = NULL;
     refresh_playback_status();
-    ui_draw_status_screen(&display, current_disc_name, &current_playback_status);
+    ui_draw_status_screen(&display, current_disc_name, &current_playback_status, disc_name_changed);
+    disc_name_changed = false;
 
     int initial_act_state = gpio_get_level(PIN_ACT_IN);
     led_set_color(initial_act_state ? COLOR_ORANGE : COLOR_CYAN);

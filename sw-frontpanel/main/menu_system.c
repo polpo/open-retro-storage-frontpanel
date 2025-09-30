@@ -74,6 +74,11 @@ esp_err_t menu_clear_items(menu_t *menu) {
         menu->items = NULL;
     }
 
+    if (menu->text_scroll_state) {
+        free(menu->text_scroll_state);
+        menu->text_scroll_state = NULL;
+    }
+
     menu->item_count = 0;
     menu->selected_index = 0;
     menu->cursor_position = 0;
