@@ -258,12 +258,6 @@ esp_err_t ui_draw_menu(display_manager_t *display, menu_t *menu) {
         }
     }
 
-    // Mark menu as needing redraw if text is actively scrolling
-    if (scrolling_active && scroll_state && scroll_state->needs_scroll) {
-        menu->needs_redraw = true;
-    }
-    // Note: We don't clear needs_redraw here - let it stay set if navigation occurred
-
     // Draw scroll bar if there are more items than visible
     if (menu->item_count > menu->visible_items) {
         // Calculate scroll bar dimensions
@@ -289,8 +283,12 @@ esp_err_t ui_draw_menu(display_manager_t *display, menu_t *menu) {
     // Request display update
     display_manager_request_update(display);
 
-    // Clear the redraw flag - it will be set again if scrolling continues or navigation occurs
-    menu_clear_redraw_flag(menu);
+    // Keep needs_redraw set if scrolling active, otherwise clear it
+    if (scrolling_active && scroll_state && scroll_state->needs_scroll) {
+        menu->needs_redraw = true;
+    } else {
+        menu_clear_redraw_flag(menu);
+    }
 
     return ESP_OK;
 }
