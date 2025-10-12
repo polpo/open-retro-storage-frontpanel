@@ -15,11 +15,15 @@
 #define PANEL_CMD_DIR_MASK            0x80
 #define PANEL_CMD_ASYNC_FLAG          0x40  // Bit 6 indicates async operation
 
-// Write commands (bit 7 = 0)
-#define PANEL_CMD_START_DISC_COUNT     0x42  // Start disc enumeration (async)
-#define PANEL_CMD_SELECT_DISC          0x44  // Select disc (async, arg: index or 0xFF for extended)
-#define PANEL_CMD_EJECT_DISC           0x45  // Eject current disc (async)
-#define PANEL_CMD_START_DISC_INFO      0x46  // Start disc info read (async, arg: index or 0xFF for extended)
+// Write commands (bit 7 = 0, bit 6 = 1 for async)
+#define PANEL_CMD_GET_DIR_ENTRY_COUNT  0x42  // Get count of entries in current directory (async)
+#define PANEL_CMD_GET_ENTRY_INFO       0x43  // Get info for entry at index (async, arg: index)
+#define PANEL_CMD_SELECT_ENTRY         0x44  // Select entry by index: -1 (0xFFFF)=parent dir, >=0=select entry (async, arg: signed 16-bit index)
+#define PANEL_CMD_GET_CURRENT_PATH     0x45  // Get current directory path (async)
+#define PANEL_CMD_EJECT_IMAGE          0x47  // Unload current image (async)
+#define PANEL_CMD_GET_LOADED_IMAGE_STATUS 0x48  // Get status of currently loaded image (async)
+#define PANEL_CMD_SELECT_PREV_IMAGE    0x49  // Load previous image in current directory (async)
+#define PANEL_CMD_SELECT_NEXT_IMAGE    0x4A  // Load next image in current directory (async)
 #define PANEL_CMD_CHECK_FIRMWARE       0x50  // Check for firmware update (async)
 #define PANEL_CMD_START_FIRMWARE_READ  0x51  // Start firmware read (async, arg: chunk index)
 #define PANEL_CMD_START_FILE_UPLOAD    0x52  // Start file upload (async, payload: file_upload_start_t)
@@ -30,8 +34,8 @@
 // Read commands (bit 7 = 1)
 #define PANEL_CMD_POLL_STATUS          0x80  // Get general status (1 byte response)
 #define PANEL_CMD_POLL_OP_READY        0x81  // Check if async operation ready (3 bytes: ready, size low, size high)
-#define PANEL_CMD_GET_DISC_STATUS      0x83  // Get disc loaded status (1 byte response)
-#define PANEL_CMD_GET_FIRMWARE_INFO    0x84  // Get firmware info after CHECK_FIRMWARE (16 bytes)
+#define PANEL_CMD_GET_DEVICE_STATUS    0x83  // Get device status (1 byte response)
+#define PANEL_CMD_GET_FIRMWARE_INFO    0x84  // Get firmware info after CHECK_FIRMWARE (45 bytes)
 #define PANEL_CMD_GET_PLAYBACK_STATUS  0x85  // Get current playback status (panel_playback_status_t)
 
 // Status codes for POLL_STATUS
@@ -40,11 +44,11 @@
 #define PANEL_STATUS_ERROR             0x02  // Last operation failed
 #define PANEL_STATUS_NO_OPERATION      0x03  // No operation pending
 
-// Disc status codes for GET_DISC_STATUS
-#define PANEL_DISC_STATUS_NO_DISC      0x00  // No disc loaded
-#define PANEL_DISC_STATUS_LOADED       0x01  // Disc loaded and ready
-#define PANEL_DISC_STATUS_LOADING      0x02  // Disc loading in progress
-#define PANEL_DISC_STATUS_ERROR        0x03  // Disc error
+// Device status codes for GET_DEVICE_STATUS
+#define PANEL_DEVICE_STATUS_NO_IMAGE   0x00  // No image loaded
+#define PANEL_DEVICE_STATUS_LOADED     0x01  // Image loaded and ready
+#define PANEL_DEVICE_STATUS_LOADING    0x02  // Image loading in progress
+#define PANEL_DEVICE_STATUS_ERROR      0x03  // Image error
 
 // Special argument values
 #define PANEL_ARG_EXTENDED             0xFFFF  // Use payload for extended data
@@ -86,10 +90,10 @@ typedef struct __attribute__((packed)) {
 } panel_firmware_info_t;
 
 // Firmware chunk size (must fit within PANEL_PROTOCOL_MAX_PAYLOAD)
-#define PANEL_FIRMWARE_CHUNK_SIZE PANEL_PROTOCOL_MAX_PAYLOAD
+#define PANEL_FIRMWARE_CHUNK_SIZE  PANEL_PROTOCOL_MAX_PAYLOAD
 
 // File upload chunk size (must fit within PANEL_PROTOCOL_MAX_PAYLOAD)
-#define PANEL_FILE_CHUNK_SIZE PANEL_PROTOCOL_MAX_PAYLOAD
+#define PANEL_FILE_CHUNK_SIZE      PANEL_PROTOCOL_MAX_PAYLOAD
 
 // File upload start structure (variable length with filename and hash)
 typedef struct __attribute__((packed)) {
@@ -132,3 +136,36 @@ typedef struct __attribute__((packed)) {
     char disc_name[64];       // Current disc name (null-terminated)
     uint8_t reserved[4];      // Reserved for future use
 } panel_playback_status_t;
+
+// Entry type for directory listings
+#define PANEL_ENTRY_TYPE_DIRECTORY  0x00  // Subdirectory (navigate into it)
+#define PANEL_ENTRY_TYPE_FILE       0x01  // Image file (load it)
+
+// Directory entry information structure (72 bytes)
+typedef struct __attribute__((packed)) {
+    char name[64];           // Filename or directory name (null-terminated)
+    uint8_t entry_type;      // PANEL_ENTRY_TYPE_*
+    uint8_t reserved[3];     // Padding for alignment
+    uint32_t size_mb;        // File size in MB (only valid for files)
+} dir_entry_info_t;
+
+// Device type codes
+#define PANEL_DEVICE_TYPE_ATAPI  0x00  // CD-ROM drive
+#define PANEL_DEVICE_TYPE_IDE    0x01  // Hard disk drive
+
+// Currently loaded image status structure (216 bytes)
+typedef struct __attribute__((packed)) {
+    uint8_t image_loaded;         // 1 if image loaded, 0 if not
+    uint8_t device_type;          // PANEL_DEVICE_TYPE_*
+    uint8_t reserved1[2];         // Padding
+    char image_name[64];          // Name of loaded image (null-terminated)
+    char directory_path[128];     // Directory containing the image (null-terminated)
+    uint32_t size_mb;             // Size in MB
+    uint32_t image_index;         // Index in current directory (0-based, only files counted)
+    uint32_t total_images;        // Total number of images in directory
+    // IDE-specific (only when device_type == PANEL_DEVICE_TYPE_IDE)
+    uint16_t cylinders;
+    uint8_t heads;
+    uint8_t sectors;
+    uint8_t reserved2[8];         // Reserved for future use
+} loaded_image_status_t;

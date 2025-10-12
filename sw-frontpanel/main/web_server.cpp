@@ -164,14 +164,14 @@ static esp_err_t api_discs_handler(httpd_req_t *req) {
     if (ret != ESP_OK) return ret;
 
     if (g_server && g_server->interface_ctx) {
-        // Get current disc
-        char current_disc[64];
-        esp_err_t disc_ret = interface_get_current_disc(g_server->interface_ctx, current_disc, sizeof(current_disc));
+        // Get current image
+        char current_image[64];
+        esp_err_t image_ret = interface_get_current_image(g_server->interface_ctx, current_image, sizeof(current_image));
 
-        if (disc_ret == ESP_OK) {
-            ret = json.write("current_disc", current_disc);
+        if (image_ret == ESP_OK) {
+            ret = json.write("current_disc", current_image);
         } else {
-            ret = json.write("current_disc", "No disc loaded");
+            ret = json.write("current_disc", "No image loaded");
         }
         if (ret != ESP_OK) return ret;
 
@@ -182,42 +182,38 @@ static esp_err_t api_discs_handler(httpd_req_t *req) {
         ret = json.beginArray();
         if (ret != ESP_OK) return ret;
 
-        // Get disc count first
-        uint32_t disc_count = 0;
-        disc_ret = host_comm_get_disc_count(g_server->interface_ctx->host_comm, &disc_count);
+        // Get entries through interface layer
+        dir_entry_info_t entries[64];
+        size_t entry_count = 0;
+        image_ret = interface_get_entry_list(g_server->interface_ctx, entries, 64, &entry_count);
 
-        if (disc_ret == ESP_OK && disc_count > 0) {
-            // Fetch each disc one at a time and stream it
-            for (uint32_t i = 0; i < disc_count && i < 64; i++) {
-                disc_info_t disc_info;
-                disc_ret = host_comm_get_disc_info(g_server->interface_ctx->host_comm, i, &disc_info);
+        if (image_ret == ESP_OK && entry_count > 0) {
+            // Stream each entry
+            for (size_t i = 0; i < entry_count; i++) {
+                ret = json.beginObject();
+                if (ret != ESP_OK) return ret;
 
-                if (disc_ret == ESP_OK) {
-                    ret = json.beginObject();
-                    if (ret != ESP_OK) return ret;
+                ret = json.write("name", entries[i].name);
+                if (ret != ESP_OK) return ret;
 
-                    ret = json.write("name", disc_info.name);
-                    if (ret != ESP_OK) return ret;
+                ret = json.write("size", entries[i].size_mb);
+                if (ret != ESP_OK) return ret;
 
-                    ret = json.write("size", disc_info.size);
-                    if (ret != ESP_OK) return ret;
+                ret = json.write("type", entries[i].entry_type == 0 ? "directory" : "file");
+                if (ret != ESP_OK) return ret;
 
-                    ret = json.write("tracks", disc_info.tracks);
-                    if (ret != ESP_OK) return ret;
+                ret = json.write("index", (int)i);
+                if (ret != ESP_OK) return ret;
 
-                    ret = json.write("index", i);
-                    if (ret != ESP_OK) return ret;
-
-                    ret = json.endObject();
-                    if (ret != ESP_OK) return ret;
-                }
+                ret = json.endObject();
+                if (ret != ESP_OK) return ret;
             }
         }
 
         ret = json.endArray();
         if (ret != ESP_OK) return ret;
     } else {
-        ret = json.write("current_disc", "No disc loaded");
+        ret = json.write("current_disc", "No image loaded");
         if (ret != ESP_OK) return ret;
 
         ret = json.writeKey("discs");
@@ -254,14 +250,14 @@ static esp_err_t api_select_disc_handler(httpd_req_t *req) {
         return ESP_FAIL;
     }
 
-    cJSON *disc_index_json = cJSON_GetObjectItem(json, "disc_index");
-    if (!cJSON_IsNumber(disc_index_json)) {
+    cJSON *entry_index_json = cJSON_GetObjectItem(json, "entry_index");
+    if (!cJSON_IsNumber(entry_index_json)) {
         cJSON_Delete(json);
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing or invalid disc_index");
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing or invalid entry_index");
         return ESP_FAIL;
     }
 
-    uint32_t disc_index = (uint32_t)disc_index_json->valueint;
+    int32_t entry_index = (int32_t)entry_index_json->valueint;
 
     // Send command to host
     httpd_resp_set_type(req, "application/json");
@@ -275,7 +271,7 @@ static esp_err_t api_select_disc_handler(httpd_req_t *req) {
 
     bool success = false;
     if (g_server && g_server->interface_ctx) {
-        esp_err_t select_ret = interface_select_disc(g_server->interface_ctx, disc_index);
+        esp_err_t select_ret = interface_select_entry(g_server->interface_ctx, entry_index);
         success = (select_ret == ESP_OK);
         if (!success) {
             json_ret = json_writer.write("error", esp_err_to_name(select_ret));
@@ -317,7 +313,7 @@ static esp_err_t api_eject_disc_handler(httpd_req_t *req) {
 
     bool success = false;
     if (g_server && g_server->interface_ctx) {
-        esp_err_t eject_ret = interface_eject_disc(g_server->interface_ctx);
+        esp_err_t eject_ret = interface_eject_image(g_server->interface_ctx);
         success = (eject_ret == ESP_OK);
         if (!success) {
             ret = json.write("error", esp_err_to_name(eject_ret));

@@ -14,34 +14,8 @@ extern "C" {
 #define HOST_COMM_MAX_DATA_SIZE 256
 #define HOST_COMM_TIMEOUT_MS 1000
 
-// Status codes for disc operations
-typedef enum {
-    HOST_STATUS_NO_DISC = 0x00,     // No disc loaded
-    HOST_STATUS_DISC_LOADED = 0x01, // Disc loaded and ready
-    HOST_STATUS_LOADING = 0x02,     // Disc loading in progress
-    HOST_STATUS_ERROR = 0x03        // Disc error
-} host_status_t;
-
-// Disc information structure
-typedef struct {
-    char name[64];
-    uint32_t size;
-    uint32_t tracks;
-} disc_info_t;
-
-// Playback status structure (must match panel_playback_status_t)
-typedef struct {
-    uint8_t disc_inserted;
-    uint8_t disc_type;
-    uint8_t is_playing;
-    uint8_t audio_status;
-    uint8_t current_track;
-    uint8_t track_position_m;
-    uint8_t track_position_s;
-    uint8_t track_position_f;
-    char disc_name[64];
-    uint8_t reserved[4];
-} playback_status_t;
+// Use playback status structure from protocol definitions
+typedef panel_playback_status_t playback_status_t;
 
 // Host communication handle
 typedef struct {
@@ -53,14 +27,20 @@ typedef struct {
 esp_err_t host_comm_init(host_comm_t *comm, const transport_config_t *config);
 esp_err_t host_comm_deinit(host_comm_t *comm);
 
-esp_err_t host_comm_get_status(host_comm_t *comm, host_status_t *status);
-esp_err_t host_comm_get_disc_count(host_comm_t *comm, uint32_t *count);
-esp_err_t host_comm_get_disc_list(host_comm_t *comm, disc_info_t *discs, 
-                                  size_t max_discs, size_t *disc_count);
-esp_err_t host_comm_select_disc(host_comm_t *comm, uint32_t disc_index);
-esp_err_t host_comm_eject_disc(host_comm_t *comm);
-esp_err_t host_comm_get_disc_info(host_comm_t *comm, uint32_t disc_index,
-                                   disc_info_t *info);
+// Directory browsing functions
+esp_err_t host_comm_get_entry_count(host_comm_t *comm, uint32_t *count);
+esp_err_t host_comm_get_entry_info(host_comm_t *comm, uint32_t index, dir_entry_info_t *info);
+esp_err_t host_comm_select_entry(host_comm_t *comm, int32_t index);  // -1 = parent dir, >=0 = select entry
+esp_err_t host_comm_get_current_path(host_comm_t *comm, char *path, size_t max_len);
+
+// Image management functions
+esp_err_t host_comm_select_prev_image(host_comm_t *comm);
+esp_err_t host_comm_select_next_image(host_comm_t *comm);
+esp_err_t host_comm_eject_image(host_comm_t *comm);
+esp_err_t host_comm_get_loaded_image_status(host_comm_t *comm, loaded_image_status_t *status);
+
+// Status functions
+esp_err_t host_comm_get_device_status(host_comm_t *comm, uint8_t *status);
 esp_err_t host_comm_get_playback_status(host_comm_t *comm, playback_status_t *status);
 
 // Firmware update functions

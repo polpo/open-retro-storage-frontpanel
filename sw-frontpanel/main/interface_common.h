@@ -30,11 +30,11 @@ typedef struct {
     char current_disc[64];
 } system_info_t;
 
-// Disc operations
-esp_err_t interface_get_disc_list(interface_context_t *ctx, disc_info_t *discs, size_t max_discs, size_t *disc_count);
-esp_err_t interface_select_disc(interface_context_t *ctx, uint32_t disc_index);
-esp_err_t interface_eject_disc(interface_context_t *ctx);
-esp_err_t interface_get_current_disc(interface_context_t *ctx, char *disc_name, size_t max_len);
+// Directory and image operations
+esp_err_t interface_get_entry_list(interface_context_t *ctx, dir_entry_info_t *entries, size_t max_entries, size_t *entry_count);
+esp_err_t interface_select_entry(interface_context_t *ctx, int32_t entry_index);
+esp_err_t interface_eject_image(interface_context_t *ctx);
+esp_err_t interface_get_current_image(interface_context_t *ctx, char *image_name, size_t max_len);
 
 // WiFi operations
 esp_err_t interface_wifi_scan(interface_context_t *ctx, wifi_ap_info_t *networks, size_t max_networks, size_t *found_networks);

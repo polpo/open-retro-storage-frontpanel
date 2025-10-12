@@ -45,7 +45,7 @@ static playback_status_t current_playback_status = {0};
 static bool disc_name_changed = true;  // Flag to signal title changed
 
 // Forward declarations
-static esp_err_t refresh_disc_list(void);
+static esp_err_t refresh_directory_list(void);
 static void refresh_playback_status(void);
 
 static menu_item_t main_menu_items[] = {
@@ -115,16 +115,16 @@ static void handle_button_event(button_event_t *event) {
                     if (event->type == BUTTON_EVENT_CLICK) {
                         uint32_t selected = menu_get_selected_index(&main_menu);
                         if (selected == 0) { // "Select Disc"
-                            // Refresh disc list before showing it
+                            // Refresh directory list before showing it
                             if (!disc_list_loaded && host_comm.initialized) {
-                                ESP_LOGI(TAG, "Loading disc list...");
-                                refresh_disc_list();
+                                ESP_LOGI(TAG, "Loading directory list...");
+                                refresh_directory_list();
                             }
                             current_screen = SCREEN_DISC_LIST;
                             active_menu = &disc_menu;
                         } else if (selected == 1) { // "Eject Disc"
                             if (host_comm.initialized) {
-                                esp_err_t ret = host_comm_eject_disc(&host_comm);
+                                esp_err_t ret = host_comm_eject_image(&host_comm);
                                 if (ret == ESP_OK) {
                                     strncpy(current_disc_name, "No disc loaded", sizeof(current_disc_name) - 1);
                                     current_disc_name[sizeof(current_disc_name) - 1] = '\0';
@@ -178,21 +178,22 @@ static void handle_button_event(button_event_t *event) {
                         uint32_t selected = menu_get_selected_index(&disc_menu);
                         menu_item_t *selected_item = menu_get_selected_item(&disc_menu);
                         if (selected_item) {
-                            ESP_LOGI(TAG, "Selected disc: %s", selected_item->text);
+                            ESP_LOGI(TAG, "Selected entry: %s (menu index %lu)", selected_item->text, selected);
                             // Send command to host device
                             if (host_comm.initialized) {
-                                esp_err_t ret = host_comm_select_disc(&host_comm, selected);
+                                // First menu item is ".." (parent dir = index -1)
+                                // Other items are entries (index 0, 1, 2...)
+                                int32_t entry_index = (selected == 0) ? -1 : (int32_t)(selected - 1);
+
+                                esp_err_t ret = host_comm_select_entry(&host_comm, entry_index);
                                 if (ret == ESP_OK) {
-                                    strncpy(current_disc_name, selected_item->text, sizeof(current_disc_name) - 1);
-                                    current_disc_name[sizeof(current_disc_name) - 1] = '\0';
+                                    // Refresh the directory list after selection
+                                    refresh_directory_list();
+                                    // Stay in directory browser (don't go back to main menu)
                                 } else {
-                                    ESP_LOGW(TAG, "Failed to select disc via host comm: %s", esp_err_to_name(ret));
+                                    ESP_LOGW(TAG, "Failed to select entry via host comm: %s", esp_err_to_name(ret));
                                 }
                             }
-                            // Go back to main menu
-                            current_screen = SCREEN_MAIN_MENU;
-                            active_menu = &main_menu;
-                            ui_draw_status_bar(&display, current_disc_name);
                         }
                     }
                     break;
@@ -436,52 +437,63 @@ static void refresh_playback_status(void) {
     }
 }
 
-// Function to refresh disc list from host
-static esp_err_t refresh_disc_list(void) {
+// Function to refresh directory entry list from host
+static esp_err_t refresh_directory_list(void) {
     if (!host_comm.initialized) {
         ESP_LOGW(TAG, "Host comm not initialized");
         return ESP_ERR_INVALID_STATE;
     }
-    
-    // Clear current disc list
+
+    // Clear current menu
     menu_clear_items(&disc_menu);
-    
-    // Get disc count from host
-    uint32_t disc_count = 0;
-    esp_err_t ret = host_comm_get_disc_count(&host_comm, &disc_count);
+
+    // Get entry count from host
+    uint32_t entry_count = 0;
+    esp_err_t ret = host_comm_get_entry_count(&host_comm, &entry_count);
     if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "Failed to get disc count: %s", esp_err_to_name(ret));
+        ESP_LOGW(TAG, "Failed to get entry count: %s", esp_err_to_name(ret));
         // Add fallback message
-        menu_add_item(&disc_menu, "No discs available", MENU_ACTION_SELECT, NULL, NULL);
+        menu_add_item(&disc_menu, "No entries available", MENU_ACTION_SELECT, NULL, NULL);
         return ret;
     }
-    
-    ESP_LOGI(TAG, "Found %lu discs on host", disc_count);
-    
-    if (disc_count == 0) {
-        menu_add_item(&disc_menu, "No discs available", MENU_ACTION_SELECT, NULL, NULL);
+
+    ESP_LOGI(TAG, "Found %lu entries in current directory", entry_count);
+
+    if (entry_count == 0) {
+        menu_add_item(&disc_menu, "Empty directory", MENU_ACTION_SELECT, NULL, NULL);
         return ESP_OK;
     }
 
-    // Get info for each disc
-    for (uint32_t i = 0; i < disc_count && i < MENU_MAX_ITEMS; i++) {
-        disc_info_t disc_info;
-        ESP_LOGI(TAG, "Requesting disc info for index %lu", i);
-        ret = host_comm_get_disc_info(&host_comm, i, &disc_info);
+    // Add ".." entry to go to parent directory
+    menu_add_item(&disc_menu, "..", MENU_ACTION_SELECT, NULL, NULL);
+
+    // Get info for each entry (directories and files)
+    for (uint32_t i = 0; i < entry_count && i < MENU_MAX_ITEMS - 1; i++) {
+        dir_entry_info_t entry_info;
+        ESP_LOGI(TAG, "Requesting entry info for index %lu", i);
+        ret = host_comm_get_entry_info(&host_comm, i, &entry_info);
         if (ret == ESP_OK) {
-            ESP_LOGI(TAG, "Disc %lu: %s (%.1f MB, %lu tracks)", i, disc_info.name, 
-                    disc_info.size / 1000000.0f, disc_info.tracks);
-            menu_add_item(&disc_menu, disc_info.name, MENU_ACTION_SELECT, NULL, NULL);
+            // Add prefix to distinguish directories from files
+            char display_name[68];  // 64 + prefix + null
+            if (entry_info.entry_type == 0) {  // DIRECTORY
+                snprintf(display_name, sizeof(display_name), "[%s]", entry_info.name);
+            } else {
+                snprintf(display_name, sizeof(display_name), "%s", entry_info.name);
+            }
+
+            ESP_LOGI(TAG, "Entry %lu: %s (%lu MB, type=%u)", i, entry_info.name,
+                    entry_info.size_mb, entry_info.entry_type);
+            menu_add_item(&disc_menu, display_name, MENU_ACTION_SELECT, NULL, NULL);
         } else {
-            ESP_LOGW(TAG, "Failed to get info for disc %lu: %s", i, esp_err_to_name(ret));
+            ESP_LOGW(TAG, "Failed to get info for entry %lu: %s", i, esp_err_to_name(ret));
             char fallback_name[32];
-            snprintf(fallback_name, sizeof(fallback_name), "Disc %lu (error)", i);
+            snprintf(fallback_name, sizeof(fallback_name), "Entry %lu (error)", i);
             menu_add_item(&disc_menu, fallback_name, MENU_ACTION_SELECT, NULL, NULL);
         }
     }
-    
+
     disc_list_loaded = true;
-    ESP_LOGI(TAG, "Disc list refreshed successfully");
+    ESP_LOGI(TAG, "Directory list refreshed successfully");
     return ESP_OK;
 }
 
@@ -784,8 +796,8 @@ void app_main(void) {
         ESP_LOGI(TAG, "Host comm initialized successfully using %s",
                  host_comm_get_transport_name(&host_comm));
 
-        host_status_t test_status;
-        ret = host_comm_get_status(&host_comm, &test_status);
+        uint8_t test_status;
+        ret = host_comm_get_device_status(&host_comm, &test_status);
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "Failed to communicate with main board: %s", esp_err_to_name(ret));
             led_stop_pulse();
@@ -824,13 +836,13 @@ void app_main(void) {
                 }
             }
 
-            ESP_LOGI(TAG, "Fetching disc list at startup...");
-            ui_update_splash_progress(&display, "Load disc list...", 70);
-            esp_err_t disc_ret = refresh_disc_list();
+            ESP_LOGI(TAG, "Fetching directory list at startup...");
+            ui_update_splash_progress(&display, "Load directory...", 70);
+            esp_err_t disc_ret = refresh_directory_list();
             if (disc_ret == ESP_OK) {
-                ESP_LOGI(TAG, "Disc list loaded successfully at startup");
+                ESP_LOGI(TAG, "Directory list loaded successfully at startup");
             } else {
-                ESP_LOGW(TAG, "Failed to load disc list at startup: %s", esp_err_to_name(disc_ret));
+                ESP_LOGW(TAG, "Failed to load directory list at startup: %s", esp_err_to_name(disc_ret));
             }
         }
     }

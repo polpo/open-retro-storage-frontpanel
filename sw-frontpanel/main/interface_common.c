@@ -6,51 +6,51 @@
 
 static const char *TAG = "interface_common";
 
-esp_err_t interface_get_disc_list(interface_context_t *ctx, disc_info_t *discs, size_t max_discs, size_t *disc_count) {
-    if (!ctx || !discs || !disc_count) {
+esp_err_t interface_get_entry_list(interface_context_t *ctx, dir_entry_info_t *entries, size_t max_entries, size_t *entry_count) {
+    if (!ctx || !entries || !entry_count) {
         return ESP_ERR_INVALID_ARG;
     }
 
-    *disc_count = 0;
+    *entry_count = 0;
 
     if (!ctx->host_comm || !ctx->host_comm->initialized) {
         ESP_LOGW(TAG, "Host communication not available");
         return ESP_ERR_INVALID_STATE;
     }
 
-    // Get disc count from host
-    uint32_t total_disc_count = 0;
-    esp_err_t ret = host_comm_get_disc_count(ctx->host_comm, &total_disc_count);
+    // Get entry count from host
+    uint32_t total_entry_count = 0;
+    esp_err_t ret = host_comm_get_entry_count(ctx->host_comm, &total_entry_count);
     if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "Failed to get disc count: %s", esp_err_to_name(ret));
+        ESP_LOGW(TAG, "Failed to get entry count: %s", esp_err_to_name(ret));
         return ret;
     }
 
-    if (total_disc_count == 0) {
-        return ESP_OK; // No discs available
+    if (total_entry_count == 0) {
+        return ESP_OK; // No entries available
     }
 
-    // Get info for each disc up to the maximum requested
-    size_t discs_to_fetch = (total_disc_count < max_discs) ? total_disc_count : max_discs;
-    for (size_t i = 0; i < discs_to_fetch; i++) {
-        ret = host_comm_get_disc_info(ctx->host_comm, i, &discs[i]);
+    // Get info for each entry up to the maximum requested
+    size_t entries_to_fetch = (total_entry_count < max_entries) ? total_entry_count : max_entries;
+    for (size_t i = 0; i < entries_to_fetch; i++) {
+        ret = host_comm_get_entry_info(ctx->host_comm, i, &entries[i]);
         if (ret == ESP_OK) {
-            (*disc_count)++;
+            (*entry_count)++;
         } else {
-            ESP_LOGW(TAG, "Failed to get info for disc %u: %s", i, esp_err_to_name(ret));
+            ESP_LOGW(TAG, "Failed to get info for entry %u: %s", i, esp_err_to_name(ret));
             // Create a fallback entry
-            snprintf(discs[i].name, sizeof(discs[i].name), "Disc %u (error)", i);
-            discs[i].size = 0;
-            discs[i].tracks = 0;
-            (*disc_count)++;
+            snprintf(entries[i].name, sizeof(entries[i].name), "Entry %u (error)", i);
+            entries[i].size_mb = 0;
+            entries[i].entry_type = 1; // FILE
+            (*entry_count)++;
         }
     }
 
-    ESP_LOGI(TAG, "Retrieved info for %u discs", *disc_count);
+    ESP_LOGI(TAG, "Retrieved info for %u entries", *entry_count);
     return ESP_OK;
 }
 
-esp_err_t interface_select_disc(interface_context_t *ctx, uint32_t disc_index) {
+esp_err_t interface_select_entry(interface_context_t *ctx, int32_t entry_index) {
     if (!ctx) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -60,17 +60,21 @@ esp_err_t interface_select_disc(interface_context_t *ctx, uint32_t disc_index) {
         return ESP_ERR_INVALID_STATE;
     }
 
-    esp_err_t ret = host_comm_select_disc(ctx->host_comm, disc_index);
+    esp_err_t ret = host_comm_select_entry(ctx->host_comm, entry_index);
     if (ret == ESP_OK) {
-        ESP_LOGI(TAG, "Selected disc %u", disc_index);
+        if (entry_index == -1) {
+            ESP_LOGI(TAG, "Navigated to parent directory");
+        } else {
+            ESP_LOGI(TAG, "Selected entry %ld", entry_index);
+        }
     } else {
-        ESP_LOGW(TAG, "Failed to select disc %u: %s", disc_index, esp_err_to_name(ret));
+        ESP_LOGW(TAG, "Failed to select entry %ld: %s", entry_index, esp_err_to_name(ret));
     }
 
     return ret;
 }
 
-esp_err_t interface_eject_disc(interface_context_t *ctx) {
+esp_err_t interface_eject_image(interface_context_t *ctx) {
     if (!ctx) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -80,25 +84,36 @@ esp_err_t interface_eject_disc(interface_context_t *ctx) {
         return ESP_ERR_INVALID_STATE;
     }
 
-    esp_err_t ret = host_comm_eject_disc(ctx->host_comm);
+    esp_err_t ret = host_comm_eject_image(ctx->host_comm);
     if (ret == ESP_OK) {
-        ESP_LOGI(TAG, "Ejected disc");
+        ESP_LOGI(TAG, "Ejected image");
     } else {
-        ESP_LOGW(TAG, "Failed to eject disc: %s", esp_err_to_name(ret));
+        ESP_LOGW(TAG, "Failed to eject image: %s", esp_err_to_name(ret));
     }
 
     return ret;
 }
 
-esp_err_t interface_get_current_disc(interface_context_t *ctx, char *disc_name, size_t max_len) {
-    if (!ctx || !disc_name || max_len == 0) {
+esp_err_t interface_get_current_image(interface_context_t *ctx, char *image_name, size_t max_len) {
+    if (!ctx || !image_name || max_len == 0) {
         return ESP_ERR_INVALID_ARG;
     }
 
-    // TODO: Implement current disc tracking
-    // For now, return a placeholder
-    strncpy(disc_name, "No disc loaded", max_len - 1);
-    disc_name[max_len - 1] = '\0';
+    if (!ctx->host_comm || !ctx->host_comm->initialized) {
+        strncpy(image_name, "No image loaded", max_len - 1);
+        image_name[max_len - 1] = '\0';
+        return ESP_OK;
+    }
+
+    loaded_image_status_t status;
+    esp_err_t ret = host_comm_get_loaded_image_status(ctx->host_comm, &status);
+    if (ret == ESP_OK && status.image_loaded) {
+        strncpy(image_name, status.image_name, max_len - 1);
+        image_name[max_len - 1] = '\0';
+    } else {
+        strncpy(image_name, "No image loaded", max_len - 1);
+        image_name[max_len - 1] = '\0';
+    }
 
     return ESP_OK;
 }
@@ -234,8 +249,8 @@ esp_err_t interface_get_system_info(interface_context_t *ctx, system_info_t *inf
         info->wifi_state = WIFI_MANAGER_STATE_ERROR;
     }
 
-    // Current disc information
-    interface_get_current_disc(ctx, info->current_disc, sizeof(info->current_disc));
+    // Current image information
+    interface_get_current_image(ctx, info->current_disc, sizeof(info->current_disc));
 
     return ESP_OK;
 }

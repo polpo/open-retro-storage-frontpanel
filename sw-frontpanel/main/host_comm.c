@@ -102,33 +102,16 @@ static esp_err_t host_comm_poll_async_result(host_comm_t *comm, uint32_t timeout
 }
 
 
-esp_err_t host_comm_get_status(host_comm_t *comm, host_status_t *status) {
-    if (!comm || !status) {
-        return ESP_ERR_INVALID_ARG;
-    }
+// Directory browsing functions
 
-    ESP_LOGI(TAG, "Getting disc status");
-
-    uint8_t disc_status;
-    esp_err_t ret = transport_two_phase_transaction(&comm->transport,
-                                                    PANEL_CMD_GET_DISC_STATUS, PANEL_ARG_IGNORED,
-                                                    NULL, 0,  // No write data
-                                                    &disc_status, 1);  // Read 1 byte
-    if (ret == ESP_OK) {
-        *status = (host_status_t)disc_status;
-    }
-
-    return ret;
-}
-
-esp_err_t host_comm_get_disc_count(host_comm_t *comm, uint32_t *count) {
+esp_err_t host_comm_get_entry_count(host_comm_t *comm, uint32_t *count) {
     if (!comm || !count) {
         return ESP_ERR_INVALID_ARG;
     }
 
-    // Start the disc count operation
+    // Start the entry count operation
     esp_err_t ret = transport_two_phase_transaction(&comm->transport,
-                                                    PANEL_CMD_START_DISC_COUNT, PANEL_ARG_IGNORED,
+                                                    PANEL_CMD_GET_DIR_ENTRY_COUNT, PANEL_ARG_IGNORED,
                                                     NULL, 0,  // No write data
                                                     NULL, 0);  // No read data
     if (ret != ESP_OK) {
@@ -143,105 +126,37 @@ esp_err_t host_comm_get_disc_count(host_comm_t *comm, uint32_t *count) {
         return ret;
     }
 
-    // Parse the 4-byte big-endian disc count
+    // Parse the 4-byte big-endian entry count
     *count = (result_data[0] << 24) | (result_data[1] << 16) | (result_data[2] << 8) | result_data[3];
-    ESP_LOGI(TAG, "Disc count: %u", *count);
+    ESP_LOGI(TAG, "Entry count: %lu", *count);
 
     return ESP_OK;
 }
 
-esp_err_t host_comm_get_disc_list(host_comm_t *comm, disc_info_t *discs,
-                                  size_t max_discs, size_t *disc_count) {
-    if (!comm || !discs || !disc_count) {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    // First get the count
-    uint32_t count;
-    esp_err_t ret = host_comm_get_disc_count(comm, &count);
-    if (ret != ESP_OK) {
-        return ret;
-    }
-
-    *disc_count = (count < max_discs) ? count : max_discs;
-
-    // Get info for each disc
-    for (size_t i = 0; i < *disc_count; i++) {
-        ret = host_comm_get_disc_info(comm, i, &discs[i]);
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to get info for disc %u: %s", i, esp_err_to_name(ret));
-            break;
-        }
-    }
-
-    return ret;
-}
-
-esp_err_t host_comm_select_disc(host_comm_t *comm, uint32_t disc_index) {
-    if (!comm) {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    ESP_LOGI(TAG, "Selecting disc: %lu", disc_index);
-
-    if (disc_index <= 0xffff) {
-        // Use argument byte for small indices
-        return transport_two_phase_transaction(&comm->transport,
-                                               PANEL_CMD_SELECT_DISC, (uint16_t)disc_index,
-                                               NULL, 0,  // No write data
-                                               NULL, 0);  // No read data
-    } else {
-        // Use extended format for large indices
-        tx_buffer[0] = (disc_index >> 24) & 0xFF;
-        tx_buffer[1] = (disc_index >> 16) & 0xFF;
-        tx_buffer[2] = (disc_index >> 8) & 0xFF;
-        tx_buffer[3] = disc_index & 0xFF;
-
-        return transport_two_phase_transaction(&comm->transport,
-                                               PANEL_CMD_SELECT_DISC, PANEL_ARG_EXTENDED,
-                                               tx_buffer, 4,  // Write from static buffer
-                                               NULL, 0);  // No read data
-    }
-}
-
-esp_err_t host_comm_eject_disc(host_comm_t *comm) {
-    if (!comm) {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    ESP_LOGI(TAG, "Ejecting disc");
-
-    return transport_two_phase_transaction(&comm->transport,
-                                           PANEL_CMD_EJECT_DISC, PANEL_ARG_IGNORED,
-                                           NULL, 0,  // No write data
-                                           NULL, 0);  // No read data
-}
-
-esp_err_t host_comm_get_disc_info(host_comm_t *comm, uint32_t disc_index,
-                                  disc_info_t *info) {
+esp_err_t host_comm_get_entry_info(host_comm_t *comm, uint32_t index, dir_entry_info_t *info) {
     if (!comm || !info) {
         return ESP_ERR_INVALID_ARG;
     }
 
-    ESP_LOGI(TAG, "Getting info for disc: %lu", disc_index);
+    ESP_LOGI(TAG, "Getting info for entry: %lu", index);
 
-    // Start the disc info operation
+    // Start the entry info operation
     esp_err_t ret;
-    if (disc_index <= 0xffff) {
-        // Use argument byte for small indices
+    if (index <= 0xffff) {
+        // Use argument field for small indices
         ret = transport_two_phase_transaction(&comm->transport,
-                                              PANEL_CMD_START_DISC_INFO, (uint16_t)disc_index,
+                                              PANEL_CMD_GET_ENTRY_INFO, (uint16_t)index,
                                               NULL, 0,  // No write data
                                               NULL, 0);  // No read data
     } else {
         // Use extended format for large indices
-        tx_buffer[0] = (disc_index >> 24) & 0xFF;
-        tx_buffer[1] = (disc_index >> 16) & 0xFF;
-        tx_buffer[2] = (disc_index >> 8) & 0xFF;
-        tx_buffer[3] = disc_index & 0xFF;
+        tx_buffer[0] = (index >> 24) & 0xFF;
+        tx_buffer[1] = (index >> 16) & 0xFF;
+        tx_buffer[2] = (index >> 8) & 0xFF;
+        tx_buffer[3] = index & 0xFF;
 
         ret = transport_two_phase_transaction(&comm->transport,
-                                              PANEL_CMD_START_DISC_INFO, PANEL_ARG_EXTENDED,
+                                              PANEL_CMD_GET_ENTRY_INFO, PANEL_ARG_EXTENDED,
                                               tx_buffer, 4,  // Write from static buffer
                                               NULL, 0);  // No read data
     }
@@ -253,14 +168,185 @@ esp_err_t host_comm_get_disc_info(host_comm_t *comm, uint32_t disc_index,
     // Poll for completion with 1 second timeout
     uint8_t *result_data;
     size_t result_size;
-    ret = host_comm_poll_async_result(comm, 1000, 10, sizeof(disc_info_t), &result_data, &result_size);
+    ret = host_comm_poll_async_result(comm, 1000, 10, sizeof(dir_entry_info_t), &result_data, &result_size);
     if (ret != ESP_OK) {
         return ret;
     }
 
     // Copy result to caller's buffer
-    memcpy(info, result_data, sizeof(disc_info_t));
-    ESP_LOGI(TAG, "Got disc info: %s", info->name);
+    memcpy(info, result_data, sizeof(dir_entry_info_t));
+    ESP_LOGI(TAG, "Got entry info: %s (type=%u, size=%lu MB)", info->name, info->entry_type, info->size_mb);
+
+    return ret;
+}
+
+esp_err_t host_comm_select_entry(host_comm_t *comm, int32_t index) {
+    if (!comm) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    ESP_LOGI(TAG, "Selecting entry: %ld", index);
+
+    // Send command with signed 16-bit index in argument field
+    int16_t index16 = (int16_t)index;
+
+    esp_err_t ret = transport_two_phase_transaction(&comm->transport,
+                                                    PANEL_CMD_SELECT_ENTRY, (uint16_t)index16,
+                                                    NULL, 0,  // No write data
+                                                    NULL, 0);  // No read data
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    // Poll for completion with 2 second timeout (may need to load image)
+    ret = host_comm_poll_async_result(comm, 2000, 10, 0, NULL, NULL);
+    return ret;
+}
+
+esp_err_t host_comm_get_current_path(host_comm_t *comm, char *path, size_t max_len) {
+    if (!comm || !path || max_len == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    ESP_LOGI(TAG, "Getting current path");
+
+    // Start the get path operation
+    esp_err_t ret = transport_two_phase_transaction(&comm->transport,
+                                                    PANEL_CMD_GET_CURRENT_PATH, PANEL_ARG_IGNORED,
+                                                    NULL, 0,  // No write data
+                                                    NULL, 0);  // No read data
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    // Poll for completion with 1 second timeout
+    uint8_t *result_data;
+    size_t result_size;
+    ret = host_comm_poll_async_result(comm, 1000, 10, 0, &result_data, &result_size);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    // Copy path string to caller's buffer
+    size_t copy_len = (result_size < max_len) ? result_size : (max_len - 1);
+    memcpy(path, result_data, copy_len);
+    path[copy_len] = '\0';
+
+    ESP_LOGI(TAG, "Current path: %s", path);
+
+    return ESP_OK;
+}
+
+// Image management functions
+
+esp_err_t host_comm_select_prev_image(host_comm_t *comm) {
+    if (!comm) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    ESP_LOGI(TAG, "Selecting previous image");
+
+    esp_err_t ret = transport_two_phase_transaction(&comm->transport,
+                                                    PANEL_CMD_SELECT_PREV_IMAGE, PANEL_ARG_IGNORED,
+                                                    NULL, 0,  // No write data
+                                                    NULL, 0);  // No read data
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    // Poll for completion
+    ret = host_comm_poll_async_result(comm, 2000, 10, 0, NULL, NULL);
+    return ret;
+}
+
+esp_err_t host_comm_select_next_image(host_comm_t *comm) {
+    if (!comm) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    ESP_LOGI(TAG, "Selecting next image");
+
+    esp_err_t ret = transport_two_phase_transaction(&comm->transport,
+                                                    PANEL_CMD_SELECT_NEXT_IMAGE, PANEL_ARG_IGNORED,
+                                                    NULL, 0,  // No write data
+                                                    NULL, 0);  // No read data
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    // Poll for completion
+    ret = host_comm_poll_async_result(comm, 2000, 10, 0, NULL, NULL);
+    return ret;
+}
+
+esp_err_t host_comm_eject_image(host_comm_t *comm) {
+    if (!comm) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    ESP_LOGI(TAG, "Ejecting image");
+
+    esp_err_t ret = transport_two_phase_transaction(&comm->transport,
+                                                    PANEL_CMD_EJECT_IMAGE, PANEL_ARG_IGNORED,
+                                                    NULL, 0,  // No write data
+                                                    NULL, 0);  // No read data
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    // Poll for completion
+    ret = host_comm_poll_async_result(comm, 1000, 10, 0, NULL, NULL);
+    return ret;
+}
+
+esp_err_t host_comm_get_loaded_image_status(host_comm_t *comm, loaded_image_status_t *status) {
+    if (!comm || !status) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    ESP_LOGI(TAG, "Getting loaded image status");
+
+    // Start the get status operation
+    esp_err_t ret = transport_two_phase_transaction(&comm->transport,
+                                                    PANEL_CMD_GET_LOADED_IMAGE_STATUS, PANEL_ARG_IGNORED,
+                                                    NULL, 0,  // No write data
+                                                    NULL, 0);  // No read data
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    // Poll for completion with 1 second timeout
+    uint8_t *result_data;
+    size_t result_size;
+    ret = host_comm_poll_async_result(comm, 1000, 10, sizeof(loaded_image_status_t), &result_data, &result_size);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    // Copy result to caller's buffer
+    memcpy(status, result_data, sizeof(loaded_image_status_t));
+    ESP_LOGI(TAG, "Image status: loaded=%u, name=%s", status->image_loaded, status->image_name);
+
+    return ret;
+}
+
+// Status functions
+
+esp_err_t host_comm_get_device_status(host_comm_t *comm, uint8_t *status) {
+    if (!comm || !status) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    ESP_LOGI(TAG, "Getting device status");
+
+    uint8_t device_status;
+    esp_err_t ret = transport_two_phase_transaction(&comm->transport,
+                                                    PANEL_CMD_GET_DEVICE_STATUS, PANEL_ARG_IGNORED,
+                                                    NULL, 0,  // No write data
+                                                    &device_status, 1);  // Read 1 byte
+    if (ret == ESP_OK) {
+        *status = device_status;
+    }
 
     return ret;
 }
