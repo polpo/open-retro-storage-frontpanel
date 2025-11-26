@@ -902,7 +902,17 @@ void app_main(void) {
     led_set_color(initial_act_state ? COLOR_ORANGE : COLOR_CYAN);
 
     ESP_LOGI(TAG, "System initialized successfully");
-    
+
+    // If we booted from a new OTA firmware, mark it as valid now that init succeeded
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    esp_ota_img_states_t ota_state;
+    if (esp_ota_get_state_partition(running, &ota_state) == ESP_OK) {
+        if (ota_state == ESP_OTA_IMG_PENDING_VERIFY) {
+            ESP_LOGI(TAG, "New firmware verified successfully, cancelling rollback");
+            esp_ota_mark_app_valid_cancel_rollback();
+        }
+    }
+
     // Main loop can be used for other tasks or left empty
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(1000));
