@@ -1,9 +1,12 @@
 #include "transport.h"
+#include "transport_config.h"
 #include "panel_protocol_defs.h"
 #include "driver/spi_master.h"
 #include "driver/gpio.h"
 #define LOG_LOCAL_LEVEL ESP_LOG_NONE
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include <string.h>
 
 static const char *TAG = "transport_spi";
@@ -248,6 +251,11 @@ esp_err_t transport_spi_two_phase_transaction(transport_handle_t *handle,
     }
     ESP_LOGI(TAG, "Phase 1 complete");
 
+#if SPI_INTER_PHASE_DELAY_US > 0
+    // Delay to allow main board to process header (needed when debug printing is enabled)
+    vTaskDelay(pdMS_TO_TICKS(SPI_INTER_PHASE_DELAY_US / 1000));
+#endif
+
     // Phase 2: Transfer payload (if any)
     if (payload_size > 0) {
         if (is_read) {
@@ -294,6 +302,10 @@ esp_err_t transport_spi_poll_async_status(transport_handle_t *handle,
 
     // If ready and result data requested, read the result data separately
     if (*ready && *response_size > 0 && result_data && max_result_size > 0) {
+#if SPI_INTER_PHASE_DELAY_US > 0
+        // Delay to allow main board to set up DMA for result data
+        vTaskDelay(pdMS_TO_TICKS(SPI_INTER_PHASE_DELAY_US / 1000));
+#endif
         size_t read_size = (*response_size <= max_result_size) ? *response_size : max_result_size;
         ret = transport_spi_read_payload(handle, result_data, read_size);
     }

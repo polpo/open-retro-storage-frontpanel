@@ -3,7 +3,6 @@
 
 // Transport selection - comment/uncomment to select transport type
 // If neither is defined, I2C will be used as default
-
 #define TRANSPORT_USE_SPI    // Use SPI transport for host communication
 // #define TRANSPORT_USE_I2C    // Use I2C transport for host communication (default)
 
@@ -32,6 +31,13 @@
 #define SPI_MODE            0          // SPI mode (0-3)
 #define HOST_CLOCK_SPEED    10000000    // 5MHz for SPI
 #define SPI_MAX_TRANSFER    4096       // Maximum transfer size in bytes
+// Delay between header and payload phases to tolerate debug printing on main board
+// Only enabled in debug builds (CONFIG_COMPILER_OPTIMIZATION_DEBUG)
+#ifdef CONFIG_COMPILER_OPTIMIZATION_DEBUG
+#define SPI_INTER_PHASE_DELAY_US  5000  // 5ms delay between phases
+#else
+#define SPI_INTER_PHASE_DELAY_US  0     // No delay in production
+#endif
 #endif
 
 #endif // TRANSPORT_CONFIG_H
