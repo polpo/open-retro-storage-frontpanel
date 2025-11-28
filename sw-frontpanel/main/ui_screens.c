@@ -392,6 +392,86 @@ esp_err_t ui_draw_firmware_update(display_manager_t *display, const char *status
     return ESP_OK;
 }
 
+// Helper to format version number to string
+static void format_version_string(char *buf, size_t buf_size, uint32_t version) {
+    uint8_t major = (version >> 16) & 0xFF;
+    uint8_t minor = (version >> 8) & 0xFF;
+    uint8_t patch = version & 0xFF;
+    snprintf(buf, buf_size, "%d.%d.%d", major, minor, patch);
+}
+
+esp_err_t ui_draw_firmware_status(display_manager_t *display,
+                                  uint32_t panel_current_ver, uint32_t panel_avail_ver, bool panel_update_avail,
+                                  uint32_t main_current_ver, uint32_t main_avail_ver, bool main_update_avail,
+                                  uint8_t selection) {
+    if (!display) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    display_manager_clear(display);
+
+    // Title bar
+    display_manager_set_font(display, u8g2_font_6x10_tf);
+    display_manager_draw_box(display, 0, 0, 128, 12);
+    display_manager_set_draw_color(display, 0);
+    display_manager_draw_text(display, 2, 10, "Firmware Updates");
+    display_manager_set_draw_color(display, 1);
+
+    char version_str[16];
+    int y = 24;
+    const int row_height = 12;
+
+    // Panel firmware row
+    if (selection == 0) {
+        display_manager_draw_box(display, 0, y - 9, 128, row_height);
+        display_manager_set_draw_color(display, 0);
+    }
+    display_manager_draw_text(display, 2, y, "Panel:");
+    format_version_string(version_str, sizeof(version_str), panel_current_ver);
+    display_manager_draw_text(display, 44, y, version_str);
+    if (panel_update_avail) {
+        display_manager_draw_text(display, 79, y, "->");
+        format_version_string(version_str, sizeof(version_str), panel_avail_ver);
+        display_manager_draw_text(display, 94, y, version_str);
+    }
+    if (selection == 0) {
+        display_manager_set_draw_color(display, 1);
+    }
+
+    y += row_height;
+
+    // Main board firmware row
+    if (selection == 1) {
+        display_manager_draw_box(display, 0, y - 9, 128, row_height);
+        display_manager_set_draw_color(display, 0);
+    }
+    display_manager_draw_text(display, 2, y, "Main:");
+    format_version_string(version_str, sizeof(version_str), main_current_ver);
+    display_manager_draw_text(display, 44, y, version_str);
+    if (main_update_avail) {
+        display_manager_draw_text(display, 79, y, "->");
+        format_version_string(version_str, sizeof(version_str), main_avail_ver);
+        display_manager_draw_text(display, 94, y, version_str);
+    }
+    if (selection == 1) {
+        display_manager_set_draw_color(display, 1);
+    }
+
+    // Instructions at bottom
+    bool has_update = (selection == 0 && panel_update_avail) ||
+                      (selection == 1 && main_update_avail);
+
+    if (has_update) {
+        display_manager_draw_text(display, 0, 62, "[>] Update  [<] Back");
+    } else {
+        display_manager_draw_text(display, 0, 62, "No updates  [<] Back");
+    }
+
+    display_manager_request_update(display);
+
+    return ESP_OK;
+}
+
 esp_err_t ui_draw_status_screen(display_manager_t *display, const char *disc_name,
                                const playback_status_t *playback_status, bool title_changed) {
     if (!display) {

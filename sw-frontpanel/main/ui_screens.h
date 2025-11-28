@@ -19,7 +19,8 @@ typedef enum {
     SCREEN_WIFI_MENU,
     SCREEN_WIFI_NETWORKS,
     SCREEN_INFO,
-    SCREEN_FIRMWARE_UPDATE
+    SCREEN_FIRMWARE_UPDATE,
+    SCREEN_FIRMWARE_STATUS
 } screen_type_t;
 
 esp_err_t ui_show_splash_screen(display_manager_t *display);
@@ -31,5 +32,9 @@ esp_err_t ui_draw_info_screen(display_manager_t *display, const char *title, con
 esp_err_t ui_draw_firmware_update(display_manager_t *display, const char *status, uint8_t progress);
 esp_err_t ui_draw_status_screen(display_manager_t *display, const char *disc_name,
                                const playback_status_t *playback_status, bool title_changed);
+esp_err_t ui_draw_firmware_status(display_manager_t *display,
+                                  uint32_t panel_current_ver, uint32_t panel_avail_ver, bool panel_update_avail,
+                                  uint32_t main_current_ver, uint32_t main_avail_ver, bool main_update_avail,
+                                  uint8_t selection);
 
 #endif

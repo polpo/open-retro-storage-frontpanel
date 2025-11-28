@@ -44,9 +44,19 @@ static char current_disc_name[64] = "No disc loaded";
 static playback_status_t current_playback_status = {0};
 static bool disc_name_changed = true;  // Flag to signal title changed
 
+// Firmware status tracking
+static rp2350_fw_status_t rp2350_fw_status = {0};
+static panel_firmware_info_t panel_fw_info = {0};
+static bool fw_status_valid = false;
+static uint8_t fw_screen_selection = 0;  // 0=Panel, 1=Main board
+
 // Forward declarations
 static esp_err_t refresh_directory_list(void);
 static void refresh_playback_status(void);
+static void check_firmware_status(void);
+static void draw_firmware_status_screen(void);
+static void trigger_panel_update(void);
+static void trigger_mainboard_update(void);
 
 static menu_item_t main_menu_items[] = {
     {.text = "Select Disc", .action = MENU_ACTION_CUSTOM, .selectable = true},
@@ -56,8 +66,8 @@ static menu_item_t main_menu_items[] = {
 };
 
 static menu_item_t settings_menu_items[] = {
+    {.text = "Firmware Update", .action = MENU_ACTION_CUSTOM, .selectable = true},
     {.text = "WiFi Setup", .action = MENU_ACTION_CUSTOM, .selectable = true},
-    {.text = "Web Interface", .action = MENU_ACTION_CUSTOM, .selectable = true},
     {.text = "Display Settings", .action = MENU_ACTION_CUSTOM, .selectable = true},
     {.text = "Back", .action = MENU_ACTION_BACK, .selectable = true},
 };
@@ -65,7 +75,6 @@ static menu_item_t settings_menu_items[] = {
 static menu_item_t wifi_menu_items[] = {
     {.text = "Scan Networks", .action = MENU_ACTION_CUSTOM, .selectable = true},
     {.text = "WiFi Status", .action = MENU_ACTION_CUSTOM, .selectable = true},
-    {.text = "Start Web Portal", .action = MENU_ACTION_CUSTOM, .selectable = true},
     {.text = "Disconnect", .action = MENU_ACTION_CUSTOM, .selectable = true},
     {.text = "Back", .action = MENU_ACTION_BACK, .selectable = true},
 };
@@ -221,14 +230,14 @@ static void handle_button_event(button_event_t *event) {
                 case 1: // Select button (East)
                     if (event->type == BUTTON_EVENT_CLICK) {
                         uint32_t selected = menu_get_selected_index(&settings_menu);
-                        if (selected == 0) { // "WiFi Setup"
+                        if (selected == 0) { // "Firmware Updates"
+                            current_screen = SCREEN_FIRMWARE_STATUS;
+                            active_menu = NULL;
+                            check_firmware_status();
+                        } else if (selected == 1) { // "WiFi Setup"
                             current_screen = SCREEN_WIFI_MENU;
                             active_menu = &wifi_menu;
-                        } else if (selected == 1) { // "Web Interface"
-                            // TODO: Implement web interface settings
-                            ESP_LOGI(TAG, "Web interface settings not implemented yet");
                         } else if (selected == 2) { // "Display Settings"
-                            // TODO: Implement display settings
                             ESP_LOGI(TAG, "Display settings not implemented yet");
                         } else if (selected == 3) { // "Back"
                             current_screen = SCREEN_MAIN_MENU;
@@ -286,41 +295,14 @@ static void handle_button_event(button_event_t *event) {
                                     wifi_manager_state_to_string(state));
                             }
                             ui_draw_info_screen(&display, "WiFi Status", info_text);
-                        } else if (selected == 2) { // "Start Web Portal"
-                            if (!web_server_is_running(&web_server)) {
-                                esp_err_t ret = web_server_start(&web_server);
-                                if (ret == ESP_OK) {
-                                    ESP_LOGI(TAG, "Web server started");
-                                    char info_text[256];
-                                    if (wifi_manager_is_connected(&wifi_manager)) {
-                                        esp_ip4_addr_t ip;
-                                        if (wifi_manager_get_ip_info(&wifi_manager, &ip, NULL, NULL) == ESP_OK) {
-                                            snprintf(info_text, sizeof(info_text),
-                                                "Web interface started!\nAccess at:\nhttp://picoide.local\nor http://" IPSTR,
-                                                IP2STR(&ip));
-                                        } else {
-                                            snprintf(info_text, sizeof(info_text), "Web interface started!\nCheck WiFi status for IP");
-                                        }
-                                    } else {
-                                        snprintf(info_text, sizeof(info_text),
-                                            "Web interface started!\nConnect to AP:\n%s\nThen visit:\nhttp://picoide.local\nor http://192.168.4.1",
-                                            WIFI_MANAGER_AP_SSID);
-                                    }
-                                    ui_draw_info_screen(&display, "Web Portal", info_text);
-                                } else {
-                                    ESP_LOGW(TAG, "Failed to start web server: %s", esp_err_to_name(ret));
-                                }
-                            } else {
-                                ESP_LOGI(TAG, "Web server already running");
-                            }
-                        } else if (selected == 3) { // "Disconnect"
+                        } else if (selected == 2) { // "Disconnect"
                             esp_err_t ret = wifi_manager_disconnect(&wifi_manager);
                             if (ret == ESP_OK) {
                                 ESP_LOGI(TAG, "WiFi disconnected");
                             } else {
                                 ESP_LOGW(TAG, "Failed to disconnect WiFi: %s", esp_err_to_name(ret));
                             }
-                        } else if (selected == 4) { // "Back"
+                        } else if (selected == 3) { // "Back"
                             current_screen = SCREEN_SETTINGS;
                             active_menu = &settings_menu;
                         }
@@ -347,6 +329,43 @@ static void handle_button_event(button_event_t *event) {
         case SCREEN_FIRMWARE_UPDATE:
             // During firmware update, ignore all button presses
             ESP_LOGI(TAG, "Firmware update in progress - ignoring button input");
+            break;
+
+        case SCREEN_FIRMWARE_STATUS:
+            switch (event->button_id) {
+                case 0: // Up button (North)
+                    if (event->type == BUTTON_EVENT_CLICK) {
+                        if (fw_screen_selection > 0) {
+                            fw_screen_selection--;
+                            draw_firmware_status_screen();
+                        }
+                    }
+                    break;
+                case 2: // Down button (South)
+                    if (event->type == BUTTON_EVENT_CLICK) {
+                        if (fw_screen_selection < 1) {
+                            fw_screen_selection++;
+                            draw_firmware_status_screen();
+                        }
+                    }
+                    break;
+                case 1: // Select button (East) - trigger update
+                    if (event->type == BUTTON_EVENT_CLICK) {
+                        if (fw_screen_selection == 0 && panel_fw_info.available) {
+                            trigger_panel_update();
+                        } else if (fw_screen_selection == 1 && rp2350_fw_status.available_version != 0) {
+                            trigger_mainboard_update();
+                        }
+                    }
+                    break;
+                case 3: // Back button (West)
+                    if (event->type == BUTTON_EVENT_CLICK) {
+                        current_screen = SCREEN_SETTINGS;
+                        active_menu = &settings_menu;
+                        fw_status_valid = false;
+                    }
+                    break;
+            }
             break;
 
         default:
@@ -580,47 +599,184 @@ static void firmware_update_task(void *pvParameters) {
     vTaskDelete(NULL);
 }
 
-// Check and perform firmware update if available
-static esp_err_t check_and_update_firmware(void) {
-    ESP_LOGI(TAG, "Checking for firmware updates...");
+// Draw the firmware status screen using ui_screens
+static void draw_firmware_status_screen(void) {
+    uint32_t panel_current = ota_manager_get_current_version();
+    ui_draw_firmware_status(&display,
+                            panel_current, panel_fw_info.version, panel_fw_info.available,
+                            rp2350_fw_status.current_version, rp2350_fw_status.available_version,
+                            rp2350_fw_status.available_version != 0,
+                            fw_screen_selection);
+}
 
-    bool update_available = false;
-    esp_err_t ret = ota_manager_check_update(&ota_manager, &update_available);
+// Check firmware status for both panel and main board
+static void check_firmware_status(void) {
+    ESP_LOGI(TAG, "Checking firmware status...");
 
+    // Show loading screen
+    ui_draw_info_screen(&display, "Firmware", "Checking...");
+
+    fw_status_valid = false;
+    fw_screen_selection = 0;
+    memset(&panel_fw_info, 0, sizeof(panel_fw_info));
+    memset(&rp2350_fw_status, 0, sizeof(rp2350_fw_status));
+
+    if (!host_comm.initialized) {
+        ESP_LOGW(TAG, "Host communication not initialized");
+        ui_draw_info_screen(&display, "Error", "Host not connected");
+        return;
+    }
+
+    // Initialize OTA manager if not already done
+    esp_err_t ret = ota_manager_init(&ota_manager, &host_comm);
+    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+        ESP_LOGW(TAG, "Failed to initialize OTA manager: %s", esp_err_to_name(ret));
+    }
+
+    // Check for panel firmware update
+    ret = host_comm_check_firmware(&host_comm);
+    if (ret == ESP_OK) {
+        ret = host_comm_get_firmware_info(&host_comm, &panel_fw_info);
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to get panel firmware info: %s", esp_err_to_name(ret));
+        }
+    } else {
+        ESP_LOGW(TAG, "Failed to check panel firmware: %s", esp_err_to_name(ret));
+    }
+
+    // Check for main board firmware update
+    ret = host_comm_get_rp2350_fw_status(&host_comm, &rp2350_fw_status);
     if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "Failed to check for updates: %s", esp_err_to_name(ret));
-        return ret;
+        ESP_LOGW(TAG, "Failed to get RP2350 firmware status: %s", esp_err_to_name(ret));
     }
 
-    if (!update_available) {
-        ESP_LOGI(TAG, "No firmware update available");
-        return ESP_OK;
+    fw_status_valid = true;
+    draw_firmware_status_screen();
+}
+
+// Trigger panel firmware update
+static void trigger_panel_update(void) {
+    ESP_LOGI(TAG, "Triggering panel firmware update...");
+
+    // Initialize OTA manager if needed
+    esp_err_t ret = ota_manager_init(&ota_manager, &host_comm);
+    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+        ESP_LOGE(TAG, "Failed to initialize OTA manager: %s", esp_err_to_name(ret));
+        ui_draw_info_screen(&display, "Error", "Failed to init OTA");
+        return;
     }
 
-    char version_str[14];
-    ota_manager_format_version_string(version_str, ota_manager.firmware_info.version);
-    ESP_LOGI(TAG, "Firmware update available! Version: %s", version_str);
+    // Copy firmware info to OTA manager
+    memcpy(&ota_manager.firmware_info, &panel_fw_info, sizeof(panel_firmware_info_t));
 
     ret = ota_manager_start_update(&ota_manager);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start update: %s", esp_err_to_name(ret));
-        return ret;
+        ui_draw_info_screen(&display, "Error", "Failed to start update");
+        return;
     }
 
     current_screen = SCREEN_FIRMWARE_UPDATE;
 
+    char version_str[14];
+    ota_manager_format_version_string(version_str, panel_fw_info.version);
     char status_msg[64];
-    snprintf(status_msg, sizeof(status_msg), "Found new fw: v%s", version_str);
+    snprintf(status_msg, sizeof(status_msg), "Updating panel: v%s", version_str);
     ui_draw_firmware_update(&display, status_msg, 0);
     vTaskDelay(pdMS_TO_TICKS(1500));
 
     xTaskCreate(firmware_update_task, "firmware_update", 8192, &ota_manager, 10, NULL);
+}
 
-    while (ota_manager_get_state(&ota_manager) != OTA_STATE_ERROR) {
-        vTaskDelay(pdMS_TO_TICKS(100));
+// Trigger main board firmware update
+static void trigger_mainboard_update(void) {
+    ESP_LOGI(TAG, "Triggering main board firmware update...");
+
+    // Show updating screen
+    ui_draw_firmware_update(&display, "Main board updating...", 0);
+
+    esp_err_t ret = host_comm_start_rp2350_update(&host_comm);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start RP2350 update: %s", esp_err_to_name(ret));
+        ui_draw_info_screen(&display, "Error", "Failed to start update");
+        vTaskDelay(pdMS_TO_TICKS(2000));
+        current_screen = SCREEN_SETTINGS;
+        active_menu = &settings_menu;
+        return;
     }
 
-    return ESP_ERR_INVALID_STATE;
+    // Poll command status until complete or communication lost
+    int consecutive_failures = 0;
+    uint8_t last_progress = 0;
+
+    while (consecutive_failures < 5) {
+        vTaskDelay(pdMS_TO_TICKS(250));
+
+        panel_command_status_t cmd_status;
+        ret = host_comm_get_command_status(&host_comm, &cmd_status);
+
+        if (ret != ESP_OK) {
+            consecutive_failures++;
+            ESP_LOGD(TAG, "Status poll failed (%d): %s", consecutive_failures, esp_err_to_name(ret));
+            continue;
+        }
+
+        consecutive_failures = 0;
+
+        // Update progress display
+        if (cmd_status.progress != last_progress) {
+            last_progress = cmd_status.progress;
+            char msg[32];
+            snprintf(msg, sizeof(msg), "Main board: %d%%", cmd_status.progress);
+            ui_draw_firmware_update(&display, msg, cmd_status.progress);
+        }
+
+        // Check if complete
+        if (cmd_status.state == PANEL_ASYNC_READY) {
+            ui_draw_info_screen(&display, "Main Board", "Update complete!\nRebooting...");
+            vTaskDelay(pdMS_TO_TICKS(2000));
+            break;
+        } else if (cmd_status.state == PANEL_ASYNC_ERROR) {
+            ui_draw_info_screen(&display, "Error", "Update failed");
+            vTaskDelay(pdMS_TO_TICKS(2000));
+            current_screen = SCREEN_SETTINGS;
+            active_menu = &settings_menu;
+            return;
+        }
+    }
+
+    // Lost communication - board is rebooting
+    ui_draw_info_screen(&display, "Main Board", "Rebooting...");
+
+    // Wait for board to come back online and show new version
+    consecutive_failures = 0;
+    while (consecutive_failures < 20) {  // Up to 10 seconds
+        vTaskDelay(pdMS_TO_TICKS(500));
+
+        rp2350_fw_status_t fw_status;
+        ret = host_comm_get_rp2350_fw_status(&host_comm, &fw_status);
+
+        if (ret == ESP_OK) {
+            // Board is back! Show new version
+            char version_str[16];
+            uint8_t major = (fw_status.current_version >> 16) & 0xFF;
+            uint8_t minor = (fw_status.current_version >> 8) & 0xFF;
+            uint8_t patch = fw_status.current_version & 0xFF;
+            snprintf(version_str, sizeof(version_str), "%d.%d.%d", major, minor, patch);
+
+            char msg[48];
+            snprintf(msg, sizeof(msg), "Update complete!\nNow running v%s", version_str);
+            ui_draw_info_screen(&display, "Main Board", msg);
+            vTaskDelay(pdMS_TO_TICKS(3000));
+            break;
+        }
+
+        consecutive_failures++;
+    }
+
+    // Return to settings
+    current_screen = SCREEN_SETTINGS;
+    active_menu = &settings_menu;
 }
 
 // Host communication task (currently unused)
@@ -824,17 +980,6 @@ void app_main(void) {
             host_comm.initialized = false;
         } else {
             ESP_LOGI(TAG, "Communication with main board verified (status: 0x%02X)", test_status);
-
-            ret = ota_manager_init(&ota_manager, &host_comm);
-            if (ret != ESP_OK) {
-                ESP_LOGW(TAG, "Failed to initialize OTA manager: %s", esp_err_to_name(ret));
-            } else {
-                ui_update_splash_progress(&display, "Check firmware...", 60);
-                ret = check_and_update_firmware();
-                if (ret == ESP_OK) {
-                    ESP_LOGI(TAG, "Firmware check completed");
-                }
-            }
 
             ESP_LOGI(TAG, "Fetching directory list at startup...");
             ui_update_splash_progress(&display, "Load directory...", 70);

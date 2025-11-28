@@ -597,3 +597,78 @@ esp_err_t host_comm_finish_file_upload(host_comm_t *comm, uint8_t *result_code, 
     return ESP_OK;
 }
 
+esp_err_t host_comm_get_rp2350_fw_status(host_comm_t *comm, rp2350_fw_status_t *status) {
+    if (!comm || !comm->initialized || !status) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    ESP_LOGI(TAG, "Getting RP2350 firmware status...");
+
+    // Send GET_RP2350_FW_STATUS command (async operation)
+    esp_err_t ret = transport_two_phase_transaction(&comm->transport,
+                                                    PANEL_CMD_GET_RP2350_FW_STATUS, PANEL_ARG_IGNORED,
+                                                    NULL, 0,  // No write data
+                                                    NULL, 0); // No immediate read data
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to send RP2350 fw status command: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    // Poll for async result
+    uint8_t *result_data;
+    size_t result_size;
+    ret = host_comm_poll_async_result(comm, 2000, 10, sizeof(rp2350_fw_status_t), &result_data, &result_size);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to get RP2350 fw status result: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    // Copy result to caller's buffer
+    memcpy(status, result_data, sizeof(rp2350_fw_status_t));
+
+    ESP_LOGI(TAG, "RP2350 status: version=0x%08lx, avail=0x%08lx",
+             status->current_version, status->available_version);
+
+    return ESP_OK;
+}
+
+esp_err_t host_comm_start_rp2350_update(host_comm_t *comm) {
+    if (!comm || !comm->initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    ESP_LOGI(TAG, "Starting RP2350 firmware update...");
+
+    // Send START_RP2350_UPDATE command (async operation)
+    // Note: On success, the main board will reboot, so we may not get a response
+    esp_err_t ret = transport_two_phase_transaction(&comm->transport,
+                                                    PANEL_CMD_START_RP2350_UPDATE, PANEL_ARG_IGNORED,
+                                                    NULL, 0,  // No write data
+                                                    NULL, 0); // No immediate read data
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to send RP2350 update command: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    // Poll for async result - but the board may reboot before we get it
+    ret = host_comm_poll_async_result(comm, 30000, 100, 0, NULL, NULL);
+    if (ret == ESP_ERR_TIMEOUT) {
+        // Timeout likely means the board is updating/rebooting - that's expected
+        ESP_LOGI(TAG, "RP2350 update started (board may be rebooting)");
+        return ESP_OK;
+    }
+
+    return ret;
+}
+
+esp_err_t host_comm_get_command_status(host_comm_t *comm, panel_command_status_t *status) {
+    if (!comm || !comm->initialized || !status) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    return transport_two_phase_transaction(&comm->transport,
+                                           PANEL_CMD_GET_COMMAND_STATUS, PANEL_ARG_IGNORED,
+                                           NULL, 0,
+                                           (uint8_t*)status, sizeof(panel_command_status_t));
+}
+

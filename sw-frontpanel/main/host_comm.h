@@ -54,6 +54,13 @@ esp_err_t host_comm_start_file_upload(host_comm_t *comm, const char *filename, u
 esp_err_t host_comm_write_file_chunk(host_comm_t *comm, const uint8_t *data, size_t size);
 esp_err_t host_comm_finish_file_upload(host_comm_t *comm, uint8_t *result_code, uint8_t *file_hash);
 
+// RP2350 (main board) firmware functions
+esp_err_t host_comm_get_rp2350_fw_status(host_comm_t *comm, rp2350_fw_status_t *status);
+esp_err_t host_comm_start_rp2350_update(host_comm_t *comm);
+
+// Command status polling (immediate read, doesn't interfere with running commands)
+esp_err_t host_comm_get_command_status(host_comm_t *comm, panel_command_status_t *status);
+
 const char* host_comm_get_transport_name(host_comm_t *comm);
 
 #ifdef __cplusplus

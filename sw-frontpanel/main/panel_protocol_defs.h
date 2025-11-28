@@ -29,6 +29,8 @@
 #define PANEL_CMD_START_FILE_UPLOAD    0x52  // Start file upload (async, payload: file_upload_start_t)
 #define PANEL_CMD_WRITE_FILE_CHUNK     0x53  // Write file chunk (async, arg: chunk crc16, payload: chunk data)
 #define PANEL_CMD_FINISH_FILE_UPLOAD   0x54  // Finish file upload (async)
+#define PANEL_CMD_GET_RP2350_FW_STATUS 0x55  // Get RP2350 firmware status (async, returns rp2350_fw_status_t)
+#define PANEL_CMD_START_RP2350_UPDATE  0x56  // Start RP2350 firmware update from SD card (async, reboots on success)
 #define PANEL_CMD_RESET                0x7F  // Reset system
 
 // Read commands (bit 7 = 1)
@@ -37,6 +39,7 @@
 #define PANEL_CMD_GET_DEVICE_STATUS    0x83  // Get device status (1 byte response)
 #define PANEL_CMD_GET_FIRMWARE_INFO    0x84  // Get firmware info after CHECK_FIRMWARE (45 bytes)
 #define PANEL_CMD_GET_PLAYBACK_STATUS  0x85  // Get current playback status (panel_playback_status_t)
+#define PANEL_CMD_GET_COMMAND_STATUS   0x86  // Get detailed async command status (panel_command_status_t)
 
 // Status codes for POLL_STATUS
 #define PANEL_STATUS_OK                0x00  // System OK
@@ -67,6 +70,14 @@ typedef struct __attribute__((packed)) {
     uint16_t response_size; // Size of result data (little-endian)
 } panel_status_response_t;
 
+// Detailed command status for GET_COMMAND_STATUS (4 bytes)
+typedef struct __attribute__((packed)) {
+    uint8_t command;       // Current/last async command
+    uint8_t state;         // PANEL_ASYNC_* state
+    uint8_t progress;      // 0-100 progress (command-specific)
+    uint8_t last_result;   // Result of last completed operation
+} panel_command_status_t;
+
 // Helper macros
 #define PANEL_CMD_IS_READ(cmd)  ((cmd) & PANEL_CMD_DIR_MASK)
 #define PANEL_CMD_IS_WRITE(cmd) (!PANEL_CMD_IS_READ(cmd))
@@ -88,6 +99,14 @@ typedef struct __attribute__((packed)) {
     uint8_t available;     // 1 if update available, 0 if not
     uint8_t reserved[8];   // Reserved for alignment
 } panel_firmware_info_t;
+
+// RP2350 firmware status structure
+typedef struct __attribute__((packed)) {
+    uint32_t current_version;      // Running version (0xMMmmpppp)
+    uint32_t available_version;    // Available update version (0 if none)
+    uint8_t update_progress;       // Update progress (0-100), 0 if not updating
+    uint8_t last_update_result;    // Result of last update attempt
+} rp2350_fw_status_t;
 
 // Firmware chunk size (must fit within PANEL_PROTOCOL_MAX_PAYLOAD)
 #define PANEL_FIRMWARE_CHUNK_SIZE  PANEL_PROTOCOL_MAX_PAYLOAD
