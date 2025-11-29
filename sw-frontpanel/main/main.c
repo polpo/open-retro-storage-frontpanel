@@ -599,7 +599,6 @@ static void firmware_update_task(void *pvParameters) {
     vTaskDelete(NULL);
 }
 
-// Draw the firmware status screen using ui_screens
 static void draw_firmware_status_screen(void) {
     uint32_t panel_current = ota_manager_get_current_version();
     ui_draw_firmware_status(&display,
@@ -705,52 +704,20 @@ static void trigger_mainboard_update(void) {
         return;
     }
 
-    // Poll command status until complete or communication lost
-    int consecutive_failures = 0;
-    uint8_t last_progress = 0;
-
-    while (consecutive_failures < 5) {
-        vTaskDelay(pdMS_TO_TICKS(250));
-
-        panel_command_status_t cmd_status;
-        ret = host_comm_get_command_status(&host_comm, &cmd_status);
-
-        if (ret != ESP_OK) {
-            consecutive_failures++;
-            ESP_LOGD(TAG, "Status poll failed (%d): %s", consecutive_failures, esp_err_to_name(ret));
-            continue;
-        }
-
-        consecutive_failures = 0;
-
-        // Update progress display
-        if (cmd_status.progress != last_progress) {
-            last_progress = cmd_status.progress;
-            char msg[32];
-            snprintf(msg, sizeof(msg), "Main board: %d%%", cmd_status.progress);
-            ui_draw_firmware_update(&display, msg, cmd_status.progress);
-        }
-
-        // Check if complete
-        if (cmd_status.state == PANEL_ASYNC_READY) {
-            ui_draw_info_screen(&display, "Main Board", "Update complete!\nRebooting...");
-            vTaskDelay(pdMS_TO_TICKS(2000));
-            break;
-        } else if (cmd_status.state == PANEL_ASYNC_ERROR) {
-            ui_draw_info_screen(&display, "Error", "Update failed");
-            vTaskDelay(pdMS_TO_TICKS(2000));
-            current_screen = SCREEN_SETTINGS;
-            active_menu = &settings_menu;
-            return;
-        }
+    // Show progress animation for 5 seconds while update happens
+    // The actual update is fast, but we show progress for better UX
+    for (int progress = 0; progress <= 100; progress += 2) {
+        char msg[32];
+        snprintf(msg, sizeof(msg), "Main board: %d%%", progress);
+        ui_draw_firmware_update(&display, msg, progress);
+        vTaskDelay(pdMS_TO_TICKS(100));  // 50 steps * 100ms = 5 seconds
     }
 
-    // Lost communication - board is rebooting
-    ui_draw_info_screen(&display, "Main Board", "Rebooting...");
+    // Now check if the board is back online
+    ui_draw_info_screen(&display, "Main Board", "Waiting for reboot...");
 
-    // Wait for board to come back online and show new version
-    consecutive_failures = 0;
-    while (consecutive_failures < 20) {  // Up to 10 seconds
+    int attempts = 0;
+    while (attempts < 20) {  // Up to 10 seconds
         vTaskDelay(pdMS_TO_TICKS(500));
 
         rp2350_fw_status_t fw_status;
@@ -771,7 +738,12 @@ static void trigger_mainboard_update(void) {
             break;
         }
 
-        consecutive_failures++;
+        attempts++;
+    }
+
+    if (attempts >= 20) {
+        ui_draw_info_screen(&display, "Main Board", "Update sent.\nBoard may still be\nrebooting...");
+        vTaskDelay(pdMS_TO_TICKS(3000));
     }
 
     // Return to settings

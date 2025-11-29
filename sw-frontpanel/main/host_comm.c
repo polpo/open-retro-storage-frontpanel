@@ -640,7 +640,7 @@ esp_err_t host_comm_start_rp2350_update(host_comm_t *comm) {
     ESP_LOGI(TAG, "Starting RP2350 firmware update...");
 
     // Send START_RP2350_UPDATE command (async operation)
-    // Note: On success, the main board will reboot, so we may not get a response
+    // The main board will start updating and reboot when done - don't wait for response
     esp_err_t ret = transport_two_phase_transaction(&comm->transport,
                                                     PANEL_CMD_START_RP2350_UPDATE, PANEL_ARG_IGNORED,
                                                     NULL, 0,  // No write data
@@ -650,15 +650,10 @@ esp_err_t host_comm_start_rp2350_update(host_comm_t *comm) {
         return ret;
     }
 
-    // Poll for async result - but the board may reboot before we get it
-    ret = host_comm_poll_async_result(comm, 30000, 100, 0, NULL, NULL);
-    if (ret == ESP_ERR_TIMEOUT) {
-        // Timeout likely means the board is updating/rebooting - that's expected
-        ESP_LOGI(TAG, "RP2350 update started (board may be rebooting)");
-        return ESP_OK;
-    }
-
-    return ret;
+    // Don't poll - the update happens quickly and the board reboots
+    // The caller should detect the reboot and wait for the board to come back
+    ESP_LOGI(TAG, "RP2350 update command sent successfully");
+    return ESP_OK;
 }
 
 esp_err_t host_comm_get_command_status(host_comm_t *comm, panel_command_status_t *status) {

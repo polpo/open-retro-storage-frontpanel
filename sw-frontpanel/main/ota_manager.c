@@ -467,9 +467,9 @@ uint32_t ota_manager_get_current_version(void) {
 }
 
 void ota_manager_format_version_string(char *version_str, uint32_t version_num) {
-    // Version number (major.minor.patch as 0xMMmmpppp)
-    uint8_t major = version_num >> 24;
-    uint8_t minor = (version_num >> 16) & 0xff;
-    uint16_t patch = version_num & 0xffff;
+    // Version number (major.minor.patch as 0x00MMmmpp)
+    uint8_t major = (version_num >> 16) & 0xff;
+    uint8_t minor = (version_num >> 8) & 0xff;
+    uint8_t patch = version_num & 0xff;
     sprintf(version_str, "%u.%u.%u", major, minor, patch);
 }

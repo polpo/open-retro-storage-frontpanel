@@ -65,18 +65,37 @@
 
         <div class="section">
             <h3>🔄 Firmware Update</h3>
-            <div id="firmware-status" class="status">
-                <div class="version-info">
-                    <strong>Current Version:</strong> <span id="current-version">Loading...</span><br>
-                    <strong>Available Version:</strong> <span id="available-version">Checking...</span>
+            <button onclick="checkAllFirmware()" class="refresh-btn">🔍 Check for Updates</button>
+
+            <div style="margin-top: 15px;">
+                <h4>Front Panel (ESP32)</h4>
+                <div id="panel-firmware-status" class="status">
+                    <div class="version-info">
+                        <strong>Current:</strong> <span id="panel-current-version">Loading...</span>
+                        <strong style="margin-left: 15px;">Available:</strong> <span id="panel-available-version">Checking...</span>
+                    </div>
                 </div>
+                <button onclick="startPanelFirmwareUpdate()" class="update-btn" id="panel-update-btn" disabled>📥 Update Panel</button>
+                <div id="panel-update-progress" class="progress-bar" style="display: none;">
+                    <div id="panel-update-progress-fill" class="progress-fill" style="width: 0%;"></div>
+                </div>
+                <div id="panel-update-status" class="status" style="display: none;"></div>
             </div>
-            <button onclick="checkFirmwareUpdate()" class="refresh-btn">🔍 Check for Updates</button>
-            <button onclick="startFirmwareUpdate()" class="update-btn" id="update-btn" disabled>📥 Update Firmware</button>
-            <div id="update-progress" class="progress-bar" style="display: none;">
-                <div id="update-progress-fill" class="progress-fill" style="width: 0%;"></div>
+
+            <div style="margin-top: 15px;">
+                <h4>Main Board (RP2350)</h4>
+                <div id="mainboard-firmware-status" class="status">
+                    <div class="version-info">
+                        <strong>Current:</strong> <span id="mainboard-current-version">Loading...</span>
+                        <strong style="margin-left: 15px;">Available:</strong> <span id="mainboard-available-version">Checking...</span>
+                    </div>
+                </div>
+                <button onclick="startMainboardFirmwareUpdate()" class="update-btn" id="mainboard-update-btn" disabled>📥 Update Main Board</button>
+                <div id="mainboard-update-progress" class="progress-bar" style="display: none;">
+                    <div id="mainboard-update-progress-fill" class="progress-fill" style="width: 0%;"></div>
+                </div>
+                <div id="mainboard-update-status" class="status" style="display: none;"></div>
             </div>
-            <div id="update-status" class="status" style="display: none;"></div>
         </div>
 
         <div class="section">

@@ -25,6 +25,9 @@ static esp_err_t api_wifi_status_handler(httpd_req_t *req);
 static esp_err_t api_firmware_check_handler(httpd_req_t *req);
 static esp_err_t api_firmware_update_handler(httpd_req_t *req);
 static esp_err_t api_firmware_status_handler(httpd_req_t *req);
+static esp_err_t api_mainboard_firmware_check_handler(httpd_req_t *req);
+static esp_err_t api_mainboard_firmware_update_handler(httpd_req_t *req);
+static esp_err_t api_mainboard_firmware_status_handler(httpd_req_t *req);
 static esp_err_t api_upload_handler(httpd_req_t *req);
 
 // Global server instance for handlers
@@ -57,6 +60,9 @@ static const httpd_uri_t uri_handlers[] = {
     { .uri = "/api/firmware/check", .method = HTTP_GET, .handler = api_firmware_check_handler, .user_ctx = NULL },
     { .uri = "/api/firmware/update", .method = HTTP_POST, .handler = api_firmware_update_handler, .user_ctx = NULL },
     { .uri = "/api/firmware/status", .method = HTTP_GET, .handler = api_firmware_status_handler, .user_ctx = NULL },
+    { .uri = "/api/firmware/mainboard/check", .method = HTTP_GET, .handler = api_mainboard_firmware_check_handler, .user_ctx = NULL },
+    { .uri = "/api/firmware/mainboard/update", .method = HTTP_POST, .handler = api_mainboard_firmware_update_handler, .user_ctx = NULL },
+    { .uri = "/api/firmware/mainboard/status", .method = HTTP_GET, .handler = api_mainboard_firmware_status_handler, .user_ctx = NULL },
     { .uri = "/api/upload", .method = HTTP_POST, .handler = api_upload_handler, .user_ctx = NULL }
 };
 
@@ -182,24 +188,26 @@ static esp_err_t api_discs_handler(httpd_req_t *req) {
         ret = json.beginArray();
         if (ret != ESP_OK) return ret;
 
-        // Get entries through interface layer
-        dir_entry_info_t entries[64];
-        size_t entry_count = 0;
-        image_ret = interface_get_entry_list(g_server->interface_ctx, entries, 64, &entry_count);
+        // Stream entries one at a time to avoid stack overflow
+        uint32_t entry_count = 0;
+        host_comm_t *host_comm = g_server->interface_ctx->host_comm;
+        if (host_comm && host_comm->initialized) {
+            host_comm_get_entry_count(host_comm, &entry_count);
+        }
 
-        if (image_ret == ESP_OK && entry_count > 0) {
-            // Stream each entry
-            for (size_t i = 0; i < entry_count; i++) {
+        for (uint32_t i = 0; i < entry_count && i < 64; i++) {
+            dir_entry_info_t entry;
+            if (host_comm_get_entry_info(host_comm, i, &entry) == ESP_OK) {
                 ret = json.beginObject();
                 if (ret != ESP_OK) return ret;
 
-                ret = json.write("name", entries[i].name);
+                ret = json.write("name", entry.name);
                 if (ret != ESP_OK) return ret;
 
-                ret = json.write("size", entries[i].size_mb);
+                ret = json.write("size", entry.size_mb);
                 if (ret != ESP_OK) return ret;
 
-                ret = json.write("type", entries[i].entry_type == 0 ? "directory" : "file");
+                ret = json.write("type", entry.entry_type == 0 ? "directory" : "file");
                 if (ret != ESP_OK) return ret;
 
                 ret = json.write("index", (int)i);
@@ -815,6 +823,170 @@ static esp_err_t api_firmware_status_handler(httpd_req_t *req) {
 
     if (state == OTA_STATE_ERROR) {
         ret = json.write("error", esp_err_to_name(g_ota_manager.last_error));
+        if (ret != ESP_OK) return ret;
+    }
+
+    ret = json.endObject();
+    if (ret != ESP_OK) return ret;
+
+    return json.finalize();
+}
+
+// Mainboard (RP2350) firmware tracking state
+static bool g_mainboard_update_started = false;
+
+static esp_err_t api_mainboard_firmware_check_handler(httpd_req_t *req) {
+    httpd_resp_set_type(req, "application/json");
+
+    JsonStreamWriter json(req);
+    esp_err_t ret = json.beginObject();
+    if (ret != ESP_OK) return ret;
+
+    if (g_server && g_server->interface_ctx && g_server->interface_ctx->host_comm) {
+        rp2350_fw_status_t status;
+        esp_err_t check_ret = host_comm_get_rp2350_fw_status(g_server->interface_ctx->host_comm, &status);
+
+        if (check_ret == ESP_OK) {
+            ret = json.write("current_version", status.current_version);
+            if (ret != ESP_OK) return ret;
+
+            bool update_available = (status.available_version != 0);
+            ret = json.write("update_available", update_available ? 1 : 0);
+            if (ret != ESP_OK) return ret;
+
+            if (update_available) {
+                ret = json.write("available_version", status.available_version);
+                if (ret != ESP_OK) return ret;
+            }
+        } else {
+            ret = json.write("current_version", 0);
+            if (ret != ESP_OK) return ret;
+
+            ret = json.write("update_available", 0);
+            if (ret != ESP_OK) return ret;
+
+            ret = json.write("error", esp_err_to_name(check_ret));
+            if (ret != ESP_OK) return ret;
+        }
+    } else {
+        ret = json.write("current_version", 0);
+        if (ret != ESP_OK) return ret;
+
+        ret = json.write("update_available", 0);
+        if (ret != ESP_OK) return ret;
+
+        ret = json.write("error", "Interface not available");
+        if (ret != ESP_OK) return ret;
+    }
+
+    ret = json.endObject();
+    if (ret != ESP_OK) return ret;
+
+    return json.finalize();
+}
+
+static esp_err_t api_mainboard_firmware_update_handler(httpd_req_t *req) {
+    httpd_resp_set_type(req, "application/json");
+
+    JsonStreamWriter json(req);
+    esp_err_t ret = json.beginObject();
+    if (ret != ESP_OK) return ret;
+
+    bool success = false;
+    if (g_server && g_server->interface_ctx && g_server->interface_ctx->host_comm) {
+        esp_err_t update_ret = host_comm_start_rp2350_update(g_server->interface_ctx->host_comm);
+        success = (update_ret == ESP_OK);
+
+        if (success) {
+            g_mainboard_update_started = true;
+        } else {
+            ret = json.write("error", esp_err_to_name(update_ret));
+            if (ret != ESP_OK) return ret;
+        }
+    } else {
+        ret = json.write("error", "Interface not available");
+        if (ret != ESP_OK) return ret;
+    }
+
+    ret = json.write("success", success ? 1 : 0);
+    if (ret != ESP_OK) return ret;
+
+    ret = json.endObject();
+    if (ret != ESP_OK) return ret;
+
+    return json.finalize();
+}
+
+static esp_err_t api_mainboard_firmware_status_handler(httpd_req_t *req) {
+    httpd_resp_set_type(req, "application/json");
+
+    JsonStreamWriter json(req);
+    esp_err_t ret = json.beginObject();
+    if (ret != ESP_OK) return ret;
+
+    if (g_server && g_server->interface_ctx && g_server->interface_ctx->host_comm) {
+        panel_command_status_t cmd_status;
+        esp_err_t status_ret = host_comm_get_command_status(g_server->interface_ctx->host_comm, &cmd_status);
+
+        if (status_ret == ESP_OK) {
+            // Determine state string based on async state
+            const char* state_str;
+            switch (cmd_status.state) {
+                case PANEL_ASYNC_IDLE:
+                    state_str = g_mainboard_update_started ? "rebooting" : "idle";
+                    break;
+                case PANEL_ASYNC_PROCESSING:
+                    state_str = "updating";
+                    break;
+                case PANEL_ASYNC_READY:
+                    state_str = "success";
+                    g_mainboard_update_started = false;
+                    break;
+                case PANEL_ASYNC_ERROR:
+                    state_str = "error";
+                    g_mainboard_update_started = false;
+                    break;
+                default:
+                    state_str = "unknown";
+            }
+
+            ret = json.write("state", state_str);
+            if (ret != ESP_OK) return ret;
+
+            ret = json.write("progress", cmd_status.progress);
+            if (ret != ESP_OK) return ret;
+
+            if (cmd_status.state == PANEL_ASYNC_ERROR) {
+                ret = json.write("error", "Update failed");
+                if (ret != ESP_OK) return ret;
+            }
+        } else {
+            // Communication lost - board may be rebooting
+            if (g_mainboard_update_started) {
+                ret = json.write("state", "rebooting");
+                if (ret != ESP_OK) return ret;
+
+                ret = json.write("progress", 100);
+                if (ret != ESP_OK) return ret;
+            } else {
+                ret = json.write("state", "error");
+                if (ret != ESP_OK) return ret;
+
+                ret = json.write("progress", 0);
+                if (ret != ESP_OK) return ret;
+
+                ret = json.write("error", "Communication lost");
+                if (ret != ESP_OK) return ret;
+            }
+        }
+    } else {
+        ret = json.write("state", "error");
+        if (ret != ESP_OK) return ret;
+
+        ret = json.write("progress", 0);
+        if (ret != ESP_OK) return ret;
+
+        ret = json.write("error", "Interface not available");
         if (ret != ESP_OK) return ret;
     }
 

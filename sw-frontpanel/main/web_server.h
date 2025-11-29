@@ -14,7 +14,7 @@ extern "C" {
 
 #define WEB_SERVER_PORT 80
 #define WEB_SERVER_MAX_URI_LEN 128
-#define WEB_SERVER_MAX_HANDLERS 16
+#define WEB_SERVER_MAX_HANDLERS 20
 
 typedef struct {
     httpd_handle_t server;

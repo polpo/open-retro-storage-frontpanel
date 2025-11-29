@@ -136,122 +136,213 @@ async function connectToWiFi(ssid, password, isOpen = false) {
 }
 
 // Firmware update variables
-let updateInProgress = false;
-let updateCheckTimer = null;
+let panelUpdateInProgress = false;
+let panelUpdateCheckTimer = null;
+let mainboardUpdateInProgress = false;
+let mainboardUpdateCheckTimer = null;
 
 // Format version number for display
 function formatVersion(version) {
+    if (version === 0) return 'Unknown';
     const major = (version >> 16) & 0xFF;
     const minor = (version >> 8) & 0xFF;
     const patch = version & 0xFF;
     return `v${major}.${minor}.${patch}`;
 }
 
-async function checkFirmwareUpdate() {
+async function checkAllFirmware() {
     showStatus('', 'Checking for firmware updates...');
+    await Promise.all([checkPanelFirmware(), checkMainboardFirmware()]);
+    showStatus('success', 'Firmware check complete');
+}
 
+async function checkPanelFirmware() {
     const data = await apiCall('/firmware/check');
     if (data) {
-        // Update current version display
         if (data.current_version !== undefined) {
-            document.getElementById('current-version').textContent = formatVersion(data.current_version);
+            document.getElementById('panel-current-version').textContent = formatVersion(data.current_version);
         }
 
-        // Update available version display
         if (data.update_available) {
-            document.getElementById('available-version').textContent = formatVersion(data.available_version);
-            document.getElementById('available-version').style.color = '#28a745';
-            document.getElementById('update-btn').disabled = false;
-            showStatus('success', 'Firmware update available!');
+            document.getElementById('panel-available-version').textContent = formatVersion(data.available_version);
+            document.getElementById('panel-available-version').style.color = '#28a745';
+            document.getElementById('panel-update-btn').disabled = false;
         } else {
-            document.getElementById('available-version').textContent = 'Up to date';
-            document.getElementById('available-version').style.color = '#666';
-            document.getElementById('update-btn').disabled = true;
-            showStatus('success', 'Firmware is up to date');
+            document.getElementById('panel-available-version').textContent = 'No update';
+            document.getElementById('panel-available-version').style.color = '#666';
+            document.getElementById('panel-update-btn').disabled = true;
         }
     }
 }
 
-async function startFirmwareUpdate() {
-    if (updateInProgress) {
-        showStatus('error', 'Update already in progress');
+async function checkMainboardFirmware() {
+    const data = await apiCall('/firmware/mainboard/check');
+    if (data) {
+        if (data.current_version !== undefined) {
+            document.getElementById('mainboard-current-version').textContent = formatVersion(data.current_version);
+        }
+
+        if (data.update_available) {
+            document.getElementById('mainboard-available-version').textContent = formatVersion(data.available_version);
+            document.getElementById('mainboard-available-version').style.color = '#28a745';
+            document.getElementById('mainboard-update-btn').disabled = false;
+        } else {
+            document.getElementById('mainboard-available-version').textContent = 'No update';
+            document.getElementById('mainboard-available-version').style.color = '#666';
+            document.getElementById('mainboard-update-btn').disabled = true;
+        }
+
+        if (data.error) {
+            document.getElementById('mainboard-available-version').textContent = 'Error';
+            document.getElementById('mainboard-available-version').style.color = '#dc3545';
+        }
+    }
+}
+
+async function startPanelFirmwareUpdate() {
+    if (panelUpdateInProgress) {
+        showStatus('error', 'Panel update already in progress');
         return;
     }
 
-    if (!confirm('Are you sure you want to update the firmware? The device will restart during this process.')) {
+    if (!confirm('Are you sure you want to update the front panel firmware? The panel will restart.')) {
         return;
     }
 
-    updateInProgress = true;
-    document.getElementById('update-btn').disabled = true;
-    document.getElementById('update-progress').style.display = 'block';
-    document.getElementById('update-status').style.display = 'block';
-    document.getElementById('update-status').textContent = 'Starting firmware update...';
+    panelUpdateInProgress = true;
+    document.getElementById('panel-update-btn').disabled = true;
+    document.getElementById('panel-update-progress').style.display = 'block';
+    document.getElementById('panel-update-status').style.display = 'block';
+    document.getElementById('panel-update-status').textContent = 'Starting panel update...';
 
-    showStatus('', 'Starting firmware update...');
+    showStatus('', 'Starting panel firmware update...');
 
     const data = await apiCall('/firmware/update', { method: 'POST' });
     if (data && data.success) {
-        // Start polling for progress
-        updateCheckTimer = setInterval(checkUpdateProgress, 2000);
+        panelUpdateCheckTimer = setInterval(checkPanelUpdateProgress, 2000);
     } else {
-        updateInProgress = false;
-        document.getElementById('update-btn').disabled = false;
-        document.getElementById('update-progress').style.display = 'none';
-        document.getElementById('update-status').style.display = 'none';
-        showStatus('error', `Failed to start update: ${data?.error || 'Unknown error'}`);
+        panelUpdateInProgress = false;
+        document.getElementById('panel-update-btn').disabled = false;
+        document.getElementById('panel-update-progress').style.display = 'none';
+        document.getElementById('panel-update-status').style.display = 'none';
+        showStatus('error', `Failed to start panel update: ${data?.error || 'Unknown error'}`);
     }
 }
 
-async function checkUpdateProgress() {
+async function checkPanelUpdateProgress() {
     const data = await apiCall('/firmware/status');
     if (data) {
         const progress = data.progress || 0;
         const state = data.state || 'unknown';
 
-        // Update progress bar
-        document.getElementById('update-progress-fill').style.width = `${progress}%`;
+        document.getElementById('panel-update-progress-fill').style.width = `${progress}%`;
 
-        // Update status text
         let statusText = '';
         switch (state) {
             case 'downloading':
-                statusText = `Downloading firmware... ${progress}%`;
+                statusText = `Downloading... ${progress}%`;
                 break;
             case 'verifying':
-                statusText = 'Verifying firmware...';
+                statusText = 'Verifying...';
                 break;
             case 'applying':
                 statusText = 'Applying update...';
                 break;
             case 'success':
-                statusText = 'Update successful! Device will restart...';
-                updateInProgress = false;
-                clearInterval(updateCheckTimer);
-                showStatus('success', 'Firmware update completed successfully!');
-                setTimeout(() => {
-                    showStatus('', 'Device restarting...');
-                }, 2000);
+                statusText = 'Update successful! Panel restarting...';
+                panelUpdateInProgress = false;
+                clearInterval(panelUpdateCheckTimer);
+                showStatus('success', 'Panel firmware update completed!');
                 break;
             case 'error':
-                statusText = `Update failed: ${data.error || 'Unknown error'}`;
-                updateInProgress = false;
-                clearInterval(updateCheckTimer);
-                document.getElementById('update-btn').disabled = false;
+                statusText = `Failed: ${data.error || 'Unknown error'}`;
+                panelUpdateInProgress = false;
+                clearInterval(panelUpdateCheckTimer);
+                document.getElementById('panel-update-btn').disabled = false;
                 showStatus('error', statusText);
                 break;
             default:
-                statusText = 'Preparing update...';
+                statusText = 'Preparing...';
         }
 
-        document.getElementById('update-status').textContent = statusText;
+        document.getElementById('panel-update-status').textContent = statusText;
 
-        // If update completed or failed, stop polling
         if (state === 'success' || state === 'error') {
-            clearInterval(updateCheckTimer);
-            updateCheckTimer = null;
+            clearInterval(panelUpdateCheckTimer);
+            panelUpdateCheckTimer = null;
         }
     }
+}
+
+async function startMainboardFirmwareUpdate() {
+    if (mainboardUpdateInProgress) {
+        showStatus('error', 'Main board update already in progress');
+        return;
+    }
+
+    if (!confirm('Are you sure you want to update the main board firmware? The main board will restart.')) {
+        return;
+    }
+
+    mainboardUpdateInProgress = true;
+    document.getElementById('mainboard-update-btn').disabled = true;
+    document.getElementById('mainboard-update-progress').style.display = 'block';
+    document.getElementById('mainboard-update-status').style.display = 'block';
+    document.getElementById('mainboard-update-status').textContent = 'Starting main board update...';
+
+    showStatus('', 'Starting main board firmware update...');
+
+    const data = await apiCall('/firmware/mainboard/update', { method: 'POST' });
+    if (data && data.success) {
+        // Main board update is fast - show fake progress for 5 seconds while it reboots
+        await runMainboardUpdateAnimation();
+    } else {
+        mainboardUpdateInProgress = false;
+        document.getElementById('mainboard-update-btn').disabled = false;
+        document.getElementById('mainboard-update-progress').style.display = 'none';
+        document.getElementById('mainboard-update-status').style.display = 'none';
+        showStatus('error', `Failed to start main board update: ${data?.error || 'Unknown error'}`);
+    }
+}
+
+async function runMainboardUpdateAnimation() {
+    // Show progress animation for 5 seconds
+    for (let progress = 0; progress <= 100; progress += 2) {
+        document.getElementById('mainboard-update-progress-fill').style.width = `${progress}%`;
+        document.getElementById('mainboard-update-status').textContent = `Updating main board... ${progress}%`;
+        await new Promise(resolve => setTimeout(resolve, 100));
+    }
+
+    // Now wait for the board to come back online
+    document.getElementById('mainboard-update-status').textContent = 'Waiting for main board to reboot...';
+
+    // Try to get firmware status for up to 10 seconds
+    let attempts = 0;
+    while (attempts < 20) {
+        await new Promise(resolve => setTimeout(resolve, 500));
+        attempts++;
+
+        try {
+            const data = await apiCall('/firmware/mainboard/check');
+            if (data && data.current_version) {
+                // Board is back online!
+                document.getElementById('mainboard-update-status').textContent =
+                    `Update complete! Now running ${formatVersion(data.current_version)}`;
+                document.getElementById('mainboard-current-version').textContent = formatVersion(data.current_version);
+                showStatus('success', 'Main board firmware update completed!');
+                mainboardUpdateInProgress = false;
+                return;
+            }
+        } catch (e) {
+            // Board still rebooting, continue waiting
+        }
+    }
+
+    // Timed out waiting for board
+    document.getElementById('mainboard-update-status').textContent = 'Update sent. Board may still be rebooting...';
+    showStatus('', 'Update sent - board may still be rebooting');
+    mainboardUpdateInProgress = false;
+    document.getElementById('mainboard-update-btn').disabled = false;
 }
 
 // File upload variables
@@ -476,7 +567,7 @@ document.addEventListener('DOMContentLoaded', function() {
     loadSystemInfo();
     refreshDiscs();
     loadWiFiStatus();
-    checkFirmwareUpdate();
+    checkAllFirmware();
 
     // Add file input change listener to set file size
     const fileInput = document.getElementById('file-input');
