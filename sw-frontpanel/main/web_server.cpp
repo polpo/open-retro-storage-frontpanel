@@ -16,9 +16,11 @@ static esp_err_t index_handler(httpd_req_t *req);
 static esp_err_t js_handler(httpd_req_t *req);
 static esp_err_t sha256_js_handler(httpd_req_t *req);
 static esp_err_t api_status_handler(httpd_req_t *req);
-static esp_err_t api_discs_handler(httpd_req_t *req);
-static esp_err_t api_select_disc_handler(httpd_req_t *req);
-static esp_err_t api_eject_disc_handler(httpd_req_t *req);
+static esp_err_t api_images_handler(httpd_req_t *req);
+static esp_err_t api_select_entry_handler(httpd_req_t *req);
+static esp_err_t api_eject_image_handler(httpd_req_t *req);
+static esp_err_t api_prev_image_handler(httpd_req_t *req);
+static esp_err_t api_next_image_handler(httpd_req_t *req);
 static esp_err_t api_wifi_scan_handler(httpd_req_t *req);
 static esp_err_t api_wifi_connect_handler(httpd_req_t *req);
 static esp_err_t api_wifi_status_handler(httpd_req_t *req);
@@ -51,9 +53,11 @@ static const httpd_uri_t uri_handlers[] = {
     { .uri = "/app.js", .method = HTTP_GET, .handler = js_handler, .user_ctx = NULL },
     { .uri = "/sha256.js", .method = HTTP_GET, .handler = sha256_js_handler, .user_ctx = NULL },
     { .uri = "/api/status", .method = HTTP_GET, .handler = api_status_handler, .user_ctx = NULL },
-    { .uri = "/api/discs", .method = HTTP_GET, .handler = api_discs_handler, .user_ctx = NULL },
-    { .uri = "/api/select_disc", .method = HTTP_POST, .handler = api_select_disc_handler, .user_ctx = NULL },
-    { .uri = "/api/eject_disc", .method = HTTP_POST, .handler = api_eject_disc_handler, .user_ctx = NULL },
+    { .uri = "/api/images", .method = HTTP_GET, .handler = api_images_handler, .user_ctx = NULL },
+    { .uri = "/api/select_entry", .method = HTTP_POST, .handler = api_select_entry_handler, .user_ctx = NULL },
+    { .uri = "/api/eject_image", .method = HTTP_POST, .handler = api_eject_image_handler, .user_ctx = NULL },
+    { .uri = "/api/prev_image", .method = HTTP_POST, .handler = api_prev_image_handler, .user_ctx = NULL },
+    { .uri = "/api/next_image", .method = HTTP_POST, .handler = api_next_image_handler, .user_ctx = NULL },
     { .uri = "/api/wifi/scan", .method = HTTP_GET, .handler = api_wifi_scan_handler, .user_ctx = NULL },
     { .uri = "/api/wifi/connect", .method = HTTP_POST, .handler = api_wifi_connect_handler, .user_ctx = NULL },
     { .uri = "/api/wifi/status", .method = HTTP_GET, .handler = api_wifi_status_handler, .user_ctx = NULL },
@@ -162,7 +166,7 @@ private:
     httpd_req_t* req_;
 };
 
-static esp_err_t api_discs_handler(httpd_req_t *req) {
+static esp_err_t api_images_handler(httpd_req_t *req) {
     httpd_resp_set_type(req, "application/json");
 
     JsonStreamWriter json(req);
@@ -170,19 +174,41 @@ static esp_err_t api_discs_handler(httpd_req_t *req) {
     if (ret != ESP_OK) return ret;
 
     if (g_server && g_server->interface_ctx) {
-        // Get current image
-        char current_image[64];
-        esp_err_t image_ret = interface_get_current_image(g_server->interface_ctx, current_image, sizeof(current_image));
+        host_comm_t *host_comm = g_server->interface_ctx->host_comm;
 
-        if (image_ret == ESP_OK) {
-            ret = json.write("current_disc", current_image);
-        } else {
-            ret = json.write("current_disc", "No image loaded");
+        // Get current path
+        char current_path[256] = "/";
+        if (host_comm && host_comm->initialized) {
+            host_comm_get_current_path(host_comm, current_path, sizeof(current_path));
         }
+        ret = json.write("current_path", current_path);
         if (ret != ESP_OK) return ret;
 
-        // Start discs array
-        ret = json.writeKey("discs");
+        // Get loaded image status
+        loaded_image_status_t image_status = {0};
+        bool have_image_status = false;
+        if (host_comm && host_comm->initialized) {
+            have_image_status = (host_comm_get_loaded_image_status(host_comm, &image_status) == ESP_OK);
+        }
+
+        if (have_image_status && image_status.image_loaded) {
+            ret = json.write("current_image", image_status.image_name);
+            if (ret != ESP_OK) return ret;
+            ret = json.write("image_index", image_status.image_index);
+            if (ret != ESP_OK) return ret;
+            ret = json.write("total_images", image_status.total_images);
+            if (ret != ESP_OK) return ret;
+        } else {
+            ret = json.write("current_image", (const char*)nullptr);
+            if (ret != ESP_OK) return ret;
+            ret = json.write("image_index", 0);
+            if (ret != ESP_OK) return ret;
+            ret = json.write("total_images", 0);
+            if (ret != ESP_OK) return ret;
+        }
+
+        // Start entries array
+        ret = json.writeKey("entries");
         if (ret != ESP_OK) return ret;
 
         ret = json.beginArray();
@@ -190,7 +216,6 @@ static esp_err_t api_discs_handler(httpd_req_t *req) {
 
         // Stream entries one at a time to avoid stack overflow
         uint32_t entry_count = 0;
-        host_comm_t *host_comm = g_server->interface_ctx->host_comm;
         if (host_comm && host_comm->initialized) {
             host_comm_get_entry_count(host_comm, &entry_count);
         }
@@ -204,10 +229,7 @@ static esp_err_t api_discs_handler(httpd_req_t *req) {
                 ret = json.write("name", entry.name);
                 if (ret != ESP_OK) return ret;
 
-                ret = json.write("size", entry.size_mb);
-                if (ret != ESP_OK) return ret;
-
-                ret = json.write("type", entry.entry_type == 0 ? "directory" : "file");
+                ret = json.write("is_directory", entry.entry_type == 0);
                 if (ret != ESP_OK) return ret;
 
                 ret = json.write("index", (int)i);
@@ -221,10 +243,19 @@ static esp_err_t api_discs_handler(httpd_req_t *req) {
         ret = json.endArray();
         if (ret != ESP_OK) return ret;
     } else {
-        ret = json.write("current_disc", "No image loaded");
+        ret = json.write("current_path", "/");
         if (ret != ESP_OK) return ret;
 
-        ret = json.writeKey("discs");
+        ret = json.write("current_image", (const char*)nullptr);
+        if (ret != ESP_OK) return ret;
+
+        ret = json.write("image_index", 0);
+        if (ret != ESP_OK) return ret;
+
+        ret = json.write("total_images", 0);
+        if (ret != ESP_OK) return ret;
+
+        ret = json.writeKey("entries");
         if (ret != ESP_OK) return ret;
 
         ret = json.beginArray();
@@ -240,7 +271,7 @@ static esp_err_t api_discs_handler(httpd_req_t *req) {
     return json.finalize();
 }
 
-static esp_err_t api_select_disc_handler(httpd_req_t *req) {
+static esp_err_t api_select_entry_handler(httpd_req_t *req) {
     // Read request body
     char content[100];
     size_t recv_size = MIN(req->content_len, sizeof(content) - 1);
@@ -258,10 +289,10 @@ static esp_err_t api_select_disc_handler(httpd_req_t *req) {
         return ESP_FAIL;
     }
 
-    cJSON *entry_index_json = cJSON_GetObjectItem(json, "entry_index");
+    cJSON *entry_index_json = cJSON_GetObjectItem(json, "index");
     if (!cJSON_IsNumber(entry_index_json)) {
         cJSON_Delete(json);
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing or invalid entry_index");
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing or invalid index");
         return ESP_FAIL;
     }
 
@@ -312,7 +343,7 @@ static esp_err_t api_select_disc_handler(httpd_req_t *req) {
     return json_writer.finalize();
 }
 
-static esp_err_t api_eject_disc_handler(httpd_req_t *req) {
+static esp_err_t api_eject_image_handler(httpd_req_t *req) {
     httpd_resp_set_type(req, "application/json");
 
     JsonStreamWriter json(req);
@@ -325,6 +356,64 @@ static esp_err_t api_eject_disc_handler(httpd_req_t *req) {
         success = (eject_ret == ESP_OK);
         if (!success) {
             ret = json.write("error", esp_err_to_name(eject_ret));
+            if (ret != ESP_OK) return ret;
+        }
+    } else {
+        ret = json.write("error", "Interface not available");
+        if (ret != ESP_OK) return ret;
+    }
+
+    ret = json.write("success", success ? 1 : 0);
+    if (ret != ESP_OK) return ret;
+
+    ret = json.endObject();
+    if (ret != ESP_OK) return ret;
+
+    return json.finalize();
+}
+
+static esp_err_t api_prev_image_handler(httpd_req_t *req) {
+    httpd_resp_set_type(req, "application/json");
+
+    JsonStreamWriter json(req);
+    esp_err_t ret = json.beginObject();
+    if (ret != ESP_OK) return ret;
+
+    bool success = false;
+    if (g_server && g_server->interface_ctx && g_server->interface_ctx->host_comm) {
+        esp_err_t prev_ret = host_comm_select_prev_image(g_server->interface_ctx->host_comm);
+        success = (prev_ret == ESP_OK);
+        if (!success) {
+            ret = json.write("error", esp_err_to_name(prev_ret));
+            if (ret != ESP_OK) return ret;
+        }
+    } else {
+        ret = json.write("error", "Interface not available");
+        if (ret != ESP_OK) return ret;
+    }
+
+    ret = json.write("success", success ? 1 : 0);
+    if (ret != ESP_OK) return ret;
+
+    ret = json.endObject();
+    if (ret != ESP_OK) return ret;
+
+    return json.finalize();
+}
+
+static esp_err_t api_next_image_handler(httpd_req_t *req) {
+    httpd_resp_set_type(req, "application/json");
+
+    JsonStreamWriter json(req);
+    esp_err_t ret = json.beginObject();
+    if (ret != ESP_OK) return ret;
+
+    bool success = false;
+    if (g_server && g_server->interface_ctx && g_server->interface_ctx->host_comm) {
+        esp_err_t next_ret = host_comm_select_next_image(g_server->interface_ctx->host_comm);
+        success = (next_ret == ESP_OK);
+        if (!success) {
+            ret = json.write("error", esp_err_to_name(next_ret));
             if (ret != ESP_OK) return ret;
         }
     } else {

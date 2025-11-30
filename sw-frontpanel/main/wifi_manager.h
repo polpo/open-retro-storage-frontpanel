@@ -54,6 +54,7 @@ typedef struct {
     bool initialized;
     bool station_connected;
     bool ap_active;
+    bool pending_credential_save;  // Save credentials after successful DHCP
     uint8_t retry_count;
     esp_ip4_addr_t ip_addr;
     esp_ip4_addr_t ap_ip_addr;
@@ -72,9 +73,11 @@ esp_err_t wifi_manager_set_config(wifi_manager_t *manager, const wifi_manager_co
 esp_err_t wifi_manager_get_config(wifi_manager_t *manager, wifi_manager_config_t *config);
 esp_err_t wifi_manager_save_config(wifi_manager_t *manager);
 esp_err_t wifi_manager_load_config(wifi_manager_t *manager);
+esp_err_t wifi_manager_clear_config(wifi_manager_t *manager);
 
 // Connection management
 esp_err_t wifi_manager_connect(wifi_manager_t *manager, const char *ssid, const char *password);
+esp_err_t wifi_manager_connect_and_save(wifi_manager_t *manager, const char *ssid, const char *password);
 esp_err_t wifi_manager_disconnect(wifi_manager_t *manager);
 esp_err_t wifi_manager_start_ap(wifi_manager_t *manager);
 esp_err_t wifi_manager_stop_ap(wifi_manager_t *manager);

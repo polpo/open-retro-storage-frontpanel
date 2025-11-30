@@ -201,6 +201,17 @@ esp_err_t ui_draw_menu(display_manager_t *display, menu_t *menu) {
     // Clear display
     display_manager_clear(display);
 
+    // Draw header if title provided
+    uint8_t y_offset = 0;
+    if (menu->title) {
+        display_manager_set_font(display, u8g2_font_amstrad_cpc_extended_8f);
+        display_manager_draw_box(display, 0, 0, 128, 10);
+        display_manager_set_draw_color(display, 0);
+        display_manager_draw_text(display, 2, 8, menu->title);
+        display_manager_set_draw_color(display, 1);
+        y_offset = 10;
+    }
+
     // Get visible menu items
     menu_item_t *visible_items;
     uint32_t visible_count;
@@ -235,7 +246,7 @@ esp_err_t ui_draw_menu(display_manager_t *display, menu_t *menu) {
     // Draw each visible menu item
     bool scrolling_active = false;
     for (uint32_t i = 0; i < visible_count; i++) {
-        uint8_t y_pos = (i + 1) * 8;
+        uint8_t y_pos = y_offset + (i + 1) * 8;
         uint8_t highlight_width = (menu->item_count > menu->visible_items) ? 122 : 128;
 
         // Highlight selected item
@@ -262,9 +273,9 @@ esp_err_t ui_draw_menu(display_manager_t *display, menu_t *menu) {
     if (menu->item_count > menu->visible_items) {
         // Calculate scroll bar dimensions
         uint8_t scrollbar_x = 124;
-        uint8_t scrollbar_y = 0;
+        uint8_t scrollbar_y = y_offset;
         uint8_t scrollbar_width = 3;
-        uint8_t scrollbar_height = 64;
+        uint8_t scrollbar_height = 64 - y_offset;
 
         // Draw scroll bar background (thin frame)
         display_manager_draw_frame(display, scrollbar_x, scrollbar_y, scrollbar_width, scrollbar_height);
@@ -294,8 +305,7 @@ esp_err_t ui_draw_menu(display_manager_t *display, menu_t *menu) {
 }
 
 esp_err_t ui_draw_disc_list(display_manager_t *display, menu_t *menu) {
-    // For now, just use the regular menu drawing
-    // Could be customized later with icons or different formatting
+    // Use the regular menu drawing - menu->title should be set appropriately
     return ui_draw_menu(display, menu);
 }
 

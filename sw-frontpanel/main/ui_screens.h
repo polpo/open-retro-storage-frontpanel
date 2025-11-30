@@ -7,9 +7,6 @@
 #include "menu_system.h"
 #include "host_comm.h"
 
-// Logo bitmap (converted from the existing picoide array)
-// extern const uint8_t picoide_logo[];
-
 typedef enum {
     SCREEN_SPLASH,
     SCREEN_STATUS,
@@ -17,10 +14,10 @@ typedef enum {
     SCREEN_DISC_LIST,
     SCREEN_SETTINGS,
     SCREEN_WIFI_MENU,
-    SCREEN_WIFI_NETWORKS,
     SCREEN_INFO,
     SCREEN_FIRMWARE_UPDATE,
-    SCREEN_FIRMWARE_STATUS
+    SCREEN_FIRMWARE_STATUS,
+    SCREEN_COUNT  // Sentinel - must be last
 } screen_type_t;
 
 esp_err_t ui_show_splash_screen(display_manager_t *display);

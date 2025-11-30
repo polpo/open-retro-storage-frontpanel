@@ -31,6 +31,15 @@ static menu_t disc_menu;
 static menu_t wifi_menu;
 static menu_t settings_menu;
 static menu_t *active_menu = NULL;  // Pointer to currently displayed menu
+static screen_type_t info_return_screen = SCREEN_MAIN_MENU;  // Screen to return to from SCREEN_INFO
+
+// Menu lookup by screen type (screens without menus are NULL)
+static menu_t* screen_menus[SCREEN_COUNT] = {
+    [SCREEN_MAIN_MENU] = &main_menu,
+    [SCREEN_DISC_LIST] = &disc_menu,
+    [SCREEN_SETTINGS] = &settings_menu,
+    [SCREEN_WIFI_MENU] = &wifi_menu,
+};
 static host_comm_t host_comm;
 static wifi_manager_t wifi_manager;
 static web_server_t web_server;
@@ -44,6 +53,9 @@ static char current_disc_name[64] = "No disc loaded";
 static playback_status_t current_playback_status = {0};
 static bool disc_name_changed = true;  // Flag to signal title changed
 
+// Device type (IDE vs ATAPI) - affects available operations
+static uint8_t current_device_type = PANEL_DEVICE_TYPE_ATAPI;  // Default to ATAPI
+
 // Firmware status tracking
 static rp2350_fw_status_t rp2350_fw_status = {0};
 static panel_firmware_info_t panel_fw_info = {0};
@@ -53,30 +65,28 @@ static uint8_t fw_screen_selection = 0;  // 0=Panel, 1=Main board
 // Forward declarations
 static esp_err_t refresh_directory_list(void);
 static void refresh_playback_status(void);
+static void refresh_device_type(void);
 static void check_firmware_status(void);
 static void draw_firmware_status_screen(void);
 static void trigger_panel_update(void);
 static void trigger_mainboard_update(void);
 
 static menu_item_t main_menu_items[] = {
-    {.text = "Select Disc", .action = MENU_ACTION_CUSTOM, .selectable = true},
-    {.text = "Eject Disc", .action = MENU_ACTION_CUSTOM, .selectable = true},
+    {.text = "Select Image", .action = MENU_ACTION_CUSTOM, .selectable = true},
+    {.text = "Eject Image", .action = MENU_ACTION_CUSTOM, .selectable = true},
     {.text = "Settings", .action = MENU_ACTION_CUSTOM, .selectable = true},
     {.text = "System Info", .action = MENU_ACTION_CUSTOM, .selectable = true},
 };
 
 static menu_item_t settings_menu_items[] = {
     {.text = "Firmware Update", .action = MENU_ACTION_CUSTOM, .selectable = true},
-    {.text = "WiFi Setup", .action = MENU_ACTION_CUSTOM, .selectable = true},
+    {.text = "WiFi", .action = MENU_ACTION_CUSTOM, .selectable = true},
     {.text = "Display Settings", .action = MENU_ACTION_CUSTOM, .selectable = true},
-    {.text = "Back", .action = MENU_ACTION_BACK, .selectable = true},
 };
 
 static menu_item_t wifi_menu_items[] = {
-    {.text = "Scan Networks", .action = MENU_ACTION_CUSTOM, .selectable = true},
     {.text = "WiFi Status", .action = MENU_ACTION_CUSTOM, .selectable = true},
-    {.text = "Disconnect", .action = MENU_ACTION_CUSTOM, .selectable = true},
-    {.text = "Back", .action = MENU_ACTION_BACK, .selectable = true},
+    {.text = "Reset WiFi", .action = MENU_ACTION_CUSTOM, .selectable = true},
 };
 
 // Button event handler
@@ -100,7 +110,6 @@ static void handle_button_event(button_event_t *event) {
                 case 1: // Right button (East) - Go to main menu
                     if (event->type == BUTTON_EVENT_CLICK) {
                         current_screen = SCREEN_MAIN_MENU;
-                        active_menu = &main_menu;
                     }
                     break;
                 default:
@@ -123,32 +132,36 @@ static void handle_button_event(button_event_t *event) {
                 case 1: // Select button (East)
                     if (event->type == BUTTON_EVENT_CLICK) {
                         uint32_t selected = menu_get_selected_index(&main_menu);
-                        if (selected == 0) { // "Select Disc"
+                        if (selected == 0) { // "Select Image"
                             // Refresh directory list before showing it
                             if (!disc_list_loaded && host_comm.initialized) {
                                 ESP_LOGI(TAG, "Loading directory list...");
                                 refresh_directory_list();
                             }
                             current_screen = SCREEN_DISC_LIST;
-                            active_menu = &disc_menu;
-                        } else if (selected == 1) { // "Eject Disc"
-                            if (host_comm.initialized) {
+                        } else if (selected == 1) { // "Eject Image"
+                            if (current_device_type == PANEL_DEVICE_TYPE_IDE) {
+                                // IDE mode: eject not supported
+                                info_return_screen = SCREEN_MAIN_MENU;
+                                current_screen = SCREEN_INFO;
+                                ui_draw_info_screen(&display, "Not Available",
+                                    "Eject is not available\nin IDE mode.\n\nUse Select Image to\nchoose a different\nhard disk image.");
+                            } else if (host_comm.initialized) {
                                 esp_err_t ret = host_comm_eject_image(&host_comm);
                                 if (ret == ESP_OK) {
-                                    strncpy(current_disc_name, "No disc loaded", sizeof(current_disc_name) - 1);
+                                    strncpy(current_disc_name, "No image loaded", sizeof(current_disc_name) - 1);
                                     current_disc_name[sizeof(current_disc_name) - 1] = '\0';
                                     ui_draw_status_bar(&display, current_disc_name);
-                                    ESP_LOGI(TAG, "Disc ejected");
+                                    ESP_LOGI(TAG, "Image ejected");
                                 } else {
                                     ESP_LOGW(TAG, "Failed to eject disc: %s", esp_err_to_name(ret));
                                 }
                             }
                         } else if (selected == 2) { // "Settings"
                             current_screen = SCREEN_SETTINGS;
-                            active_menu = &settings_menu;
                         } else if (selected == 3) { // "System Info"
+                            info_return_screen = SCREEN_MAIN_MENU;
                             current_screen = SCREEN_INFO;
-                            active_menu = NULL;
                             char info_text[128];
                             snprintf(info_text, sizeof(info_text),
                                 "PicoIDE Front Panel\nFW: v0.1.0\nESP32-C3\n%s: %s",
@@ -161,7 +174,6 @@ static void handle_button_event(button_event_t *event) {
                 case 3: // Back button (West)
                     if (event->type == BUTTON_EVENT_CLICK) {
                         current_screen = SCREEN_STATUS;
-                        active_menu = NULL;
                         refresh_playback_status();
                         ui_draw_status_screen(&display, current_disc_name, &current_playback_status, disc_name_changed);
                         disc_name_changed = false;
@@ -194,11 +206,26 @@ static void handle_button_event(button_event_t *event) {
                                 // Other items are entries (index 0, 1, 2...)
                                 int32_t entry_index = (selected == 0) ? -1 : (int32_t)(selected - 1);
 
+                                // Check if this is directory navigation (".." or "[directory]")
+                                bool is_directory = (selected == 0) || (selected_item->text[0] == '[');
+
                                 esp_err_t ret = host_comm_select_entry(&host_comm, entry_index);
                                 if (ret == ESP_OK) {
-                                    // Refresh the directory list after selection
-                                    refresh_directory_list();
-                                    // Stay in directory browser (don't go back to main menu)
+                                    if (is_directory) {
+                                        // Directory navigation: refresh the list
+                                        refresh_directory_list();
+                                    } else if (current_device_type == PANEL_DEVICE_TYPE_IDE) {
+                                        // IDE mode: image selected for next boot
+                                        info_return_screen = SCREEN_DISC_LIST;
+                                        current_screen = SCREEN_INFO;
+                                        ui_draw_info_screen(&display, "Image Selected",
+                                            "Image will be loaded\non next power cycle.\n\nPress back to\nreturn to browser.");
+                                    } else {
+                                        // ATAPI mode: image loaded, return to status screen
+                                        current_screen = SCREEN_STATUS;
+                                        disc_name_changed = true;
+                                        refresh_playback_status();
+                                    }
                                 } else {
                                     ESP_LOGW(TAG, "Failed to select entry via host comm: %s", esp_err_to_name(ret));
                                 }
@@ -209,12 +236,11 @@ static void handle_button_event(button_event_t *event) {
                 case 3: // Back button (West)
                     if (event->type == BUTTON_EVENT_CLICK) {
                         current_screen = SCREEN_MAIN_MENU;
-                        active_menu = &main_menu;
                     }
                     break;
             }
             break;
-            
+
         case SCREEN_SETTINGS:
             switch (event->button_id) {
                 case 0: // Up button (North)
@@ -232,23 +258,17 @@ static void handle_button_event(button_event_t *event) {
                         uint32_t selected = menu_get_selected_index(&settings_menu);
                         if (selected == 0) { // "Firmware Updates"
                             current_screen = SCREEN_FIRMWARE_STATUS;
-                            active_menu = NULL;
                             check_firmware_status();
                         } else if (selected == 1) { // "WiFi Setup"
                             current_screen = SCREEN_WIFI_MENU;
-                            active_menu = &wifi_menu;
                         } else if (selected == 2) { // "Display Settings"
                             ESP_LOGI(TAG, "Display settings not implemented yet");
-                        } else if (selected == 3) { // "Back"
-                            current_screen = SCREEN_MAIN_MENU;
-                            active_menu = &main_menu;
                         }
                     }
                     break;
                 case 3: // Back button (West)
                     if (event->type == BUTTON_EVENT_CLICK) {
                         current_screen = SCREEN_MAIN_MENU;
-                        active_menu = &main_menu;
                     }
                     break;
             }
@@ -269,49 +289,65 @@ static void handle_button_event(button_event_t *event) {
                 case 1: // Select button (East)
                     if (event->type == BUTTON_EVENT_CLICK) {
                         uint32_t selected = menu_get_selected_index(&wifi_menu);
-                        if (selected == 0) { // "Scan Networks"
-                            // TODO: Implement WiFi network scanning and display
-                            ESP_LOGI(TAG, "Scanning WiFi networks...");
-                            char info_text[256];
-                            snprintf(info_text, sizeof(info_text), "Scanning WiFi networks...\nThis feature will show\navailable networks and\nallow connection.");
-                            ui_draw_info_screen(&display, "WiFi Scan", info_text);
-                        } else if (selected == 1) { // "WiFi Status"
+                        if (selected == 0) { // "WiFi Status"
                             wifi_manager_state_t state = wifi_manager_get_state(&wifi_manager);
                             char info_text[256];
-                            if (wifi_manager_is_connected(&wifi_manager)) {
+
+                            if (state == WIFI_MANAGER_STATE_AP_MODE) {
+                                // Show AP mode info with credentials
+                                snprintf(info_text, sizeof(info_text),
+                                    "Mode: Access Point\n"
+                                    "SSID: %s\n"
+                                    "Password: %s\n"
+                                    "IP: 192.168.4.1",
+                                    WIFI_MANAGER_AP_SSID, WIFI_MANAGER_AP_PASSWORD);
+                            } else if (wifi_manager_is_connected(&wifi_manager)) {
+                                // Show client mode info
+                                wifi_manager_config_t cfg;
+                                wifi_manager_get_config(&wifi_manager, &cfg);
                                 esp_ip4_addr_t ip;
                                 if (wifi_manager_get_ip_info(&wifi_manager, &ip, NULL, NULL) == ESP_OK) {
                                     snprintf(info_text, sizeof(info_text),
-                                        "WiFi Status: %s\nIP Address: " IPSTR,
-                                        wifi_manager_state_to_string(state), IP2STR(&ip));
+                                        "Mode: Client\n"
+                                        "SSID: %s\n"
+                                        "IP: " IPSTR,
+                                        cfg.ssid, IP2STR(&ip));
                                 } else {
                                     snprintf(info_text, sizeof(info_text),
-                                        "WiFi Status: %s\nIP: Unknown",
-                                        wifi_manager_state_to_string(state));
+                                        "Mode: Client\n"
+                                        "SSID: %s\n"
+                                        "IP: Unknown",
+                                        cfg.ssid);
                                 }
                             } else {
                                 snprintf(info_text, sizeof(info_text),
-                                    "WiFi Status: %s",
+                                    "Status: %s",
                                     wifi_manager_state_to_string(state));
                             }
+                            info_return_screen = SCREEN_WIFI_MENU;
+                            current_screen = SCREEN_INFO;
                             ui_draw_info_screen(&display, "WiFi Status", info_text);
-                        } else if (selected == 2) { // "Disconnect"
-                            esp_err_t ret = wifi_manager_disconnect(&wifi_manager);
-                            if (ret == ESP_OK) {
-                                ESP_LOGI(TAG, "WiFi disconnected");
-                            } else {
-                                ESP_LOGW(TAG, "Failed to disconnect WiFi: %s", esp_err_to_name(ret));
-                            }
-                        } else if (selected == 3) { // "Back"
-                            current_screen = SCREEN_SETTINGS;
-                            active_menu = &settings_menu;
+                        } else if (selected == 1) { // "Reset WiFi"
+                            ESP_LOGI(TAG, "Resetting WiFi to defaults");
+                            wifi_manager_disconnect(&wifi_manager);
+                            wifi_manager_clear_config(&wifi_manager);
+                            wifi_manager_start_ap(&wifi_manager);
+                            char info_text[256];
+                            snprintf(info_text, sizeof(info_text),
+                                "WiFi settings cleared.\n\n"
+                                "Connect to:\n"
+                                "SSID: %s\n"
+                                "Pass: %s",
+                                WIFI_MANAGER_AP_SSID, WIFI_MANAGER_AP_PASSWORD);
+                            info_return_screen = SCREEN_WIFI_MENU;
+                            current_screen = SCREEN_INFO;
+                            ui_draw_info_screen(&display, "WiFi Reset", info_text);
                         }
                     }
                     break;
                 case 3: // Back button (West)
                     if (event->type == BUTTON_EVENT_CLICK) {
                         current_screen = SCREEN_SETTINGS;
-                        active_menu = &settings_menu;
                     }
                     break;
             }
@@ -319,10 +355,8 @@ static void handle_button_event(button_event_t *event) {
 
         case SCREEN_INFO:
             if (event->type == BUTTON_EVENT_CLICK && event->button_id == 3) {
-                // Back button - return to main menu
-                current_screen = SCREEN_MAIN_MENU;
-                active_menu = &main_menu;
-                ui_draw_menu(&display, &main_menu);
+                // Back button - return to previous screen
+                current_screen = info_return_screen;
             }
             break;
 
@@ -361,7 +395,6 @@ static void handle_button_event(button_event_t *event) {
                 case 3: // Back button (West)
                     if (event->type == BUTTON_EVENT_CLICK) {
                         current_screen = SCREEN_SETTINGS;
-                        active_menu = &settings_menu;
                         fw_status_valid = false;
                     }
                     break;
@@ -371,6 +404,9 @@ static void handle_button_event(button_event_t *event) {
         default:
             break;
     }
+
+    // Update active_menu based on current screen (NULL for screens without menus)
+    active_menu = screen_menus[current_screen];
 
     // Trigger redraw of active menu when switching screens
     if (active_menu) {
@@ -456,6 +492,21 @@ static void refresh_playback_status(void) {
     }
 }
 
+// Function to refresh device type from host
+static void refresh_device_type(void) {
+    if (!host_comm.initialized) {
+        return;
+    }
+
+    loaded_image_status_t status;
+    esp_err_t ret = host_comm_get_loaded_image_status(&host_comm, &status);
+    if (ret == ESP_OK) {
+        current_device_type = status.device_type;
+        ESP_LOGI(TAG, "Device type: %s",
+                 current_device_type == PANEL_DEVICE_TYPE_IDE ? "IDE (Hard Disk)" : "ATAPI (CD-ROM)");
+    }
+}
+
 // Function to refresh directory entry list from host
 static esp_err_t refresh_directory_list(void) {
     if (!host_comm.initialized) {
@@ -500,8 +551,7 @@ static esp_err_t refresh_directory_list(void) {
                 snprintf(display_name, sizeof(display_name), "%s", entry_info.name);
             }
 
-            ESP_LOGI(TAG, "Entry %lu: %s (%lu MB, type=%u)", i, entry_info.name,
-                    entry_info.size_mb, entry_info.entry_type);
+            ESP_LOGI(TAG, "Entry %lu: %s (type=%u)", i, entry_info.name, entry_info.entry_type);
             menu_add_item(&disc_menu, display_name, MENU_ACTION_SELECT, NULL, NULL);
         } else {
             ESP_LOGW(TAG, "Failed to get info for entry %lu: %s", i, esp_err_to_name(ret));
@@ -594,8 +644,8 @@ static void firmware_update_task(void *pvParameters) {
 
     led_stop_pulse();
     current_screen = SCREEN_MAIN_MENU;
-    active_menu = &main_menu;
-    ui_draw_menu(&display, &main_menu);
+    active_menu = screen_menus[current_screen];
+    ui_draw_menu(&display, active_menu);
     vTaskDelete(NULL);
 }
 
@@ -700,7 +750,7 @@ static void trigger_mainboard_update(void) {
         ui_draw_info_screen(&display, "Error", "Failed to start update");
         vTaskDelay(pdMS_TO_TICKS(2000));
         current_screen = SCREEN_SETTINGS;
-        active_menu = &settings_menu;
+        active_menu = screen_menus[current_screen];
         return;
     }
 
@@ -748,7 +798,7 @@ static void trigger_mainboard_update(void) {
 
     // Return to settings
     current_screen = SCREEN_SETTINGS;
-    active_menu = &settings_menu;
+    active_menu = screen_menus[current_screen];
 }
 
 // Host communication task (currently unused)
@@ -892,16 +942,20 @@ void app_main(void) {
 
     ui_update_splash_progress(&display, "Init menus...", 50);
     menu_init(&main_menu, 8);
+    main_menu.title = "Main Menu";
     menu_set_items(&main_menu, main_menu_items,
                   sizeof(main_menu_items) / sizeof(main_menu_items[0]));
 
     menu_init(&disc_menu, 8);
+    disc_menu.title = "Select Image";
 
     menu_init(&settings_menu, 8);
+    settings_menu.title = "Settings";
     menu_set_items(&settings_menu, settings_menu_items,
                   sizeof(settings_menu_items) / sizeof(settings_menu_items[0]));
 
     menu_init(&wifi_menu, 8);
+    wifi_menu.title = "WiFi Setup";
     menu_set_items(&wifi_menu, wifi_menu_items,
                   sizeof(wifi_menu_items) / sizeof(wifi_menu_items[0]));
 
@@ -952,6 +1006,9 @@ void app_main(void) {
             host_comm.initialized = false;
         } else {
             ESP_LOGI(TAG, "Communication with main board verified (status: 0x%02X)", test_status);
+
+            // Get device type (IDE vs ATAPI)
+            refresh_device_type();
 
             ESP_LOGI(TAG, "Fetching directory list at startup...");
             ui_update_splash_progress(&display, "Load directory...", 70);
@@ -1010,7 +1067,7 @@ void app_main(void) {
     led_stop_pulse();
 
     current_screen = SCREEN_STATUS;
-    active_menu = NULL;
+    active_menu = screen_menus[current_screen];
     refresh_playback_status();
     ui_draw_status_screen(&display, current_disc_name, &current_playback_status, disc_name_changed);
     disc_name_changed = false;

@@ -12,8 +12,13 @@
         button { background-color: #007bff; color: white; border: none; padding: 10px 20px; border-radius: 4px; cursor: pointer; margin: 5px; }
         button:hover { background-color: #0056b3; }
         button:disabled { background-color: #6c757d; cursor: not-allowed; }
-        .disc-list { margin: 10px 0; }
-        .disc-item { display: flex; justify-content: space-between; align-items: center; padding: 8px; border: 1px solid #ddd; margin: 2px 0; border-radius: 3px; }
+        .entry-list { margin: 10px 0; }
+        .entry-item { display: flex; justify-content: space-between; align-items: center; padding: 8px; border: 1px solid #ddd; margin: 2px 0; border-radius: 3px; }
+        .directory-item { background-color: #f8f9fa; }
+        .file-item { background-color: #fff; }
+        .path-display { font-family: monospace; background-color: #e9ecef; padding: 5px 10px; border-radius: 3px; margin: 5px 0; }
+        .nav-buttons { margin: 10px 0; }
+        .nav-buttons button { margin-right: 5px; }
         .status { padding: 10px; background-color: #e9ecef; border-radius: 4px; margin: 10px 0; }
         .error { background-color: #f8d7da; color: #721c24; }
         .success { background-color: #d4edda; color: #155724; }
@@ -39,12 +44,17 @@
         </div>
 
         <div class="section">
-            <h3>💿 Disc Management</h3>
-            <div id="current-disc" class="status">Current Disc: <span id="current-disc-name">Loading...</span></div>
-            <button onclick="refreshDiscs()" class="refresh-btn">🔄 Refresh Disc List</button>
-            <button onclick="ejectDisc()">⏏️ Eject Current Disc</button>
-            <div id="disc-list" class="disc-list">
-                <div>Loading disc list...</div>
+            <h3>Image Browser</h3>
+            <div id="current-image" class="status">Current Image: <span id="current-image-name">Loading...</span></div>
+            <div class="nav-buttons">
+                <button onclick="prevImage()" id="prev-image-btn" disabled>Prev</button>
+                <button onclick="nextImage()" id="next-image-btn" disabled>Next</button>
+                <button onclick="ejectImage()">Eject</button>
+                <button onclick="refreshImages()" class="refresh-btn">Refresh</button>
+            </div>
+            <div class="path-display">Path: <span id="current-path">/</span></div>
+            <div id="entry-list" class="entry-list">
+                <div>Loading...</div>
             </div>
         </div>
 

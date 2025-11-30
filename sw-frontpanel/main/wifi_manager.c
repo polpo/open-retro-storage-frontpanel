@@ -121,6 +121,18 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
             s_manager->retry_count = 0;
             xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
 
+            // Save credentials if connect_and_save was used
+            if (s_manager->pending_credential_save) {
+                s_manager->config.auto_connect = true;
+                esp_err_t save_ret = wifi_manager_save_config(s_manager);
+                if (save_ret == ESP_OK) {
+                    ESP_LOGI(TAG, "WiFi credentials saved for auto-reconnect");
+                } else {
+                    ESP_LOGW(TAG, "Failed to save WiFi credentials: %s", esp_err_to_name(save_ret));
+                }
+                s_manager->pending_credential_save = false;
+            }
+
             // Start mDNS when connected to WiFi
             esp_err_t mdns_ret = wifi_manager_start_mdns(s_manager);
             if (mdns_ret != ESP_OK) {
@@ -290,6 +302,30 @@ esp_err_t wifi_manager_load_config(wifi_manager_t *manager) {
     return ret;
 }
 
+esp_err_t wifi_manager_clear_config(wifi_manager_t *manager) {
+    if (!manager) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    // Clear in-memory config
+    memset(&manager->config, 0, sizeof(wifi_manager_config_t));
+    manager->config.max_retry_attempts = WIFI_MANAGER_CONNECTION_RETRY_MAX;
+
+    // Erase from NVS
+    nvs_handle_t nvs_handle;
+    esp_err_t ret = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs_handle);
+    if (ret == ESP_OK) {
+        nvs_erase_key(nvs_handle, "wifi_config");
+        nvs_commit(nvs_handle);
+        nvs_close(nvs_handle);
+        ESP_LOGI(TAG, "WiFi configuration cleared");
+    } else {
+        ESP_LOGW(TAG, "Failed to open NVS for clearing: %s", esp_err_to_name(ret));
+    }
+
+    return ESP_OK;
+}
+
 esp_err_t wifi_manager_connect(wifi_manager_t *manager, const char *ssid, const char *password) {
     if (!manager || !ssid) {
         return ESP_ERR_INVALID_ARG;
@@ -336,6 +372,18 @@ esp_err_t wifi_manager_connect(wifi_manager_t *manager, const char *ssid, const 
     ESP_LOGI(TAG, "Connecting to WiFi SSID: %s", ssid);
 
     return esp_wifi_connect();
+}
+
+esp_err_t wifi_manager_connect_and_save(wifi_manager_t *manager, const char *ssid, const char *password) {
+    if (!manager || !ssid) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    // Set flag to save credentials after successful DHCP
+    manager->pending_credential_save = true;
+
+    // Use regular connect
+    return wifi_manager_connect(manager, ssid, password);
 }
 
 esp_err_t wifi_manager_disconnect(wifi_manager_t *manager) {

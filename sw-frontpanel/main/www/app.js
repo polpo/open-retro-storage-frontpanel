@@ -1,4 +1,5 @@
-let currentDisc = "No disc loaded";
+let currentImage = null;
+let currentPath = "/";
 
 // API helper function
 async function apiCall(endpoint, options = {}) {
@@ -45,42 +46,107 @@ async function loadSystemInfo() {
     }
 }
 
-async function refreshDiscs() {
-    const data = await apiCall('/discs');
+async function refreshImages() {
+    const data = await apiCall('/images');
     if (data) {
-        const listDiv = document.getElementById('disc-list');
-        if (data.discs && data.discs.length > 0) {
-            listDiv.innerHTML = data.discs.map((disc, index) =>
-                `<div class="disc-item">
-                    <span><strong>${disc.name}</strong> (${(disc.size / 1000000).toFixed(1)} MB, ${disc.tracks} tracks)</span>
-                    <button onclick="selectDisc(${index})">📀 Select</button>
-                </div>`
-            ).join('');
-        } else {
-            listDiv.innerHTML = '<div>No discs available</div>';
+        currentPath = data.current_path || "/";
+        currentImage = data.current_image;
+
+        // Update path display
+        const pathDisplay = document.getElementById('current-path');
+        if (pathDisplay) {
+            pathDisplay.textContent = currentPath;
         }
 
-        // Update current disc status
-        document.getElementById('current-disc-name').textContent = data.current_disc || 'No disc loaded';
+        // Update current image status
+        const imageNameEl = document.getElementById('current-image-name');
+        if (imageNameEl) {
+            if (data.current_image) {
+                imageNameEl.textContent = `${data.current_image} (${data.image_index + 1} of ${data.total_images})`;
+            } else {
+                imageNameEl.textContent = 'No image loaded';
+            }
+        }
+
+        // Update prev/next button states
+        const prevBtn = document.getElementById('prev-image-btn');
+        const nextBtn = document.getElementById('next-image-btn');
+        if (prevBtn) prevBtn.disabled = !data.current_image || data.total_images <= 1;
+        if (nextBtn) nextBtn.disabled = !data.current_image || data.total_images <= 1;
+
+        // Render directory entries
+        const listDiv = document.getElementById('entry-list');
+        if (!listDiv) return;
+
+        // Show "Go Up" option if not at root
+        let entriesHtml = '';
+        if (currentPath !== '/' && currentPath !== '') {
+            entriesHtml += `<div class="entry-item directory-item">
+                <span><strong>..</strong> (Parent Directory)</span>
+                <button onclick="selectEntry(-1)">Open</button>
+            </div>`;
+        }
+
+        if (data.entries && data.entries.length > 0) {
+            entriesHtml += data.entries.map(entry => {
+                if (entry.is_directory) {
+                    return `<div class="entry-item directory-item">
+                        <span><strong>${entry.name}/</strong></span>
+                        <button onclick="selectEntry(${entry.index})">Open</button>
+                    </div>`;
+                } else {
+                    return `<div class="entry-item file-item">
+                        <span><strong>${entry.name}</strong></span>
+                        <button onclick="selectEntry(${entry.index})">Load</button>
+                    </div>`;
+                }
+            }).join('');
+        }
+
+        if (entriesHtml === '') {
+            entriesHtml = '<div>No entries in this directory</div>';
+        }
+
+        listDiv.innerHTML = entriesHtml;
     }
 }
 
-async function selectDisc(index) {
-    const data = await apiCall('/select_disc', {
+async function selectEntry(index) {
+    const data = await apiCall('/select_entry', {
         method: 'POST',
-        body: JSON.stringify({ disc_index: index })
+        body: JSON.stringify({ index: index })
     });
     if (data && data.success) {
-        await refreshDiscs();
-        showStatus('success', `Selected disc ${index}`);
+        await refreshImages();
+        if (index === -1) {
+            showStatus('success', 'Navigated to parent directory');
+        } else {
+            showStatus('success', 'Entry selected');
+        }
     }
 }
 
-async function ejectDisc() {
-    const data = await apiCall('/eject_disc', { method: 'POST' });
+async function ejectImage() {
+    const data = await apiCall('/eject_image', { method: 'POST' });
     if (data && data.success) {
-        await refreshDiscs();
-        showStatus('success', 'Disc ejected');
+        await refreshImages();
+        showStatus('success', 'Image ejected');
+    }
+}
+
+async function prevImage() {
+    const data = await apiCall('/prev_image', { method: 'POST' });
+    if (data && data.success) {
+        await refreshImages();
+        showStatus('success', 'Loaded previous image');
+    }
+}
+
+async function nextImage() {
+    const data = await apiCall('/next_image', { method: 'POST' });
+    if (data && data.success) {
+        await refreshImages();
+        showStatus('success', 'Loaded next image');
     }
 }
 
@@ -565,7 +631,7 @@ function resetUploadUI() {
 // Initialize the page
 document.addEventListener('DOMContentLoaded', function() {
     loadSystemInfo();
-    refreshDiscs();
+    refreshImages();
     loadWiFiStatus();
     checkAllFirmware();
 

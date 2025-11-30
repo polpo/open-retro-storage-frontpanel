@@ -24,6 +24,7 @@
 #define PANEL_CMD_GET_LOADED_IMAGE_STATUS 0x48  // Get status of currently loaded image (async)
 #define PANEL_CMD_SELECT_PREV_IMAGE    0x49  // Load previous image in current directory (async)
 #define PANEL_CMD_SELECT_NEXT_IMAGE    0x4A  // Load next image in current directory (async)
+#define PANEL_CMD_SELECT_IMAGE_BY_NAME 0x4B  // Load image by filename (async, payload: null-terminated filename)
 #define PANEL_CMD_CHECK_FIRMWARE       0x50  // Check for firmware update (async)
 #define PANEL_CMD_START_FIRMWARE_READ  0x51  // Start firmware read (async, arg: chunk index)
 #define PANEL_CMD_START_FILE_UPLOAD    0x52  // Start file upload (async, payload: file_upload_start_t)
@@ -160,26 +161,24 @@ typedef struct __attribute__((packed)) {
 #define PANEL_ENTRY_TYPE_DIRECTORY  0x00  // Subdirectory (navigate into it)
 #define PANEL_ENTRY_TYPE_FILE       0x01  // Image file (load it)
 
-// Directory entry information structure (72 bytes)
+// Directory entry information structure (68 bytes)
 typedef struct __attribute__((packed)) {
     char name[64];           // Filename or directory name (null-terminated)
     uint8_t entry_type;      // PANEL_ENTRY_TYPE_*
     uint8_t reserved[3];     // Padding for alignment
-    uint32_t size_mb;        // File size in MB (only valid for files)
 } dir_entry_info_t;
 
 // Device type codes
 #define PANEL_DEVICE_TYPE_ATAPI  0x00  // CD-ROM drive
 #define PANEL_DEVICE_TYPE_IDE    0x01  // Hard disk drive
 
-// Currently loaded image status structure (216 bytes)
+// Currently loaded image status structure (212 bytes)
 typedef struct __attribute__((packed)) {
     uint8_t image_loaded;         // 1 if image loaded, 0 if not
     uint8_t device_type;          // PANEL_DEVICE_TYPE_*
     uint8_t reserved1[2];         // Padding
     char image_name[64];          // Name of loaded image (null-terminated)
     char directory_path[128];     // Directory containing the image (null-terminated)
-    uint32_t size_mb;             // Size in MB
     uint32_t image_index;         // Index in current directory (0-based, only files counted)
     uint32_t total_images;        // Total number of images in directory
     // IDE-specific (only when device_type == PANEL_DEVICE_TYPE_IDE)

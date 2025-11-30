@@ -40,7 +40,6 @@ esp_err_t interface_get_entry_list(interface_context_t *ctx, dir_entry_info_t *e
             ESP_LOGW(TAG, "Failed to get info for entry %u: %s", i, esp_err_to_name(ret));
             // Create a fallback entry
             snprintf(entries[i].name, sizeof(entries[i].name), "Entry %u (error)", i);
-            entries[i].size_mb = 0;
             entries[i].entry_type = 1; // FILE
             (*entry_count)++;
         }
@@ -150,9 +149,10 @@ esp_err_t interface_wifi_connect(interface_context_t *ctx, const char *ssid, con
         return ESP_ERR_INVALID_STATE;
     }
 
-    esp_err_t ret = wifi_manager_connect(ctx->wifi_manager, ssid, password);
+    // Use connect_and_save so credentials persist after successful DHCP
+    esp_err_t ret = wifi_manager_connect_and_save(ctx->wifi_manager, ssid, password);
     if (ret == ESP_OK) {
-        ESP_LOGI(TAG, "Initiated WiFi connection to %s", ssid);
+        ESP_LOGI(TAG, "Initiated WiFi connection to %s (will save on success)", ssid);
     } else {
         ESP_LOGW(TAG, "Failed to connect to WiFi %s: %s", ssid, esp_err_to_name(ret));
     }

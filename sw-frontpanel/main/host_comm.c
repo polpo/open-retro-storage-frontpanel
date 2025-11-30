@@ -175,7 +175,7 @@ esp_err_t host_comm_get_entry_info(host_comm_t *comm, uint32_t index, dir_entry_
 
     // Copy result to caller's buffer
     memcpy(info, result_data, sizeof(dir_entry_info_t));
-    ESP_LOGI(TAG, "Got entry info: %s (type=%u, size=%lu MB)", info->name, info->entry_type, info->size_mb);
+    ESP_LOGI(TAG, "Got entry info: %s (type=%u)", info->name, info->entry_type);
 
     return ret;
 }
@@ -220,9 +220,10 @@ esp_err_t host_comm_get_current_path(host_comm_t *comm, char *path, size_t max_l
     }
 
     // Poll for completion with 1 second timeout
+    // Path response is fixed 128 bytes with null-terminated string inside
     uint8_t *result_data;
     size_t result_size;
-    ret = host_comm_poll_async_result(comm, 1000, 10, 0, &result_data, &result_size);
+    ret = host_comm_poll_async_result(comm, 1000, 10, 128, &result_data, &result_size);
     if (ret != ESP_OK) {
         return ret;
     }

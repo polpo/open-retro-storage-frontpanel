@@ -26,6 +26,7 @@ typedef struct menu_item {
 } menu_item_t;
 
 typedef struct {
+    const char *title;       // Menu title displayed in header
     menu_item_t *items;
     uint32_t item_count;
     uint32_t selected_index;
