@@ -204,7 +204,7 @@ esp_err_t ui_draw_menu(display_manager_t *display, menu_t *menu) {
     // Draw header if title provided
     uint8_t y_offset = 0;
     if (menu->title) {
-        display_manager_set_font(display, u8g2_font_amstrad_cpc_extended_8f);
+        display_manager_set_font(display, u8g2_font_6x10_tf);
         display_manager_draw_box(display, 0, 0, 128, 10);
         display_manager_set_draw_color(display, 0);
         display_manager_draw_text(display, 2, 8, menu->title);
@@ -231,40 +231,25 @@ esp_err_t ui_draw_menu(display_manager_t *display, menu_t *menu) {
     }
 
     text_scroll_state_t *scroll_state = (text_scroll_state_t *)menu->text_scroll_state;
-    static uint32_t last_selected_index = 0xFFFFFFFF;
+    uint8_t highlight_width = (menu->item_count > menu->visible_items) ? 122 : 128;
 
-    // Reset scroll state if selected item changed
-    if (scroll_state && last_selected_index != menu->selected_index) {
-        uint8_t highlight_width = (menu->item_count > menu->visible_items) ? 122 : 128;
-        menu_item_t *selected_item = menu_get_selected_item(menu);
-        if (selected_item) {
-            init_text_scroll_state(scroll_state, display, selected_item->text, highlight_width - 4);
-        }
-        last_selected_index = menu->selected_index;
+    // Initialize scroll state for selected item (animation function will use this)
+    if (scroll_state && cursor_pos < visible_count) {
+        init_text_scroll_state(scroll_state, display, visible_items[cursor_pos].text, highlight_width - 4);
     }
 
     // Draw each visible menu item
-    bool scrolling_active = false;
     for (uint32_t i = 0; i < visible_count; i++) {
         uint8_t y_pos = y_offset + (i + 1) * 8;
-        uint8_t highlight_width = (menu->item_count > menu->visible_items) ? 122 : 128;
 
         // Highlight selected item
         if (i == cursor_pos) {
             display_manager_draw_box(display, 0, y_pos - 8, highlight_width, 8);
             display_manager_set_draw_color(display, 0); // Inverted text
-
-            // Draw with scrolling if needed
-            if (scroll_state) {
-                scrolling_active = draw_text_scrolling(display, 2, y_pos, visible_items[i].text, highlight_width - 4, scroll_state);
-            } else {
-                // Fallback to normal drawing
-                display_manager_draw_text(display, 2, y_pos, visible_items[i].text);
-            }
-
+            display_manager_draw_text(display, 2, y_pos, visible_items[i].text);
             display_manager_set_draw_color(display, 1);
         } else {
-            // Draw non-selected items normally (no scrolling)
+            // Draw non-selected items normally
             display_manager_draw_text(display, 2, y_pos, visible_items[i].text);
         }
     }
@@ -294,14 +279,64 @@ esp_err_t ui_draw_menu(display_manager_t *display, menu_t *menu) {
     // Request display update
     display_manager_request_update(display);
 
-    // Keep needs_redraw set if scrolling active, otherwise clear it
-    if (scrolling_active && scroll_state && scroll_state->needs_scroll) {
-        menu->needs_redraw = true;
-    } else {
-        menu_clear_redraw_flag(menu);
-    }
+    // Clear redraw flag - full draw is complete
+    // Animation will be triggered separately via ui_menu_needs_animation()
+    menu_clear_redraw_flag(menu);
 
     return ESP_OK;
+}
+
+// Check if menu has active scrolling animation
+bool ui_menu_needs_animation(menu_t *menu) {
+    if (!menu) {
+        return false;
+    }
+    text_scroll_state_t *scroll_state = (text_scroll_state_t *)menu->text_scroll_state;
+    return scroll_state && scroll_state->needs_scroll;
+}
+
+// Lightweight menu animation - only updates the selected item's scrolling text
+// Returns true if animation is active and display was updated
+bool ui_animate_menu(display_manager_t *display, menu_t *menu) {
+    if (!display || !menu) {
+        return false;
+    }
+
+    text_scroll_state_t *scroll_state = (text_scroll_state_t *)menu->text_scroll_state;
+    if (!scroll_state || !scroll_state->needs_scroll) {
+        return false;
+    }
+
+    // Get cursor position and visible items info
+    menu_item_t *visible_items;
+    uint32_t visible_count;
+    uint32_t cursor_pos;
+
+    esp_err_t ret = menu_get_visible_items(menu, &visible_items, &visible_count, &cursor_pos);
+    if (ret != ESP_OK || cursor_pos >= visible_count) {
+        return false;
+    }
+
+    // Calculate y position
+    uint8_t y_offset = menu->title ? 10 : 0;
+    uint8_t y_pos = y_offset + (cursor_pos + 1) * 8;
+    uint8_t highlight_width = (menu->item_count > menu->visible_items) ? 122 : 128;
+
+    // Set font and colors
+    display_manager_set_font(display, u8g2_font_amstrad_cpc_extended_8f);
+
+    // Clear and redraw just the selected item row
+    display_manager_set_draw_color(display, 1);
+    display_manager_draw_box(display, 0, y_pos - 8, highlight_width, 8);
+    display_manager_set_draw_color(display, 0);
+
+    // Draw scrolling text
+    draw_text_scrolling(display, 2, y_pos, visible_items[cursor_pos].text, highlight_width - 4, scroll_state);
+
+    display_manager_set_draw_color(display, 1);
+    display_manager_request_update(display);
+
+    return true;
 }
 
 esp_err_t ui_draw_disc_list(display_manager_t *display, menu_t *menu) {
@@ -482,67 +517,130 @@ esp_err_t ui_draw_firmware_status(display_manager_t *display,
     return ESP_OK;
 }
 
+// Helper to extract directory name from path (returns pointer into path)
+// Examples: "/cdrom" -> "cdrom", "/foo/bar" -> "bar", "/" -> "/", "cdrom" -> "cdrom"
+static const char* get_directory_name(const char *path) {
+    if (!path || !path[0]) {
+        return "/";
+    }
+
+    size_t len = strlen(path);
+
+    // Skip trailing slashes
+    while (len > 1 && path[len - 1] == '/') {
+        len--;
+    }
+
+    // Find last slash before the end
+    const char *end = path + len;
+    const char *last_slash = NULL;
+    for (const char *p = path; p < end; p++) {
+        if (*p == '/') {
+            last_slash = p;
+        }
+    }
+
+    // If no slash, or only a leading slash with content after, return after the slash
+    if (!last_slash) {
+        return path;  // No slash at all, e.g., "cdrom"
+    }
+    if (last_slash == path && len > 1) {
+        return path + 1;  // Leading slash only, e.g., "/cdrom" -> "cdrom"
+    }
+    if (last_slash == path && len == 1) {
+        return "/";  // Root directory
+    }
+    return last_slash + 1;  // e.g., "/foo/bar" -> "bar"
+}
+
+// Module-level state for status screen animation
+static text_scroll_state_t status_title_scroll_state = {0};
+static char status_title_text[64] = "";
+
 esp_err_t ui_draw_status_screen(display_manager_t *display, const char *disc_name,
-                               const playback_status_t *playback_status, bool title_changed) {
+                               const char *directory_path, uint32_t image_index,
+                               uint32_t total_images, const playback_status_t *playback_status,
+                               bool title_changed) {
     if (!display) {
         return ESP_ERR_INVALID_ARG;
     }
 
-    // Static text scroll state for status screen title
-    static text_scroll_state_t title_scroll_state = {0};
-    static playback_status_t last_playback_status = {0};
-    static bool first_draw = true;
+    display_manager_clear(display);
 
-    // Only do full redraw when status changes or first draw
-    bool status_changed = title_changed || first_draw ||
-                         memcmp(&last_playback_status, playback_status, sizeof(playback_status_t)) != 0;
+    bool has_disc = (disc_name && disc_name[0] && playback_status && playback_status->disc_inserted);
 
-    if (status_changed) {
-        display_manager_clear(display);
-        if (playback_status) {
-            memcpy(&last_playback_status, playback_status, sizeof(playback_status_t));
-        }
-        first_draw = false;
-    }
-
-    // Draw title bar background - always draw full width black box
+    // === TOP BAR: Directory name + position indicator (inverted) ===
     display_manager_set_font(display, u8g2_font_6x10_tf);
     display_manager_draw_box(display, 0, 0, 128, 10);
     display_manager_set_draw_color(display, 0);
 
-    // Reinitialize scroll state only when title actually changed
-    const char *title = (disc_name && disc_name[0]) ? disc_name : "No Disc Loaded";
-    if (title_changed) {
-        init_text_scroll_state(&title_scroll_state, display, title, 124);
-    }
+    if (has_disc && directory_path && directory_path[0]) {
+        // Get just the directory name
+        const char *dir_name = get_directory_name(directory_path);
 
-    // Draw title with scrolling support
-    draw_text_scrolling(display, 2, 8, title, 124, &title_scroll_state);
+        // Calculate position indicator width if we have image count
+        char pos_indicator[16] = "";
+        int pos_indicator_width = 0;
+        if (total_images > 0) {
+            snprintf(pos_indicator, sizeof(pos_indicator), "[%lu/%lu]",
+                    (unsigned long)(image_index + 1), (unsigned long)total_images);
+            pos_indicator_width = u8g2_GetStrWidth(&display->u8g2, pos_indicator);
+        }
+
+        // Draw position indicator on the right
+        if (pos_indicator_width > 0) {
+            display_manager_draw_text(display, 126 - pos_indicator_width, 8, pos_indicator);
+        }
+
+        // Draw directory name on the left (truncate if needed)
+        int available_width = 124 - pos_indicator_width - 4;  // Leave margin
+        int dir_name_width = u8g2_GetStrWidth(&display->u8g2, dir_name);
+
+        if (dir_name_width <= available_width) {
+            display_manager_draw_text(display, 2, 8, dir_name);
+        } else {
+            // Truncate with ellipsis
+            char truncated[32];
+            int len = strlen(dir_name);
+            int max_chars = (available_width / 6) - 2;  // Approx 6px per char, minus "..."
+            if (max_chars > 0 && max_chars < len) {
+                snprintf(truncated, sizeof(truncated), "%.*s...", max_chars, dir_name);
+                display_manager_draw_text(display, 2, 8, truncated);
+            } else {
+                display_manager_draw_text(display, 2, 8, dir_name);
+            }
+        }
+    }
 
     display_manager_set_draw_color(display, 1);
 
-    // Only redraw the rest if status changed
-    if (!status_changed) {
+    // === CENTER: Large image name with scrolling (regular text) ===
+    const char *title = has_disc ? disc_name : "No Disc Loaded";
+
+    display_manager_set_font(display, u8g2_font_helvR12_tf);
+
+    // Only reinitialize scroll state when title actually changed
+    if (title_changed) {
+        strncpy(status_title_text, title, sizeof(status_title_text) - 1);
+        status_title_text[sizeof(status_title_text) - 1] = '\0';
+        init_text_scroll_state(&status_title_scroll_state, display, status_title_text, 124);
+    }
+
+    // Draw image name
+    draw_text_scrolling(display, 2, 32, status_title_text, 124, &status_title_scroll_state);
+
+    // If no disc inserted, we're done
+    if (!has_disc) {
         display_manager_request_update(display);
         return ESP_OK;
     }
 
-    // If no disc inserted, just show title bar
-    if (!playback_status || !playback_status->disc_inserted) {
-        display_manager_request_update(display);
-        return ESP_OK;
-    }
-
-    int y = 20;
+    // === BOTTOM: Playback status ===
+    int y = 52;
     display_manager_set_font(display, u8g2_font_waffle_t_all);
 
     // Draw disc type
     uint16_t type_icon = 0xe0ab; // Disc icon
-    /*
-    case PANEL_DISC_TYPE_DATA:  type_icon = 0xe2b7; break; // File icon
-    case PANEL_DISC_TYPE_AUDIO: type_icon = 0xe05c; break; // Music icon
-    case PANEL_DISC_TYPE_MIXED: type_icon = 0xe0ab; break; // Disc icon
-    */
     display_manager_draw_glyph(display, 2, y, type_icon);
 
     // For audio/mixed discs, show playback status
@@ -593,4 +691,26 @@ esp_err_t ui_draw_status_screen(display_manager_t *display, const char *disc_nam
     display_manager_request_update(display);
 
     return ESP_OK;
+}
+
+// Lightweight animation function - only updates scrolling text area
+// Returns true if animation is active and display was updated
+bool ui_animate_status_screen(display_manager_t *display) {
+    if (!display || !status_title_scroll_state.needs_scroll) {
+        return false;
+    }
+
+    // Only redraw the scrolling text area
+    display_manager_set_font(display, u8g2_font_helvR12_tf);
+
+    // Clear just the center text area
+    display_manager_set_draw_color(display, 0);
+    display_manager_draw_box(display, 0, 12, 128, 24);
+    display_manager_set_draw_color(display, 1);
+
+    // Draw scrolling text
+    draw_text_scrolling(display, 2, 32, status_title_text, 124, &status_title_scroll_state);
+
+    display_manager_request_update(display);
+    return true;
 }

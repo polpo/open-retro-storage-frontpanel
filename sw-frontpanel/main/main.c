@@ -51,7 +51,9 @@ static ota_manager_t ota_manager;
 static bool disc_list_loaded = false;
 static char current_disc_name[64] = "No disc loaded";
 static playback_status_t current_playback_status = {0};
-static bool disc_name_changed = true;  // Flag to signal title changed
+static bool disc_name_changed = true;  // Flag to signal title changed (resets scroll)
+static bool status_needs_redraw = true;  // Flag to signal status screen needs redraw
+static loaded_image_status_t current_image_status = {0};  // Full image status including directory
 
 // Device type (IDE vs ATAPI) - affects available operations
 static uint8_t current_device_type = PANEL_DEVICE_TYPE_ATAPI;  // Default to ATAPI
@@ -107,9 +109,40 @@ static void handle_button_event(button_event_t *event) {
     switch (current_screen) {
         case SCREEN_STATUS:
             switch (event->button_id) {
+                case 0: // Up button (North) - Previous image
+                    if (event->type == BUTTON_EVENT_CLICK) {
+                        if (host_comm.initialized && current_image_status.image_loaded) {
+                            esp_err_t ret = host_comm_select_prev_image(&host_comm);
+                            if (ret == ESP_OK) {
+                                refresh_playback_status();
+                            }
+                        }
+                    }
+                    break;
                 case 1: // Right button (East) - Go to main menu
                     if (event->type == BUTTON_EVENT_CLICK) {
                         current_screen = SCREEN_MAIN_MENU;
+                    }
+                    break;
+                case 2: // Down button (South) - Next image
+                    if (event->type == BUTTON_EVENT_CLICK) {
+                        if (host_comm.initialized && current_image_status.image_loaded) {
+                            esp_err_t ret = host_comm_select_next_image(&host_comm);
+                            if (ret == ESP_OK) {
+                                refresh_playback_status();
+                            }
+                        }
+                    }
+                    break;
+                case 3: // Back button (West) - Eject (ATAPI only)
+                    if (event->type == BUTTON_EVENT_CLICK) {
+                        if (current_device_type != PANEL_DEVICE_TYPE_IDE && host_comm.initialized) {
+                            esp_err_t ret = host_comm_eject_image(&host_comm);
+                            if (ret == ESP_OK) {
+                                refresh_playback_status();
+                                ESP_LOGI(TAG, "Image ejected from status screen");
+                            }
+                        }
                     }
                     break;
                 default:
@@ -162,11 +195,13 @@ static void handle_button_event(button_event_t *event) {
                         } else if (selected == 3) { // "System Info"
                             info_return_screen = SCREEN_MAIN_MENU;
                             current_screen = SCREEN_INFO;
+                            const esp_app_desc_t* app_desc = esp_app_get_description();
                             char info_text[128];
                             snprintf(info_text, sizeof(info_text),
-                                "PicoIDE Front Panel\nFW: v0.1.0\nESP32-C3\n%s: %s",
-                                host_comm_get_transport_name(&host_comm),
-                                host_comm.initialized ? "Connected" : "Disconnected");
+                                     "PicoIDE Front Panel\nFW: v%s\nESP32-C3\n%s: %s",
+                                     app_desc->version,
+                                     host_comm_get_transport_name(&host_comm),
+                                     host_comm.initialized ? "Connected" : "Disconnected");
                             ui_draw_info_screen(&display, "System Info", info_text);
                         }
                     }
@@ -175,13 +210,11 @@ static void handle_button_event(button_event_t *event) {
                     if (event->type == BUTTON_EVENT_CLICK) {
                         current_screen = SCREEN_STATUS;
                         refresh_playback_status();
-                        ui_draw_status_screen(&display, current_disc_name, &current_playback_status, disc_name_changed);
-                        disc_name_changed = false;
                     }
                     break;
             }
             break;
-            
+
         case SCREEN_DISC_LIST:
             switch (event->button_id) {
                 case 0: // Up button (North)
@@ -223,7 +256,6 @@ static void handle_button_event(button_event_t *event) {
                                     } else {
                                         // ATAPI mode: image loaded, return to status screen
                                         current_screen = SCREEN_STATUS;
-                                        disc_name_changed = true;
                                         refresh_playback_status();
                                     }
                                 } else {
@@ -258,6 +290,7 @@ static void handle_button_event(button_event_t *event) {
                         uint32_t selected = menu_get_selected_index(&settings_menu);
                         if (selected == 0) { // "Firmware Updates"
                             current_screen = SCREEN_FIRMWARE_STATUS;
+                            active_menu = NULL;  // Clear before slow operation
                             check_firmware_status();
                         } else if (selected == 1) { // "WiFi Setup"
                             current_screen = SCREEN_WIFI_MENU;
@@ -416,16 +449,36 @@ static void handle_button_event(button_event_t *event) {
 
 // Display update task
 static void display_update_task(void *pvParameters) {
+    static screen_type_t last_screen = SCREEN_COUNT;  // Invalid value forces initial draw
+
     while (1) {
         if (display.initialized) {
-            // Handle screen-specific continuous redraws for scrolling
+            bool screen_changed = (current_screen != last_screen);
+            last_screen = current_screen;
+
             if (current_screen == SCREEN_STATUS) {
-                // Status screen scrolling
-                ui_draw_status_screen(&display, current_disc_name, &current_playback_status, disc_name_changed);
-                disc_name_changed = false;
-            } else if (active_menu && menu_needs_redraw(active_menu)) {
-                // Menu scrolling
-                ui_draw_menu(&display, active_menu);
+                if (screen_changed || status_needs_redraw) {
+                    // Full redraw when entering status screen or status changed
+                    ui_draw_status_screen(&display, current_disc_name,
+                                          current_image_status.directory_path,
+                                          current_image_status.image_index,
+                                          current_image_status.total_images,
+                                          &current_playback_status,
+                                          screen_changed || disc_name_changed);
+                    disc_name_changed = false;
+                    status_needs_redraw = false;
+                } else {
+                    // Animate status screen scrolling text
+                    ui_animate_status_screen(&display);
+                }
+            } else if (active_menu) {
+                if (screen_changed || menu_needs_redraw(active_menu)) {
+                    // Full menu redraw needed (screen change, navigation, etc.)
+                    ui_draw_menu(&display, active_menu);
+                } else if (ui_menu_needs_animation(active_menu)) {
+                    // Lightweight scrolling animation
+                    ui_animate_menu(&display, active_menu);
+                }
             }
 
             // Send buffer to display if needed
@@ -434,7 +487,7 @@ static void display_update_task(void *pvParameters) {
             }
         }
 
-        vTaskDelay(pdMS_TO_TICKS(33)); // 30 FPS to avoid visual glitches
+        vTaskDelay(pdMS_TO_TICKS(33)); // 30 FPS for smooth animation
     }
 }
 
@@ -457,9 +510,9 @@ static void refresh_playback_status(void) {
 
     if (!host_comm.initialized) {
         memset(&current_playback_status, 0, sizeof(current_playback_status));
+        memset(&current_image_status, 0, sizeof(current_image_status));
         strncpy(current_disc_name, "No disc loaded", sizeof(current_disc_name) - 1);
         current_disc_name[sizeof(current_disc_name) - 1] = '\0';
-        disc_name_changed = (strcmp(old_disc_name, current_disc_name) != 0);
         return;
     }
 
@@ -469,27 +522,32 @@ static void refresh_playback_status(void) {
         memset(&current_playback_status, 0, sizeof(current_playback_status));
         strncpy(current_disc_name, "No disc loaded", sizeof(current_disc_name) - 1);
         current_disc_name[sizeof(current_disc_name) - 1] = '\0';
-        disc_name_changed = (strcmp(old_disc_name, current_disc_name) != 0);
     } else if (!current_playback_status.disc_inserted) {
-        ESP_LOGI(TAG, "Playback status: No disc inserted");
         strncpy(current_disc_name, "No disc loaded", sizeof(current_disc_name) - 1);
         current_disc_name[sizeof(current_disc_name) - 1] = '\0';
-        disc_name_changed = (strcmp(old_disc_name, current_disc_name) != 0);
     } else {
         // Copy disc name from playback status
         strncpy(current_disc_name, current_playback_status.disc_name, sizeof(current_disc_name) - 1);
         current_disc_name[sizeof(current_disc_name) - 1] = '\0';
-        disc_name_changed = (strcmp(old_disc_name, current_disc_name) != 0);
-
-        ESP_LOGI(TAG, "Playback status: disc='%s' type=%d playing=%d audio_status=0x%02x track=%d pos=%02d:%02d",
-                current_disc_name,
-                current_playback_status.disc_type,
-                current_playback_status.is_playing,
-                current_playback_status.audio_status,
-                current_playback_status.current_track,
-                current_playback_status.track_position_m,
-                current_playback_status.track_position_s);
     }
+
+    // Check if disc name actually changed (for fetching full image status and resetting scroll)
+    bool name_changed = (strcmp(old_disc_name, current_disc_name) != 0);
+
+    // Fetch loaded image status when disc name changed (reduces SPI traffic)
+    if (name_changed) {
+        disc_name_changed = true;  // Reset scroll animation
+        ret = host_comm_get_loaded_image_status(&host_comm, &current_image_status);
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to get loaded image status: %s", esp_err_to_name(ret));
+            memset(&current_image_status, 0, sizeof(current_image_status));
+        } else {
+            current_device_type = current_image_status.device_type;
+        }
+    }
+
+    // Always trigger status screen redraw after fetching status
+    status_needs_redraw = true;
 }
 
 // Function to refresh device type from host
@@ -1069,8 +1127,13 @@ void app_main(void) {
     current_screen = SCREEN_STATUS;
     active_menu = screen_menus[current_screen];
     refresh_playback_status();
-    ui_draw_status_screen(&display, current_disc_name, &current_playback_status, disc_name_changed);
+    ui_draw_status_screen(&display, current_disc_name,
+                          current_image_status.directory_path,
+                          current_image_status.image_index,
+                          current_image_status.total_images,
+                          &current_playback_status, disc_name_changed);
     disc_name_changed = false;
+    status_needs_redraw = false;
 
     int initial_act_state = gpio_get_level(PIN_ACT_IN);
     led_set_color(initial_act_state ? COLOR_ORANGE : COLOR_CYAN);
