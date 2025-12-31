@@ -1,0 +1,23 @@
+name: Build
+on: [push, pull_request]
+jobs:
+  build-frontpanel-firmware:
+    runs-on: ubuntu-22.04
+    env:
+      OUTPUT_DIR: ${{github.workspace}}/binaries
+    steps:
+      - name: Checkout repo with submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Build Front Panel Firmware
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v5.5.1
+          target: esp32c3
+          path: 'sw-frontpanel'
+      - name: Upload Front Panel Firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: Front Panel Firmware
+          path: 'sw-frontpanel/build/picoide-frontpanel.bin'
