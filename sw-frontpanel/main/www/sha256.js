@@ -1,3 +1,6 @@
+// SHA-256 implementation based on https://github.com/geraintluff/sha256
+// Released to the public domain.
+//
 // Incremental SHA256 implementation that supports chunked processing
 class SHA256Context {
 	constructor() {
