@@ -297,7 +297,7 @@ esp_err_t ui_draw_menu(display_manager_t *display, menu_t *menu) {
     // Draw scroll bar if there are more items than visible
     if (menu->item_count > menu->visible_items) {
         // Calculate scroll bar dimensions
-        uint8_t scrollbar_x = 124;
+        uint8_t scrollbar_x = 125;
         uint8_t scrollbar_y = y_offset;
         uint8_t scrollbar_width = 3;
         uint8_t scrollbar_height = 64 - y_offset;

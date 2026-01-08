@@ -22,7 +22,8 @@
 #include "esp_err.h"
 
 #define MENU_MAX_ITEMS 256
-#define MENU_VISIBLE_ITEMS 8
+#define MENU_VISIBLE_ITEMS 8           // Items visible without title bar
+#define MENU_VISIBLE_ITEMS_WITH_TITLE 6 // Items visible with 10px title bar
 #define MENU_ITEM_MAX_LENGTH 64
 
 typedef enum {

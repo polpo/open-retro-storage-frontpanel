@@ -1041,20 +1041,20 @@ void app_main(void) {
     gpio_handler_start();
 
     ui_update_splash_progress(&display, "Init menus...", 50);
-    menu_init(&main_menu, 8);
+    menu_init(&main_menu, MENU_VISIBLE_ITEMS_WITH_TITLE);
     main_menu.title = "Main Menu";
     menu_set_items(&main_menu, main_menu_items,
                   sizeof(main_menu_items) / sizeof(main_menu_items[0]));
 
-    menu_init(&disc_menu, 8);
+    menu_init(&disc_menu, MENU_VISIBLE_ITEMS_WITH_TITLE);
     disc_menu.title = "Select Image";
 
-    menu_init(&settings_menu, 8);
+    menu_init(&settings_menu, MENU_VISIBLE_ITEMS_WITH_TITLE);
     settings_menu.title = "Settings";
     menu_set_items(&settings_menu, settings_menu_items,
                   sizeof(settings_menu_items) / sizeof(settings_menu_items[0]));
 
-    menu_init(&wifi_menu, 8);
+    menu_init(&wifi_menu, MENU_VISIBLE_ITEMS_WITH_TITLE);
     wifi_menu.title = "WiFi Setup";
     menu_set_items(&wifi_menu, wifi_menu_items,
                   sizeof(wifi_menu_items) / sizeof(wifi_menu_items[0]));
