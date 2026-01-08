@@ -147,9 +147,10 @@ typedef struct __attribute__((packed)) {
 
 // Disc type codes for playback status
 #define PANEL_DISC_TYPE_NO_DISC    0x00
-#define PANEL_DISC_TYPE_DATA       0x01
+#define PANEL_DISC_TYPE_DATA       0x01  // Data CD-ROM
 #define PANEL_DISC_TYPE_AUDIO      0x02
 #define PANEL_DISC_TYPE_MIXED      0x03
+#define PANEL_DISC_TYPE_HDD        0x04  // IDE hard disk
 
 // Audio playback status codes (matches CDRomAudioStatus)
 #define PANEL_AUDIO_STATUS_DATA_ONLY          0x00

@@ -574,8 +574,8 @@ static text_scroll_state_t status_title_scroll_state = {0};
 static char status_title_text[64] = "";
 
 esp_err_t ui_draw_status_screen(display_manager_t *display, const char *disc_name,
-                               const char *directory_path, uint32_t image_index,
-                               uint32_t total_images, const playback_status_t *playback_status,
+                               const loaded_image_status_t *image_status,
+                               const playback_status_t *playback_status,
                                bool title_changed) {
     if (!display) {
         return ESP_ERR_INVALID_ARG;
@@ -590,16 +590,17 @@ esp_err_t ui_draw_status_screen(display_manager_t *display, const char *disc_nam
     display_manager_draw_box(display, 0, 0, 128, 10);
     display_manager_set_draw_color(display, 0);
 
-    if (has_disc && directory_path && directory_path[0]) {
+    if (has_disc && image_status && image_status->directory_path[0]) {
         // Get just the directory name
-        const char *dir_name = get_directory_name(directory_path);
+        const char *dir_name = get_directory_name(image_status->directory_path);
 
         // Calculate position indicator width if we have image count
         char pos_indicator[16] = "";
         int pos_indicator_width = 0;
-        if (total_images > 0) {
+        if (image_status->total_images > 0) {
             snprintf(pos_indicator, sizeof(pos_indicator), "[%lu/%lu]",
-                    (unsigned long)(image_index + 1), (unsigned long)total_images);
+                    (unsigned long)(image_status->image_index + 1),
+                    (unsigned long)image_status->total_images);
             pos_indicator_width = u8g2_GetStrWidth(&display->u8g2, pos_indicator);
         }
 
@@ -655,8 +656,13 @@ esp_err_t ui_draw_status_screen(display_manager_t *display, const char *disc_nam
     int y = 52;
     display_manager_set_font(display, u8g2_font_waffle_t_all);
 
-    // Draw disc type
-    uint16_t type_icon = 0xe0ab; // Disc icon
+    // Draw device type icon
+    uint16_t type_icon;
+    if (playback_status->disc_type == PANEL_DISC_TYPE_HDD) {
+        type_icon = 0xe2cd;  // HDD/storage icon
+    } else {
+        type_icon = 0xe0ab;  // Disc icon
+    }
     display_manager_draw_glyph(display, 2, y, type_icon);
 
     // For audio/mixed discs, show playback status
@@ -697,7 +703,28 @@ esp_err_t ui_draw_status_screen(display_manager_t *display, const char *disc_nam
                     playback_status->track_position_s);
             display_manager_draw_text(display, 52, y, time_line);
         }
+    } else if (playback_status->disc_type == PANEL_DISC_TYPE_HDD) {
+        // IDE hard disk mode - show CHS and size
+        display_manager_set_font(display, u8g2_font_6x10_tf);
+
+        if (image_status && image_status->cylinders > 0) {
+            // Calculate size in MB
+            uint64_t total_sectors = (uint64_t)image_status->cylinders *
+                                     image_status->heads * image_status->sectors;
+            uint32_t size_mb = (uint32_t)((total_sectors * 512) / (1024 * 1024));
+
+            char chs_line[24];
+            snprintf(chs_line, sizeof(chs_line), "%u/%u/%u %luMB",
+                     image_status->cylinders,
+                     image_status->heads,
+                     image_status->sectors,
+                     (unsigned long)size_mb);
+            display_manager_draw_text(display, 16, y, chs_line);
+        } else {
+            display_manager_draw_text(display, 16, y, "IDE Hard Disk");
+        }
     } else {
+        // Data CD-ROM
         uint16_t status_icon = 0xe2b7; // File icon
         display_manager_draw_glyph(display, 14, y, status_icon);
         display_manager_set_font(display, u8g2_font_6x10_tf);

@@ -89,6 +89,19 @@ static void draw_firmware_status_screen(void);
 static void trigger_panel_update(void);
 static void trigger_mainboard_update(void);
 
+// Activity LED handler
+static void handle_activity_event(activity_event_t *event) {
+    if (!event) return;
+
+    if (!current_playback_status.disc_inserted) {
+        led_set_color(COLOR_ORANGE);  // No image loaded
+    } else if (event->pin_state) {
+        led_set_color(COLOR_YELLOW);  // Activity
+    } else {
+        led_set_color(COLOR_CYAN);    // Idle with image
+    }
+}
+
 static menu_item_t main_menu_items[] = {
     {.text = "Select Image", .action = MENU_ACTION_CUSTOM, .selectable = true},
     {.text = "Eject Image", .action = MENU_ACTION_CUSTOM, .selectable = true},
@@ -198,10 +211,9 @@ static void handle_button_event(button_event_t *event) {
                             } else if (host_comm.initialized) {
                                 esp_err_t ret = host_comm_eject_image(&host_comm);
                                 if (ret == ESP_OK) {
-                                    strncpy(current_disc_name, "No image loaded", sizeof(current_disc_name) - 1);
-                                    current_disc_name[sizeof(current_disc_name) - 1] = '\0';
-                                    ui_draw_status_bar(&display, current_disc_name);
                                     ESP_LOGI(TAG, "Image ejected");
+                                    current_screen = SCREEN_STATUS;
+                                    refresh_playback_status();
                                 } else {
                                     ESP_LOGW(TAG, "Failed to eject disc: %s", esp_err_to_name(ret));
                                 }
@@ -476,9 +488,7 @@ static void display_update_task(void *pvParameters) {
                 if (screen_changed || status_needs_redraw) {
                     // Full redraw when entering status screen or status changed
                     ui_draw_status_screen(&display, current_disc_name,
-                                          current_image_status.directory_path,
-                                          current_image_status.image_index,
-                                          current_image_status.total_images,
+                                          &current_image_status,
                                           &current_playback_status,
                                           screen_changed || disc_name_changed);
                     disc_name_changed = false;
@@ -564,6 +574,10 @@ static void refresh_playback_status(void) {
 
     // Always trigger status screen redraw after fetching status
     status_needs_redraw = true;
+
+    // Update LED based on current image/activity state
+    activity_event_t event = { .pin_state = gpio_get_level(PIN_ACT_IN) };
+    handle_activity_event(&event);
 }
 
 // Function to refresh device type from host
@@ -965,14 +979,11 @@ void app_main(void) {
         return;
     }
 
-    int initial_state = gpio_get_level(PIN_ACT_IN);
-    if (initial_state) {
-        led_set_color(COLOR_ORANGE);
-        ESP_LOGI(TAG, "Initial PIN_ACT_IN state: HIGH (LED: Orange)");
-    } else {
-        led_set_color(COLOR_CYAN);
-        ESP_LOGI(TAG, "Initial PIN_ACT_IN state: LOW (LED: Cyan)");
-    }
+    // Register custom activity handler for LED control
+    gpio_handler_register_activity_callback(handle_activity_event);
+
+    // Set initial LED to orange (no image loaded yet)
+    led_set_color(COLOR_ORANGE);
     
     ui_update_splash_progress(&display, "Init buttons...", 40);
     // Configure buttons with repeat for up/down navigation
@@ -1144,15 +1155,14 @@ void app_main(void) {
     active_menu = screen_menus[current_screen];
     refresh_playback_status();
     ui_draw_status_screen(&display, current_disc_name,
-                          current_image_status.directory_path,
-                          current_image_status.image_index,
-                          current_image_status.total_images,
+                          &current_image_status,
                           &current_playback_status, disc_name_changed);
     disc_name_changed = false;
     status_needs_redraw = false;
 
-    int initial_act_state = gpio_get_level(PIN_ACT_IN);
-    led_set_color(initial_act_state ? COLOR_ORANGE : COLOR_CYAN);
+    // Set LED based on image loaded state
+    activity_event_t init_event = { .pin_state = gpio_get_level(PIN_ACT_IN) };
+    handle_activity_event(&init_event);
 
     ESP_LOGI(TAG, "System initialized successfully");
 

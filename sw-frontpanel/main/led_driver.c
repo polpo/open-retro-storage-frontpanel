@@ -35,7 +35,7 @@ const rgb_color_t COLOR_GREEN =   {0,  32,  0};
 const rgb_color_t COLOR_BLUE =    {0,   0, 32};
 const rgb_color_t COLOR_WHITE =   {32, 32, 32};
 const rgb_color_t COLOR_YELLOW =  {32, 32,  0};
-const rgb_color_t COLOR_ORANGE =  {32, 16,  0};
+const rgb_color_t COLOR_ORANGE =  {32,  6,  0};
 const rgb_color_t COLOR_CYAN =    {0,  32, 32};
 const rgb_color_t COLOR_MAGENTA = {32,  0, 32};
 

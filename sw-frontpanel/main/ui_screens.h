@@ -44,8 +44,8 @@ esp_err_t ui_draw_status_bar(display_manager_t *display, const char *status);
 esp_err_t ui_draw_info_screen(display_manager_t *display, const char *title, const char *info);
 esp_err_t ui_draw_firmware_update(display_manager_t *display, const char *status, uint8_t progress);
 esp_err_t ui_draw_status_screen(display_manager_t *display, const char *disc_name,
-                               const char *directory_path, uint32_t image_index,
-                               uint32_t total_images, const playback_status_t *playback_status,
+                               const loaded_image_status_t *image_status,
+                               const playback_status_t *playback_status,
                                bool title_changed);
 bool ui_animate_status_screen(display_manager_t *display);
 bool ui_menu_needs_animation(menu_t *menu);
