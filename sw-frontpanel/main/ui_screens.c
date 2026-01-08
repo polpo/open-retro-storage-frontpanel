@@ -209,6 +209,30 @@ esp_err_t ui_update_splash_progress(display_manager_t *display, const char *step
     return ESP_OK;
 }
 
+esp_err_t ui_update_splash_versions(display_manager_t *display, const char *panel_version, const char *main_version) {
+    if (!display) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    // Clear the version text area
+    display_manager_set_draw_color(display, 0);
+    display_manager_draw_box(display, 0, 18, 128, 20);
+    display_manager_set_draw_color(display, 1);
+
+    display_manager_set_font(display, u8g2_font_6x10_tf);
+
+    char version_text[32];
+    snprintf(version_text, sizeof(version_text), "Panel: v%s", panel_version);
+    display_manager_draw_text(display, 22, 26, version_text);
+
+    snprintf(version_text, sizeof(version_text), "Main:  %s%s", main_version ? "v" : "", main_version ? main_version : "...");
+    display_manager_draw_text(display, 22, 36, version_text);
+
+    display_manager_request_update(display);
+
+    return ESP_OK;
+}
+
 esp_err_t ui_draw_menu(display_manager_t *display, menu_t *menu) {
     if (!display || !menu) {
         return ESP_ERR_INVALID_ARG;

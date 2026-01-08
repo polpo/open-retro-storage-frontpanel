@@ -225,11 +225,22 @@ static void handle_button_event(button_event_t *event) {
                         } else if (selected == 3) { // "System Info"
                             info_return_screen = SCREEN_MAIN_MENU;
                             current_screen = SCREEN_INFO;
-                            const esp_app_desc_t* app_desc = esp_app_get_description();
-                            char info_text[128];
+                            const esp_app_desc_t* info_app_desc = esp_app_get_description();
+                            char main_ver_str[16] = "N/A";
+                            if (host_comm.initialized) {
+                                rp2350_fw_status_t fw_status;
+                                if (host_comm_get_rp2350_fw_status(&host_comm, &fw_status) == ESP_OK) {
+                                    snprintf(main_ver_str, sizeof(main_ver_str), "%lu.%lu.%lu",
+                                             (fw_status.current_version >> 16) & 0xFF,
+                                             (fw_status.current_version >> 8) & 0xFF,
+                                             fw_status.current_version & 0xFF);
+                                }
+                            }
+                            char info_text[160];
                             snprintf(info_text, sizeof(info_text),
-                                     "PicoIDE Front Panel\nFW: v%s\nESP32-C3\n%s: %s",
-                                     app_desc->version,
+                                     "PicoIDE Front Panel\nPanel: v%s\nMain:  v%s\n%s: %s",
+                                     info_app_desc->version,
+                                     main_ver_str,
                                      host_comm_get_transport_name(&host_comm),
                                      host_comm.initialized ? "Connected" : "Disconnected");
                             ui_draw_info_screen(&display, "System Info", info_text);
@@ -952,6 +963,8 @@ void app_main(void) {
     xTaskCreate(status_refresh_task, "status_refresh", 2048, NULL, 4, NULL);
 
     ui_show_splash_screen(&display);
+    const esp_app_desc_t* app_desc = esp_app_get_description();
+    ui_update_splash_versions(&display, app_desc->version, NULL);
     ui_update_splash_progress(&display, "Init display...", 10);
 
     ui_update_splash_progress(&display, "Init LED...", 20);
@@ -1093,6 +1106,18 @@ void app_main(void) {
             host_comm.initialized = false;
         } else {
             ESP_LOGI(TAG, "Communication with main board verified (status: 0x%02X)", test_status);
+
+            // Get and display main board firmware version
+            rp2350_fw_status_t fw_status;
+            if (host_comm_get_rp2350_fw_status(&host_comm, &fw_status) == ESP_OK) {
+                char main_version[16];
+                snprintf(main_version, sizeof(main_version), "%lu.%lu.%lu",
+                         (fw_status.current_version >> 16) & 0xFF,
+                         (fw_status.current_version >> 8) & 0xFF,
+                         fw_status.current_version & 0xFF);
+                ui_update_splash_versions(&display, app_desc->version, main_version);
+                ESP_LOGI(TAG, "Main board firmware version: %s", main_version);
+            }
 
             // Get device type (IDE vs ATAPI)
             refresh_device_type();
