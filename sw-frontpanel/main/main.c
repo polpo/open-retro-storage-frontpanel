@@ -765,6 +765,7 @@ static void check_firmware_status(void) {
 
     // Show loading screen
     ui_draw_info_screen(&display, "Firmware", "Checking...");
+    display_manager_update(&display);  // Force immediate display update before blocking operations
 
     fw_status_valid = false;
     fw_screen_selection = 0;
@@ -774,6 +775,7 @@ static void check_firmware_status(void) {
     if (!host_comm.initialized) {
         ESP_LOGW(TAG, "Host communication not initialized");
         ui_draw_info_screen(&display, "Error", "Host not connected");
+        display_manager_update(&display);
         return;
     }
 
@@ -802,6 +804,7 @@ static void check_firmware_status(void) {
 
     fw_status_valid = true;
     draw_firmware_status_screen();
+    display_manager_update(&display);
 }
 
 // Trigger panel firmware update
