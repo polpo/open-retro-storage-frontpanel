@@ -123,15 +123,17 @@ static menu_item_t wifi_menu_items[] = {
 // Button event handler
 static void handle_button_event(button_event_t *event) {
     if (!event) return;
-    
+
     ESP_LOGI(TAG, "Button %d event: %d", event->button_id, event->type);
-    
-    // Wake display on any button activity
-    // If display was off, wake returns ESP_ERR_NOT_FINISHED and we should ignore the button action
-    esp_err_t wake_result = display_manager_wake(&display);
-    if (wake_result == ESP_ERR_NOT_FINISHED) {
-        ESP_LOGI(TAG, "Display was off - ignoring button action, just waking up");
-        return; // Don't process the button action, just wake up
+
+    // Only CLICK events wake display and reset activity timer
+    // This avoids double-processing since PRESS fires before CLICK
+    if (event->type == BUTTON_EVENT_CLICK) {
+        esp_err_t wake_result = display_manager_wake(&display);
+        if (wake_result == ESP_ERR_NOT_FINISHED) {
+            ESP_LOGI(TAG, "Display was off - ignoring button action, just waking up");
+            return;
+        }
     }
     
     // Handle navigation based on current screen
