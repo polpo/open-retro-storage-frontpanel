@@ -40,10 +40,27 @@ async function apiCall(endpoint, options = {}) {
     }
 }
 
+let statusHideTimer = null;
+const STATUS_HIDE_DELAY = 4000; // Hide after 4 seconds
+
 function showStatus(type, message) {
     const statusDiv = document.getElementById('connection-status');
-    statusDiv.className = `status ${type}`;
+    statusDiv.className = `status status-bar ${type}`;
     statusDiv.textContent = message;
+    statusDiv.classList.remove('hidden');
+
+    // Clear any existing timer
+    if (statusHideTimer) {
+        clearTimeout(statusHideTimer);
+        statusHideTimer = null;
+    }
+
+    // Only auto-hide non-error messages
+    if (type !== 'error') {
+        statusHideTimer = setTimeout(() => {
+            statusDiv.classList.add('hidden');
+        }, STATUS_HIDE_DELAY);
+    }
 }
 
 async function loadSystemInfo() {
@@ -259,6 +276,11 @@ async function checkPanelFirmware() {
             document.getElementById('panel-available-version').textContent = formatVersion(data.available_version);
             document.getElementById('panel-available-version').style.color = '#28a745';
             document.getElementById('panel-update-btn').disabled = false;
+        } else if (data.available_version !== undefined) {
+            // Firmware file exists but same version
+            document.getElementById('panel-available-version').textContent = formatVersion(data.available_version);
+            document.getElementById('panel-available-version').style.color = '#666';
+            document.getElementById('panel-update-btn').disabled = true;
         } else {
             document.getElementById('panel-available-version').textContent = 'No update';
             document.getElementById('panel-available-version').style.color = '#666';
@@ -520,7 +542,6 @@ async function uploadFile() {
     document.getElementById('upload-btn').disabled = true;
     document.getElementById('cancel-upload-btn').style.display = 'inline-block';
     document.getElementById('upload-info').style.display = 'block';
-    document.getElementById('upload-status').style.display = 'none';
 
     // Set file info
     document.getElementById('upload-filename').textContent = file.name;
@@ -565,9 +586,7 @@ async function uploadFile() {
                 const response = JSON.parse(uploadXHR.responseText);
                 if (response.success) {
                     // Wait for SHA256 calculation to complete
-                    document.getElementById('upload-status').className = 'status';
-                    document.getElementById('upload-status').textContent = 'Verifying file integrity...';
-                    document.getElementById('upload-status').style.display = 'block';
+                    showStatus('', 'Verifying file integrity...');
 
                     try {
                         calculatedHash = await hashPromise;
@@ -578,58 +597,37 @@ async function uploadFile() {
                             const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
 
                             if (response.hash.toLowerCase() === hashHex.toLowerCase()) {
-                                document.getElementById('upload-status').className = 'status success';
-                                document.getElementById('upload-status').textContent = `File uploaded and verified successfully to ${response.path || '/uploads/' + file.name}`;
-                                showStatus('success', 'File upload verified!');
+                                showStatus('success', 'File uploaded and verified');
                             } else {
-                                document.getElementById('upload-status').className = 'status error';
-                                document.getElementById('upload-status').textContent = 'Hash verification failed - file may be corrupted';
-                                showStatus('error', 'Hash verification failed');
+                                showStatus('error', 'Hash verification failed - file may be corrupted');
                             }
                         } else {
-                            // Server should always return a hash
-                            document.getElementById('upload-status').className = 'status error';
-                            document.getElementById('upload-status').textContent = 'Server did not return file hash for verification';
-                            showStatus('error', 'Missing hash from server');
+                            showStatus('error', 'Server did not return hash for verification');
                         }
                     } catch (hashError) {
                         console.error('SHA256 calculation failed:', hashError);
-                        document.getElementById('upload-status').className = 'status error';
-                        document.getElementById('upload-status').textContent = 'Failed to calculate file hash for verification';
                         showStatus('error', 'Hash calculation failed');
                     }
                 } else {
                     throw new Error(response.error || 'Upload failed');
                 }
             } catch (error) {
-                document.getElementById('upload-status').className = 'status error';
-                document.getElementById('upload-status').textContent = `Upload failed: ${error.message}`;
-                document.getElementById('upload-status').style.display = 'block';
-                showStatus('error', 'Upload failed');
+                showStatus('error', `Upload failed: ${error.message}`);
             }
         } else {
-            document.getElementById('upload-status').className = 'status error';
-            document.getElementById('upload-status').textContent = `Upload failed: Server returned ${uploadXHR.status}`;
-            document.getElementById('upload-status').style.display = 'block';
-            showStatus('error', 'Upload failed');
+            showStatus('error', `Upload failed: Server returned ${uploadXHR.status}`);
         }
         resetUploadUI();
     });
 
     // Handle errors
     uploadXHR.addEventListener('error', () => {
-        document.getElementById('upload-status').className = 'status error';
-        document.getElementById('upload-status').textContent = 'Upload failed: Network error';
-        document.getElementById('upload-status').style.display = 'block';
-        showStatus('error', 'File upload failed');
+        showStatus('error', 'Upload failed: Network error');
         resetUploadUI();
     });
 
     // Handle abort
     uploadXHR.addEventListener('abort', () => {
-        document.getElementById('upload-status').className = 'status';
-        document.getElementById('upload-status').textContent = 'Upload cancelled';
-        document.getElementById('upload-status').style.display = 'block';
         showStatus('', 'Upload cancelled');
         resetUploadUI();
     });
