@@ -655,12 +655,6 @@ function resetUploadUI() {
     sha256Context = null;
 }
 
-// Initialize the page
-document.addEventListener('DOMContentLoaded', function() {
-    loadSystemInfo();
-    refreshImages();
-    loadWiFiStatus();
-    checkAllFirmware();
 // Config editor functions
 async function loadConfig() {
     const editor = document.getElementById('config-editor');
@@ -721,6 +715,13 @@ async function saveConfig() {
     }
 }
 
+// Initialize the page (serialize requests to avoid overwhelming ESP32)
+document.addEventListener('DOMContentLoaded', async function() {
+    await loadSystemInfo();
+    await refreshImages();
+    await loadWiFiStatus();
+    await checkAllFirmware();
+    await loadConfig();
 
     // Add file input change listener to set file size
     const fileInput = document.getElementById('file-input');
