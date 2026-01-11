@@ -90,3 +90,22 @@ The front panel hosts a web interface accessible at `http://picoide.local` (or v
 ## Contributing
 
 Contributions are welcome! Please ensure any firmware contributions maintain GPL v2 compatibility and hardware contributions are compatible with CERN-OHL-S v2.
+
+## Building the firmware
+
+### Install ESP-IDF and prerequesites
+
+#### Linux and macOS
+
+Follow the ESP-IDF [Standard Toolchain Setup for Linux and macOS](https://docs.espressif.com/projects/esp-idf/en/stable/esp32c3/get-started/linux-macos-setup.html) guide.
+
+#### Windows
+
+Follow the ESP-IDF [Standard Setup of Toolchain for Windows](https://docs.espressif.com/projects/esp-idf/en/stable/esp32c3/get-started/windows-setup.html) guide. Note this is not necessary if you are using the [VS Code extension for ESP-IDF](https://github.com/espressif/vscode-esp-idf-extension/blob/master/README.md).
+
+### Building
+
+If using the command line, cd to `sw-frontpanel` and run `idf.py build` to build the firmware. `idf.py flash monitor` will build and flash the firmware and connect to the UART on the ESP32 for monitoring.
+
+If using the VS Code extension, follow the instructions in [the extension's README](https://github.com/espressif/vscode-esp-idf-extension/blob/master/README.md#using-the-esp-idf-extension-for-vs-code).
+
