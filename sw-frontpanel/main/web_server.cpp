@@ -28,9 +28,7 @@
 static const char *TAG = "web_server";
 
 // Forward declarations
-static esp_err_t index_handler(httpd_req_t *req);
-static esp_err_t js_handler(httpd_req_t *req);
-static esp_err_t sha256_js_handler(httpd_req_t *req);
+static esp_err_t static_file_handler(httpd_req_t *req);
 static esp_err_t api_status_handler(httpd_req_t *req);
 static esp_err_t api_images_handler(httpd_req_t *req);
 static esp_err_t api_select_entry_handler(httpd_req_t *req);
@@ -54,20 +52,36 @@ static web_server_t *g_server = NULL;
 // Global OTA manager instance
 static ota_manager_t g_ota_manager;
 
-// Embedded file content (these symbols will be created by CMakeLists.txt)
-extern const uint8_t index_html_start[] asm("_binary_index_html_start");
-extern const uint8_t index_html_end[] asm("_binary_index_html_end");
-extern const uint8_t app_js_start[] asm("_binary_app_js_start");
-extern const uint8_t app_js_end[] asm("_binary_app_js_end");
-extern const uint8_t sha256_js_start[] asm("_binary_sha256_js_start");
-extern const uint8_t sha256_js_end[] asm("_binary_sha256_js_end");
+// Embedded file content (gzipped, symbols created by CMakeLists.txt)
+extern const uint8_t index_html_gz_start[] asm("_binary_index_html_gz_start");
+extern const uint8_t index_html_gz_end[] asm("_binary_index_html_gz_end");
+extern const uint8_t app_js_gz_start[] asm("_binary_app_js_gz_start");
+extern const uint8_t app_js_gz_end[] asm("_binary_app_js_gz_end");
+extern const uint8_t sha256_js_gz_start[] asm("_binary_sha256_js_gz_start");
+extern const uint8_t sha256_js_gz_end[] asm("_binary_sha256_js_gz_end");
 
+// Static file descriptor for common handler
+typedef struct {
+    const uint8_t *start;
+    const uint8_t *end;
+    const char *content_type;
+} static_file_t;
+
+static const static_file_t file_index_html = {
+    index_html_gz_start, index_html_gz_end, "text/html; charset=utf-8"
+};
+static const static_file_t file_app_js = {
+    app_js_gz_start, app_js_gz_end, "application/javascript; charset=utf-8"
+};
+static const static_file_t file_sha256_js = {
+    sha256_js_gz_start, sha256_js_gz_end, "application/javascript; charset=utf-8"
+};
 
 // URI handlers
 static const httpd_uri_t uri_handlers[] = {
-    { .uri = "/", .method = HTTP_GET, .handler = index_handler, .user_ctx = NULL },
-    { .uri = "/app.js", .method = HTTP_GET, .handler = js_handler, .user_ctx = NULL },
-    { .uri = "/sha256.js", .method = HTTP_GET, .handler = sha256_js_handler, .user_ctx = NULL },
+    { .uri = "/", .method = HTTP_GET, .handler = static_file_handler, .user_ctx = (void *)&file_index_html },
+    { .uri = "/app.js", .method = HTTP_GET, .handler = static_file_handler, .user_ctx = (void *)&file_app_js },
+    { .uri = "/sha256.js", .method = HTTP_GET, .handler = static_file_handler, .user_ctx = (void *)&file_sha256_js },
     { .uri = "/api/status", .method = HTTP_GET, .handler = api_status_handler, .user_ctx = NULL },
     { .uri = "/api/images", .method = HTTP_GET, .handler = api_images_handler, .user_ctx = NULL },
     { .uri = "/api/select_entry", .method = HTTP_POST, .handler = api_select_entry_handler, .user_ctx = NULL },
@@ -86,22 +100,11 @@ static const httpd_uri_t uri_handlers[] = {
     { .uri = "/api/upload", .method = HTTP_POST, .handler = api_upload_handler, .user_ctx = NULL }
 };
 
-static esp_err_t index_handler(httpd_req_t *req) {
-    httpd_resp_set_type(req, "text/html; charset=utf-8");
-    const size_t index_html_size = index_html_end - index_html_start;
-    return httpd_resp_send(req, (const char *)index_html_start, index_html_size);
-}
-
-static esp_err_t js_handler(httpd_req_t *req) {
-    httpd_resp_set_type(req, "application/javascript; charset=utf-8");
-    const size_t app_js_size = app_js_end - app_js_start;
-    return httpd_resp_send(req, (const char *)app_js_start, app_js_size);
-}
-
-static esp_err_t sha256_js_handler(httpd_req_t *req) {
-    httpd_resp_set_type(req, "application/javascript; charset=utf-8");
-    const size_t sha256_js_size = sha256_js_end - sha256_js_start;
-    return httpd_resp_send(req, (const char *)sha256_js_start, sha256_js_size);
+static esp_err_t static_file_handler(httpd_req_t *req) {
+    const static_file_t *file = (const static_file_t *)req->user_ctx;
+    httpd_resp_set_type(req, file->content_type);
+    httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
+    return httpd_resp_send(req, (const char *)file->start, file->end - file->start);
 }
 
 static esp_err_t api_status_handler(httpd_req_t *req) {
