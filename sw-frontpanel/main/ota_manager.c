@@ -174,22 +174,10 @@ esp_err_t ota_manager_check_update(ota_manager_t* ota, bool* update_available) {
 
     ESP_LOGI(TAG, "Checking for firmware update...");
 
-    // Send CHECK_FIRMWARE command to host
-    esp_err_t ret = host_comm_check_firmware(ota->host_comm);
+    // Check for firmware and get info in one atomic operation
+    esp_err_t ret = host_comm_check_firmware(ota->host_comm, &ota->firmware_info);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to send firmware check command: %s", esp_err_to_name(ret));
-        ota->state = OTA_STATE_ERROR;
-        ota->last_error = ret;
-        return ret;
-    }
-
-    // Wait for async operation to complete
-    vTaskDelay(pdMS_TO_TICKS(100));
-
-    // Get firmware info
-    ret = host_comm_get_firmware_info(ota->host_comm, &ota->firmware_info);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to get firmware info: %s", esp_err_to_name(ret));
+        ESP_LOGE(TAG, "Failed to check firmware: %s", esp_err_to_name(ret));
         ota->state = OTA_STATE_ERROR;
         ota->last_error = ret;
         return ret;
