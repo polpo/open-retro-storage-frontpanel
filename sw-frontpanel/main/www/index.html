@@ -132,6 +132,10 @@
                 <input type="file" id="file-input" style="margin: 10px 0;" />
                 <button onclick="uploadFile()" id="upload-btn">📤 Upload to SD Card</button>
                 <button onclick="cancelUpload()" id="cancel-upload-btn" style="display: none; background-color: #dc3545;">❌ Cancel Upload</button>
+            <h3>⚙️ picoide.ini Editor</h3>
+            <div style="margin-bottom: 10px;">
+                <button onclick="loadConfig()" class="refresh-btn">🔄 Reload</button>
+                <button onclick="saveConfig()">💾 Save Config</button>
             </div>
             <div id="upload-info" style="display: none; margin-top: 15px;">
                 <div class="status">
@@ -146,6 +150,7 @@
                 <div id="upload-percent" style="text-align: center; font-weight: bold;">0%</div>
             </div>
             <div id="upload-status" class="status" style="display: none; margin-top: 10px;"></div>
+            <textarea id="config-editor" style="width: 100%; height: 300px; font-family: monospace; font-size: 14px; padding: 10px; box-sizing: border-box;" placeholder="Loading picoide.ini..."></textarea>
         </div>
 
         <div class="section">

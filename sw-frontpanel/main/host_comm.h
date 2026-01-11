@@ -67,10 +67,14 @@ esp_err_t host_comm_check_firmware(host_comm_t *comm, panel_firmware_info_t *inf
 esp_err_t host_comm_read_firmware_chunk(host_comm_t *comm, uint32_t offset,
                                         uint8_t *buffer, size_t size);
 
-// File upload functions
+// File upload functions (filename is full path, e.g., "/picoide.ini")
 esp_err_t host_comm_start_file_upload(host_comm_t *comm, const char *filename, uint32_t file_size);
 esp_err_t host_comm_write_file_chunk(host_comm_t *comm, const uint8_t *data, size_t size);
 esp_err_t host_comm_finish_file_upload(host_comm_t *comm, uint8_t *result_code, uint8_t *file_hash);
+
+// File download functions (filename is full path, e.g., "/picoide.ini")
+esp_err_t host_comm_start_file_download(host_comm_t *comm, const char *filename, uint32_t *file_size);
+esp_err_t host_comm_read_file_chunk(host_comm_t *comm, uint32_t chunk_index, uint8_t *buffer, size_t *bytes_read);
 
 // RP2350 (main board) firmware functions
 esp_err_t host_comm_get_rp2350_fw_status(host_comm_t *comm, rp2350_fw_status_t *status);

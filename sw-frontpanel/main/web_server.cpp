@@ -17,6 +17,7 @@
 #include "web_server.h"
 #include <string.h>
 #include <stdlib.h>
+#include <inttypes.h>
 #include "esp_log.h"
 #include "esp_http_server.h"
 #include "esp_system.h"
@@ -45,6 +46,7 @@ static esp_err_t api_mainboard_firmware_check_handler(httpd_req_t *req);
 static esp_err_t api_mainboard_firmware_update_handler(httpd_req_t *req);
 static esp_err_t api_mainboard_firmware_status_handler(httpd_req_t *req);
 static esp_err_t api_upload_handler(httpd_req_t *req);
+static esp_err_t api_download_handler(httpd_req_t *req);
 
 // Global server instance for handlers
 static web_server_t *g_server = NULL;
@@ -97,7 +99,8 @@ static const httpd_uri_t uri_handlers[] = {
     { .uri = "/api/firmware/mainboard/check", .method = HTTP_GET, .handler = api_mainboard_firmware_check_handler, .user_ctx = NULL },
     { .uri = "/api/firmware/mainboard/update", .method = HTTP_POST, .handler = api_mainboard_firmware_update_handler, .user_ctx = NULL },
     { .uri = "/api/firmware/mainboard/status", .method = HTTP_GET, .handler = api_mainboard_firmware_status_handler, .user_ctx = NULL },
-    { .uri = "/api/upload", .method = HTTP_POST, .handler = api_upload_handler, .user_ctx = NULL }
+    { .uri = "/api/upload", .method = HTTP_POST, .handler = api_upload_handler, .user_ctx = NULL },
+    { .uri = "/api/download", .method = HTTP_GET, .handler = api_download_handler, .user_ctx = NULL }
 };
 
 static esp_err_t static_file_handler(httpd_req_t *req) {
@@ -1228,9 +1231,9 @@ static esp_err_t api_upload_handler(httpd_req_t *req) {
         return ESP_FAIL;
     }
 
-    // Set target path
-    snprintf(g_upload_state.target_path, sizeof(g_upload_state.target_path),
-             "/uploads/%s", g_upload_state.filename);
+    // Set target path (filename should be full path from client)
+    strncpy(g_upload_state.target_path, g_upload_state.filename, sizeof(g_upload_state.target_path) - 1);
+    g_upload_state.target_path[sizeof(g_upload_state.target_path) - 1] = '\0';
 
     // Look for start of file data (after the file field headers)
     if (filename_start) {
@@ -1268,6 +1271,10 @@ static esp_err_t api_upload_handler(httpd_req_t *req) {
     // Process file data from the first chunk
     if (file_data_start > 0 && file_data_start < received) {
         size_t first_chunk_data_size = received - file_data_start;
+        // Cap at actual file size (don't include trailing multipart boundary for small files)
+        if (first_chunk_data_size > actual_file_size) {
+            first_chunk_data_size = actual_file_size;
+        }
         ESP_LOGI(TAG, "Processing first chunk data: %d bytes", first_chunk_data_size);
 
         // Since we're now reading in 256-byte chunks, this should always fit
@@ -1296,9 +1303,7 @@ static esp_err_t api_upload_handler(httpd_req_t *req) {
     }
 
     // Calculate how much file data remains after first chunk
-    size_t file_data_sent = (file_data_start > 0 && file_data_start < received) ?
-                           (received - file_data_start) : 0;
-    size_t remaining = actual_file_size - file_data_sent;
+    size_t remaining = actual_file_size - g_upload_state.bytes_received;
     while (remaining > 0) {
         size_t to_read = (remaining > chunk_size) ? chunk_size : remaining;
 
@@ -1405,4 +1410,111 @@ static esp_err_t api_upload_handler(httpd_req_t *req) {
     if (ret != ESP_OK) return ret;
 
     return json.finalize();
+}
+
+// File download handler - downloads a file from the main board SD card
+// Usage: GET /api/download?path=/picoide.ini
+static esp_err_t api_download_handler(httpd_req_t *req) {
+    if (!g_server || !g_server->interface_ctx || !g_server->interface_ctx->host_comm) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Host communication not available");
+        return ESP_FAIL;
+    }
+
+    host_comm_t *host_comm = g_server->interface_ctx->host_comm;
+
+    // Get the path query parameter
+    char path[256] = {0};
+    size_t query_len = httpd_req_get_url_query_len(req);
+    if (query_len == 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing path parameter");
+        return ESP_FAIL;
+    }
+
+    char *query_str = (char *)malloc(query_len + 1);
+    if (!query_str) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Memory allocation failed");
+        return ESP_FAIL;
+    }
+
+    esp_err_t ret = httpd_req_get_url_query_str(req, query_str, query_len + 1);
+    if (ret != ESP_OK) {
+        free(query_str);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Failed to get query string");
+        return ESP_FAIL;
+    }
+
+    ret = httpd_query_key_value(query_str, "path", path, sizeof(path));
+    free(query_str);
+    if (ret != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing or invalid path parameter");
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "Download request for: %s", path);
+
+    // Start the file download
+    uint32_t file_size = 0;
+    ret = host_comm_start_file_download(host_comm, path, &file_size);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start file download: %s", esp_err_to_name(ret));
+        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "File not found");
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "Downloading file: %s (%" PRIu32 " bytes)", path, file_size);
+
+    // Set content type based on file extension
+    const char *ext = strrchr(path, '.');
+    if (ext && strcasecmp(ext, ".ini") == 0) {
+        httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    } else {
+        httpd_resp_set_type(req, "application/octet-stream");
+    }
+
+    // Set content length
+    char content_length[32];
+    snprintf(content_length, sizeof(content_length), "%" PRIu32, file_size);
+    httpd_resp_set_hdr(req, "Content-Length", content_length);
+
+    // Read and send file in chunks
+    uint8_t *chunk_buffer = (uint8_t *)malloc(PANEL_FILE_CHUNK_SIZE);
+    if (!chunk_buffer) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Memory allocation failed");
+        return ESP_FAIL;
+    }
+
+    uint32_t bytes_sent = 0;
+    uint32_t chunk_index = 0;
+
+    while (bytes_sent < file_size) {
+        size_t bytes_read = 0;
+        ret = host_comm_read_file_chunk(host_comm, chunk_index, chunk_buffer, &bytes_read);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to read file chunk %" PRIu32 ": %s", chunk_index, esp_err_to_name(ret));
+            free(chunk_buffer);
+            return ESP_FAIL;
+        }
+
+        if (bytes_read == 0) {
+            break;  // End of file
+        }
+
+        ret = httpd_resp_send_chunk(req, (const char *)chunk_buffer, bytes_read);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to send chunk: %s", esp_err_to_name(ret));
+            free(chunk_buffer);
+            return ESP_FAIL;
+        }
+
+        bytes_sent += bytes_read;
+        chunk_index++;
+    }
+
+    free(chunk_buffer);
+
+    // Send final empty chunk to signal end of response
+    httpd_resp_send_chunk(req, NULL, 0);
+
+    ESP_LOGI(TAG, "Download complete: %" PRIu32 " bytes sent", bytes_sent);
+    return ESP_OK;
 }

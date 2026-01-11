@@ -522,10 +522,11 @@ async function uploadFile() {
     calculatedHash = null;
     const hashPromise = calculateSHA256Incrementally(file);
 
-    // Create FormData
+    // Create FormData (use current browse path as upload destination)
+    const uploadPath = currentPath.endsWith('/') ? currentPath + file.name : currentPath + '/' + file.name;
     const formData = new FormData();
     formData.append('fileSize', file.size.toString());
-    formData.append('fileData', file);
+    formData.append('fileData', file, uploadPath);
 
     // Create XMLHttpRequest for progress tracking
     uploadXHR = new XMLHttpRequest();
@@ -650,6 +651,66 @@ document.addEventListener('DOMContentLoaded', function() {
     refreshImages();
     loadWiFiStatus();
     checkAllFirmware();
+// Config editor functions
+async function loadConfig() {
+    const editor = document.getElementById('config-editor');
+
+    showStatus('', 'Loading configuration...');
+
+    try {
+        const response = await fetch('/api/download?path=/picoide.ini');
+        if (!response.ok) {
+            throw new Error(`Failed to load config: ${response.status}`);
+        }
+        const content = await response.text();
+        editor.value = content;
+        showStatus('success', 'Configuration loaded');
+    } catch (error) {
+        showStatus('error', `Config error: ${error.message}`);
+    }
+}
+
+async function saveConfig() {
+    const editor = document.getElementById('config-editor');
+    const content = editor.value;
+
+    if (!content.trim()) {
+        showStatus('error', 'Configuration is empty');
+        return;
+    }
+
+    showStatus('', 'Saving configuration...');
+
+    try {
+        // Create a Blob from the content
+        const blob = new Blob([content], { type: 'text/plain' });
+
+        // Create FormData with the file (use fileData to match server expectations)
+        // Filename starts with '/' to indicate full path (not relative to /uploads/)
+        const formData = new FormData();
+        formData.append('fileSize', blob.size.toString());
+        formData.append('fileData', blob, '/picoide.ini');
+
+        const response = await fetch('/api/upload', {
+            method: 'POST',
+            body: formData
+        });
+
+        if (!response.ok) {
+            throw new Error(`Failed to save config: ${response.status}`);
+        }
+
+        const result = await response.json();
+        if (result.success) {
+            showStatus('success', 'Config saved. Reboot main board to apply.');
+        } else {
+            throw new Error(result.error || 'Unknown error');
+        }
+    } catch (error) {
+        showStatus('error', `Save error: ${error.message}`);
+    }
+}
+
 
     // Add file input change listener to set file size
     const fileInput = document.getElementById('file-input');

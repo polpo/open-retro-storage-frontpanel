@@ -128,8 +128,8 @@ static esp_err_t host_comm_poll_async_result(host_comm_t *comm, uint32_t timeout
         return ESP_ERR_TIMEOUT;
     }
 
-    if (expected_size > 0 && response_size != expected_size) {
-        ESP_LOGE(TAG, "Unexpected response size: %u (expected %u)", response_size, expected_size);
+    if (expected_size > 0 && response_size > expected_size) {
+        ESP_LOGE(TAG, "Response too large: %u (max %u)", response_size, expected_size);
         return ESP_ERR_INVALID_RESPONSE;
     }
 
@@ -561,9 +561,7 @@ esp_err_t host_comm_start_file_upload(host_comm_t *comm, const char *filename, u
         return ESP_ERR_INVALID_ARG;
     }
 
-    ESP_LOGI(TAG, "Starting file upload: %s (%u bytes)", filename, file_size);
-
-    // Prepare payload with file upload start structure
+    // Validate filename length before locking
     size_t filename_len = strlen(filename);
     if (filename_len > (PANEL_PROTOCOL_MAX_PAYLOAD - sizeof(panel_file_upload_start_t) - 1)) {
         ESP_LOGE(TAG, "Filename too long: %d bytes", filename_len);
@@ -572,6 +570,9 @@ esp_err_t host_comm_start_file_upload(host_comm_t *comm, const char *filename, u
 
     HOST_COMM_LOCK(comm);
 
+    ESP_LOGI(TAG, "Starting file upload: %s (%u bytes)", filename, file_size);
+
+    // Prepare payload with file upload start structure
     panel_file_upload_start_t *upload_start = (panel_file_upload_start_t *)tx_buffer;
     upload_start->file_size = file_size;
     upload_start->filename_len = filename_len;
@@ -615,8 +616,8 @@ esp_err_t host_comm_write_file_chunk(host_comm_t *comm, const uint8_t *data, siz
 
     // Copy chunk data to tx buffer
     memcpy(tx_buffer, data, size);
-   
-    // Calc CRC16 of chunk 
+
+    // Calc CRC16 of chunk
     uint16_t chunk_crc16 = ~esp_rom_crc16_be((uint16_t)~0xffff, data, size);
 
     // Send WRITE_FILE_CHUNK command (async operation)
@@ -701,6 +702,111 @@ esp_err_t host_comm_finish_file_upload(host_comm_t *comm, uint8_t *result_code, 
         ESP_LOGE(TAG, "File upload failed with code: 0x%02X", result_data[0]);
     }
 
+    HOST_COMM_UNLOCK(comm);
+    return ESP_OK;
+}
+
+esp_err_t host_comm_start_file_download(host_comm_t *comm, const char *filename, uint32_t *file_size) {
+    if (!comm || !comm->initialized || !filename || !file_size) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    // Validate filename length before locking
+    size_t filename_len = strlen(filename);
+    if (filename_len >= PANEL_PROTOCOL_MAX_PAYLOAD) {
+        ESP_LOGE(TAG, "Filename too long: %d bytes", filename_len);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    HOST_COMM_LOCK(comm);
+
+    ESP_LOGI(TAG, "Starting file download: %s", filename);
+
+    // Prepare payload with filename (null-terminated)
+    memcpy(tx_buffer, filename, filename_len);
+    tx_buffer[filename_len] = '\0';
+
+    // Send START_FILE_DOWNLOAD command (async operation)
+    esp_err_t ret = transport_two_phase_transaction(&comm->transport,
+                                                   PANEL_CMD_START_FILE_DOWNLOAD, PANEL_ARG_EXTENDED,
+                                                   tx_buffer, filename_len + 1,
+                                                   NULL, 0);
+
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start file download: %s", esp_err_to_name(ret));
+        HOST_COMM_UNLOCK(comm);
+        return ret;
+    }
+
+    // Poll for async result (5 bytes: panel_file_download_start_result_t)
+    uint8_t *result_data;
+    size_t result_size;
+    ret = host_comm_poll_async_result(comm, 5000, 10, sizeof(panel_file_download_start_result_t),
+                                      &result_data, &result_size);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to get file download start result: %s", esp_err_to_name(ret));
+        HOST_COMM_UNLOCK(comm);
+        return ret;
+    }
+
+    if (result_size < sizeof(panel_file_download_start_result_t)) {
+        ESP_LOGE(TAG, "Download result size mismatch: expected %d, got %d",
+                 sizeof(panel_file_download_start_result_t), result_size);
+        HOST_COMM_UNLOCK(comm);
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    panel_file_download_start_result_t *result = (panel_file_download_start_result_t *)result_data;
+
+    if (result->result_code != PANEL_DOWNLOAD_OK) {
+        ESP_LOGE(TAG, "File download start failed with code: 0x%02X", result->result_code);
+        HOST_COMM_UNLOCK(comm);
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    *file_size = result->file_size;
+    ESP_LOGI(TAG, "File download started: %lu bytes", result->file_size);
+    HOST_COMM_UNLOCK(comm);
+    return ESP_OK;
+}
+
+esp_err_t host_comm_read_file_chunk(host_comm_t *comm, uint32_t chunk_index, uint8_t *buffer, size_t *bytes_read) {
+    if (!comm || !comm->initialized || !buffer || !bytes_read) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    HOST_COMM_LOCK(comm);
+
+    // Store chunk index in tx buffer
+    memcpy(tx_buffer, &chunk_index, sizeof(chunk_index));
+
+    // Send READ_FILE_CHUNK command (async operation)
+    esp_err_t ret = transport_two_phase_transaction(&comm->transport,
+                                                   PANEL_CMD_READ_FILE_CHUNK, chunk_index,
+                                                   tx_buffer, sizeof(chunk_index),
+                                                   NULL, 0);
+
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to send read file chunk command: %s", esp_err_to_name(ret));
+        HOST_COMM_UNLOCK(comm);
+        return ret;
+    }
+
+    // Poll for async result (size varies - could be less than chunk size for last/small files)
+    // Pass max chunk size so the data actually gets read from SPI
+    uint8_t *result_data;
+    size_t result_size;
+    ret = host_comm_poll_async_result(comm, 5000, 10, PANEL_FILE_CHUNK_SIZE, &result_data, &result_size);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to get file chunk: %s", esp_err_to_name(ret));
+        HOST_COMM_UNLOCK(comm);
+        return ret;
+    }
+
+    memcpy(buffer, result_data, result_size);
+    *bytes_read = result_size;
+
+    ESP_LOGD(TAG, "File chunk read: index=%lu, size=%d", chunk_index, result_size);
     HOST_COMM_UNLOCK(comm);
     return ESP_OK;
 }

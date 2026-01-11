@@ -48,6 +48,8 @@
 #define PANEL_CMD_FINISH_FILE_UPLOAD   0x54  // Finish file upload (async)
 #define PANEL_CMD_GET_RP2350_FW_STATUS 0x55  // Get RP2350 firmware status (async, returns rp2350_fw_status_t)
 #define PANEL_CMD_START_RP2350_UPDATE  0x56  // Start RP2350 firmware update from SD card (async, reboots on success)
+#define PANEL_CMD_START_FILE_DOWNLOAD  0x57  // Start file download (async, payload: null-terminated filename)
+#define PANEL_CMD_READ_FILE_CHUNK      0x58  // Read file chunk (async, arg: chunk index, returns chunk data)
 #define PANEL_CMD_RESET                0x7F  // Reset system
 
 // Read commands (bit 7 = 1)
@@ -144,6 +146,17 @@ typedef struct __attribute__((packed)) {
 #define PANEL_UPLOAD_ERROR_SPACE   0x02
 #define PANEL_UPLOAD_ERROR_WRITE   0x03
 #define PANEL_UPLOAD_ERROR_PATH    0x04
+
+// File download start structure (5 bytes)
+typedef struct __attribute__((packed)) {
+    uint8_t result_code;       // PANEL_DOWNLOAD_* result code
+    uint32_t file_size;        // Total file size in bytes (valid if result_code == 0)
+} panel_file_download_start_result_t;
+
+// File download result codes
+#define PANEL_DOWNLOAD_OK              0x00
+#define PANEL_DOWNLOAD_ERROR_NOT_FOUND 0x01
+#define PANEL_DOWNLOAD_ERROR_READ      0x02
 
 // Disc type codes for playback status
 #define PANEL_DISC_TYPE_NO_DISC    0x00
