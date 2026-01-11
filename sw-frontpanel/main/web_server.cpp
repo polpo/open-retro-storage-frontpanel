@@ -820,7 +820,8 @@ static esp_err_t api_firmware_check_handler(httpd_req_t *req) {
             ret = json.write("update_available", update_available ? 1 : 0);
             if (ret != ESP_OK) return ret;
 
-            if (update_available) {
+            // Include firmware info if a file is present (even if same version)
+            if (g_ota_manager.firmware_info.available) {
                 ret = json.write("available_version", g_ota_manager.firmware_info.version);
                 if (ret != ESP_OK) return ret;
 

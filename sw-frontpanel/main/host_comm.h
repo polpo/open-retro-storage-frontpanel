@@ -63,8 +63,7 @@ esp_err_t host_comm_get_device_status(host_comm_t *comm, uint8_t *status);
 esp_err_t host_comm_get_playback_status(host_comm_t *comm, playback_status_t *status);
 
 // Firmware update functions
-esp_err_t host_comm_check_firmware(host_comm_t *comm);
-esp_err_t host_comm_get_firmware_info(host_comm_t *comm, panel_firmware_info_t *info);
+esp_err_t host_comm_check_firmware(host_comm_t *comm, panel_firmware_info_t *info);
 esp_err_t host_comm_read_firmware_chunk(host_comm_t *comm, uint32_t offset,
                                         uint8_t *buffer, size_t size);
 

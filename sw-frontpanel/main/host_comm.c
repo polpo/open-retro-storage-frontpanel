@@ -455,9 +455,9 @@ esp_err_t host_comm_get_playback_status(host_comm_t *comm, playback_status_t *st
     return ret;
 }
 
-esp_err_t host_comm_check_firmware(host_comm_t *comm) {
-    if (!comm || !comm->initialized) {
-        return ESP_ERR_INVALID_STATE;
+esp_err_t host_comm_check_firmware(host_comm_t *comm, panel_firmware_info_t *info) {
+    if (!comm || !comm->initialized || !info) {
+        return ESP_ERR_INVALID_ARG;
     }
 
     HOST_COMM_LOCK(comm);
@@ -465,23 +465,21 @@ esp_err_t host_comm_check_firmware(host_comm_t *comm) {
     ESP_LOGI(TAG, "Checking for firmware updates...");
 
     // Send CHECK_FIRMWARE command (async operation)
-    return transport_two_phase_transaction(&comm->transport,
+    esp_err_t ret = transport_two_phase_transaction(&comm->transport,
                                            PANEL_CMD_CHECK_FIRMWARE, PANEL_ARG_IGNORED,
                                            NULL, 0,  // No write data
                                            NULL, 0); // No immediate read data
-}
-
-esp_err_t host_comm_get_firmware_info(host_comm_t *comm, panel_firmware_info_t *info) {
-    if (!comm || !comm->initialized || !info) {
-        return ESP_ERR_INVALID_ARG;
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to send firmware check command: %s", esp_err_to_name(ret));
+        HOST_COMM_UNLOCK(comm);
+        return ret;
     }
 
-    ESP_LOGI(TAG, "Getting firmware info...");
-
-    // Poll for async result first
+    // Poll for async result - keep mutex held to prevent other commands
+    // from interfering with the async state
     uint8_t *result_data;
     size_t result_size;
-    esp_err_t ret = host_comm_poll_async_result(comm, 2000, 10, sizeof(panel_firmware_info_t), &result_data, &result_size);
+    ret = host_comm_poll_async_result(comm, 5000, 10, sizeof(panel_firmware_info_t), &result_data, &result_size);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to get firmware check result: %s", esp_err_to_name(ret));
         HOST_COMM_UNLOCK(comm);

@@ -786,13 +786,8 @@ static void check_firmware_status(void) {
     }
 
     // Check for panel firmware update
-    ret = host_comm_check_firmware(&host_comm);
-    if (ret == ESP_OK) {
-        ret = host_comm_get_firmware_info(&host_comm, &panel_fw_info);
-        if (ret != ESP_OK) {
-            ESP_LOGW(TAG, "Failed to get panel firmware info: %s", esp_err_to_name(ret));
-        }
-    } else {
+    ret = host_comm_check_firmware(&host_comm, &panel_fw_info);
+    if (ret != ESP_OK) {
         ESP_LOGW(TAG, "Failed to check panel firmware: %s", esp_err_to_name(ret));
     }
 
