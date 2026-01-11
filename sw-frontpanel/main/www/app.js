@@ -169,10 +169,20 @@ async function nextImage() {
 async function loadWiFiStatus() {
     const data = await apiCall('/wifi/status');
     if (data) {
-        document.getElementById('wifi-state').textContent = data.state || 'Unknown';
-        if (data.ip_address) {
-            document.getElementById('wifi-status').innerHTML = `WiFi Status: <strong>${data.state}</strong> (IP: ${data.ip_address})`;
+        let statusText = data.state || 'Unknown';
+        if (data.mode === 'Client' && data.ssid) {
+            statusText = `Connected to <strong>${data.ssid}</strong>`;
+            if (data.ip_address) {
+                statusText += ` (IP: ${data.ip_address})`;
+            }
+        } else if (data.mode === 'AP' && data.ssid) {
+            statusText = `AP Mode: <strong>${data.ssid}</strong>`;
+            if (data.ip_address) {
+                statusText += ` (IP: ${data.ip_address})`;
+            }
         }
+        document.getElementById('wifi-state').textContent = data.state || 'Unknown';
+        document.getElementById('wifi-status').innerHTML = `WiFi Status: ${statusText}`;
     }
 }
 

@@ -651,29 +651,61 @@ static esp_err_t api_wifi_status_handler(httpd_req_t *req) {
     esp_err_t ret = json.beginObject();
     if (ret != ESP_OK) return ret;
 
-    if (g_server && g_server->interface_ctx) {
-        wifi_manager_state_t state;
-        char ip_address[16] = {0};
-        esp_err_t wifi_ret = interface_wifi_get_status(g_server->interface_ctx, &state, ip_address, sizeof(ip_address));
+    if (g_server && g_server->interface_ctx && g_server->interface_ctx->wifi_manager) {
+        wifi_manager_t *wifi = g_server->interface_ctx->wifi_manager;
+        wifi_manager_state_t state = wifi_manager_get_state(wifi);
 
-        if (wifi_ret == ESP_OK) {
-            ret = json.write("state", interface_wifi_state_string(state));
+        ret = json.write("state", interface_wifi_state_string(state));
+        if (ret != ESP_OK) return ret;
+
+        // Determine mode: AP, Client, or None
+        const char *mode = "None";
+        if (wifi->ap_active) {
+            mode = "AP";
+        } else if (wifi->station_connected) {
+            mode = "Client";
+        }
+        ret = json.write("mode", mode);
+        if (ret != ESP_OK) return ret;
+
+        // Include SSID based on mode
+        if (wifi->station_connected) {
+            ret = json.write("ssid", wifi->config.ssid);
             if (ret != ESP_OK) return ret;
 
+            esp_ip4_addr_t ip;
+            if (wifi_manager_get_ip_info(wifi, &ip, NULL, NULL) == ESP_OK) {
+                char ip_address[16];
+                snprintf(ip_address, sizeof(ip_address), IPSTR, IP2STR(&ip));
+                ret = json.write("ip_address", ip_address);
+                if (ret != ESP_OK) return ret;
+            } else {
+                ret = json.write("ip_address", "");
+                if (ret != ESP_OK) return ret;
+            }
+        } else if (wifi->ap_active) {
+            ret = json.write("ssid", WIFI_MANAGER_AP_SSID);
+            if (ret != ESP_OK) return ret;
+
+            char ip_address[16];
+            snprintf(ip_address, sizeof(ip_address), IPSTR, IP2STR(&wifi->ap_ip_addr));
             ret = json.write("ip_address", ip_address);
             if (ret != ESP_OK) return ret;
         } else {
-            ret = json.write("state", "Error");
+            ret = json.write("ssid", "");
             if (ret != ESP_OK) return ret;
 
             ret = json.write("ip_address", "");
             if (ret != ESP_OK) return ret;
-
-            ret = json.write("error", esp_err_to_name(wifi_ret));
-            if (ret != ESP_OK) return ret;
         }
     } else {
         ret = json.write("state", "Unavailable");
+        if (ret != ESP_OK) return ret;
+
+        ret = json.write("mode", "None");
+        if (ret != ESP_OK) return ret;
+
+        ret = json.write("ssid", "");
         if (ret != ESP_OK) return ret;
 
         ret = json.write("ip_address", "");
@@ -713,6 +745,8 @@ esp_err_t web_server_start(web_server_t *server) {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = server->port;
     config.max_uri_handlers = WEB_SERVER_MAX_HANDLERS;
+    config.max_open_sockets = 3;
+    config.lru_purge_enable = true;
 
     esp_err_t ret = httpd_start(&server->server, &config);
     if (ret != ESP_OK) {
