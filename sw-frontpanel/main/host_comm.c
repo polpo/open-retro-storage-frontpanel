@@ -25,6 +25,18 @@
 
 static const char *TAG = "host_comm";
 
+// Mutex timeout for transport operations (30 seconds to allow long file operations)
+#define HOST_COMM_MUTEX_TIMEOUT_MS 30000
+
+// Helper macros for mutex handling
+#define HOST_COMM_LOCK(comm) \
+    if (xSemaphoreTake((comm)->mutex, pdMS_TO_TICKS(HOST_COMM_MUTEX_TIMEOUT_MS)) != pdTRUE) { \
+        ESP_LOGE(TAG, "Failed to acquire mutex"); \
+        return ESP_ERR_TIMEOUT; \
+    }
+
+#define HOST_COMM_UNLOCK(comm) xSemaphoreGive((comm)->mutex)
+
 // Static buffers for zero-copy operations
 alignas(4) static uint8_t tx_buffer[PANEL_PROTOCOL_MAX_PAYLOAD];
 alignas(4) static uint8_t rx_buffer[PANEL_PROTOCOL_MAX_PAYLOAD];
@@ -34,18 +46,27 @@ esp_err_t host_comm_init(host_comm_t *comm, const transport_config_t *config) {
         return ESP_ERR_INVALID_ARG;
     }
 
+    // Create mutex for thread-safe access
+    comm->mutex = xSemaphoreCreateMutex();
+    if (!comm->mutex) {
+        ESP_LOGE(TAG, "Failed to create mutex");
+        return ESP_ERR_NO_MEM;
+    }
+
     // Initialize transport layer
     esp_err_t ret = transport_init(&comm->transport, config);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to initialize transport: %s", esp_err_to_name(ret));
+        vSemaphoreDelete(comm->mutex);
+        comm->mutex = NULL;
         return ret;
     }
 
     comm->initialized = true;
-    
+
     ESP_LOGI(TAG, "Host communication initialized using %s transport (device addr: 0x%02X)",
              transport_get_name(&comm->transport), config->device_addr);
-    
+
     return ESP_OK;
 }
 
@@ -60,9 +81,14 @@ esp_err_t host_comm_deinit(host_comm_t *comm) {
         return ret;
     }
 
+    if (comm->mutex) {
+        vSemaphoreDelete(comm->mutex);
+        comm->mutex = NULL;
+    }
+
     comm->initialized = false;
     ESP_LOGI(TAG, "Host communication deinitialized");
-    
+
     return ESP_OK;
 }
 
@@ -125,12 +151,15 @@ esp_err_t host_comm_get_entry_count(host_comm_t *comm, uint32_t *count) {
         return ESP_ERR_INVALID_ARG;
     }
 
+    HOST_COMM_LOCK(comm);
+
     // Start the entry count operation
     esp_err_t ret = transport_two_phase_transaction(&comm->transport,
                                                     PANEL_CMD_GET_DIR_ENTRY_COUNT, PANEL_ARG_IGNORED,
                                                     NULL, 0,  // No write data
                                                     NULL, 0);  // No read data
     if (ret != ESP_OK) {
+        HOST_COMM_UNLOCK(comm);
         return ret;
     }
 
@@ -139,6 +168,7 @@ esp_err_t host_comm_get_entry_count(host_comm_t *comm, uint32_t *count) {
     size_t result_size;
     ret = host_comm_poll_async_result(comm, 1000, 10, 4, &result_data, &result_size);
     if (ret != ESP_OK) {
+        HOST_COMM_UNLOCK(comm);
         return ret;
     }
 
@@ -146,6 +176,7 @@ esp_err_t host_comm_get_entry_count(host_comm_t *comm, uint32_t *count) {
     *count = (result_data[0] << 24) | (result_data[1] << 16) | (result_data[2] << 8) | result_data[3];
     ESP_LOGI(TAG, "Entry count: %lu", *count);
 
+    HOST_COMM_UNLOCK(comm);
     return ESP_OK;
 }
 
@@ -153,6 +184,8 @@ esp_err_t host_comm_get_entry_info(host_comm_t *comm, uint32_t index, dir_entry_
     if (!comm || !info) {
         return ESP_ERR_INVALID_ARG;
     }
+
+    HOST_COMM_LOCK(comm);
 
     ESP_LOGI(TAG, "Getting info for entry: %lu", index);
 
@@ -178,6 +211,7 @@ esp_err_t host_comm_get_entry_info(host_comm_t *comm, uint32_t index, dir_entry_
     }
 
     if (ret != ESP_OK) {
+        HOST_COMM_UNLOCK(comm);
         return ret;
     }
 
@@ -186,6 +220,7 @@ esp_err_t host_comm_get_entry_info(host_comm_t *comm, uint32_t index, dir_entry_
     size_t result_size;
     ret = host_comm_poll_async_result(comm, 1000, 10, sizeof(dir_entry_info_t), &result_data, &result_size);
     if (ret != ESP_OK) {
+        HOST_COMM_UNLOCK(comm);
         return ret;
     }
 
@@ -193,6 +228,7 @@ esp_err_t host_comm_get_entry_info(host_comm_t *comm, uint32_t index, dir_entry_
     memcpy(info, result_data, sizeof(dir_entry_info_t));
     ESP_LOGI(TAG, "Got entry info: %s (type=%u)", info->name, info->entry_type);
 
+    HOST_COMM_UNLOCK(comm);
     return ret;
 }
 
@@ -200,6 +236,8 @@ esp_err_t host_comm_select_entry(host_comm_t *comm, int32_t index) {
     if (!comm) {
         return ESP_ERR_INVALID_ARG;
     }
+
+    HOST_COMM_LOCK(comm);
 
     ESP_LOGI(TAG, "Selecting entry: %ld", index);
 
@@ -211,11 +249,13 @@ esp_err_t host_comm_select_entry(host_comm_t *comm, int32_t index) {
                                                     NULL, 0,  // No write data
                                                     NULL, 0);  // No read data
     if (ret != ESP_OK) {
+        HOST_COMM_UNLOCK(comm);
         return ret;
     }
 
     // Poll for completion with 2 second timeout (may need to load image)
     ret = host_comm_poll_async_result(comm, 2000, 10, 0, NULL, NULL);
+    HOST_COMM_UNLOCK(comm);
     return ret;
 }
 
@@ -223,6 +263,8 @@ esp_err_t host_comm_get_current_path(host_comm_t *comm, char *path, size_t max_l
     if (!comm || !path || max_len == 0) {
         return ESP_ERR_INVALID_ARG;
     }
+
+    HOST_COMM_LOCK(comm);
 
     ESP_LOGI(TAG, "Getting current path");
 
@@ -232,6 +274,7 @@ esp_err_t host_comm_get_current_path(host_comm_t *comm, char *path, size_t max_l
                                                     NULL, 0,  // No write data
                                                     NULL, 0);  // No read data
     if (ret != ESP_OK) {
+        HOST_COMM_UNLOCK(comm);
         return ret;
     }
 
@@ -241,6 +284,7 @@ esp_err_t host_comm_get_current_path(host_comm_t *comm, char *path, size_t max_l
     size_t result_size;
     ret = host_comm_poll_async_result(comm, 1000, 10, 128, &result_data, &result_size);
     if (ret != ESP_OK) {
+        HOST_COMM_UNLOCK(comm);
         return ret;
     }
 
@@ -251,6 +295,7 @@ esp_err_t host_comm_get_current_path(host_comm_t *comm, char *path, size_t max_l
 
     ESP_LOGI(TAG, "Current path: %s", path);
 
+    HOST_COMM_UNLOCK(comm);
     return ESP_OK;
 }
 
@@ -261,6 +306,8 @@ esp_err_t host_comm_select_prev_image(host_comm_t *comm) {
         return ESP_ERR_INVALID_ARG;
     }
 
+    HOST_COMM_LOCK(comm);
+
     ESP_LOGI(TAG, "Selecting previous image");
 
     esp_err_t ret = transport_two_phase_transaction(&comm->transport,
@@ -268,11 +315,13 @@ esp_err_t host_comm_select_prev_image(host_comm_t *comm) {
                                                     NULL, 0,  // No write data
                                                     NULL, 0);  // No read data
     if (ret != ESP_OK) {
+        HOST_COMM_UNLOCK(comm);
         return ret;
     }
 
     // Poll for completion
     ret = host_comm_poll_async_result(comm, 2000, 10, 0, NULL, NULL);
+    HOST_COMM_UNLOCK(comm);
     return ret;
 }
 
@@ -281,6 +330,8 @@ esp_err_t host_comm_select_next_image(host_comm_t *comm) {
         return ESP_ERR_INVALID_ARG;
     }
 
+    HOST_COMM_LOCK(comm);
+
     ESP_LOGI(TAG, "Selecting next image");
 
     esp_err_t ret = transport_two_phase_transaction(&comm->transport,
@@ -288,11 +339,13 @@ esp_err_t host_comm_select_next_image(host_comm_t *comm) {
                                                     NULL, 0,  // No write data
                                                     NULL, 0);  // No read data
     if (ret != ESP_OK) {
+        HOST_COMM_UNLOCK(comm);
         return ret;
     }
 
     // Poll for completion
     ret = host_comm_poll_async_result(comm, 2000, 10, 0, NULL, NULL);
+    HOST_COMM_UNLOCK(comm);
     return ret;
 }
 
@@ -301,6 +354,8 @@ esp_err_t host_comm_eject_image(host_comm_t *comm) {
         return ESP_ERR_INVALID_ARG;
     }
 
+    HOST_COMM_LOCK(comm);
+
     ESP_LOGI(TAG, "Ejecting image");
 
     esp_err_t ret = transport_two_phase_transaction(&comm->transport,
@@ -308,11 +363,13 @@ esp_err_t host_comm_eject_image(host_comm_t *comm) {
                                                     NULL, 0,  // No write data
                                                     NULL, 0);  // No read data
     if (ret != ESP_OK) {
+        HOST_COMM_UNLOCK(comm);
         return ret;
     }
 
     // Poll for completion
     ret = host_comm_poll_async_result(comm, 1000, 10, 0, NULL, NULL);
+    HOST_COMM_UNLOCK(comm);
     return ret;
 }
 
@@ -320,6 +377,8 @@ esp_err_t host_comm_get_loaded_image_status(host_comm_t *comm, loaded_image_stat
     if (!comm || !status) {
         return ESP_ERR_INVALID_ARG;
     }
+
+    HOST_COMM_LOCK(comm);
 
     ESP_LOGI(TAG, "Getting loaded image status");
 
@@ -329,6 +388,7 @@ esp_err_t host_comm_get_loaded_image_status(host_comm_t *comm, loaded_image_stat
                                                     NULL, 0,  // No write data
                                                     NULL, 0);  // No read data
     if (ret != ESP_OK) {
+        HOST_COMM_UNLOCK(comm);
         return ret;
     }
 
@@ -337,6 +397,7 @@ esp_err_t host_comm_get_loaded_image_status(host_comm_t *comm, loaded_image_stat
     size_t result_size;
     ret = host_comm_poll_async_result(comm, 1000, 10, sizeof(loaded_image_status_t), &result_data, &result_size);
     if (ret != ESP_OK) {
+        HOST_COMM_UNLOCK(comm);
         return ret;
     }
 
@@ -344,6 +405,7 @@ esp_err_t host_comm_get_loaded_image_status(host_comm_t *comm, loaded_image_stat
     memcpy(status, result_data, sizeof(loaded_image_status_t));
     ESP_LOGI(TAG, "Image status: loaded=%u, name=%s", status->image_loaded, status->image_name);
 
+    HOST_COMM_UNLOCK(comm);
     return ret;
 }
 
@@ -353,6 +415,8 @@ esp_err_t host_comm_get_device_status(host_comm_t *comm, uint8_t *status) {
     if (!comm || !status) {
         return ESP_ERR_INVALID_ARG;
     }
+
+    HOST_COMM_LOCK(comm);
 
     ESP_LOGI(TAG, "Getting device status");
 
@@ -365,6 +429,7 @@ esp_err_t host_comm_get_device_status(host_comm_t *comm, uint8_t *status) {
         *status = device_status;
     }
 
+    HOST_COMM_UNLOCK(comm);
     return ret;
 }
 
@@ -372,6 +437,8 @@ esp_err_t host_comm_get_playback_status(host_comm_t *comm, playback_status_t *st
     if (!comm || !status) {
         return ESP_ERR_INVALID_ARG;
     }
+
+    HOST_COMM_LOCK(comm);
 
     ESP_LOGD(TAG, "Getting playback status");
 
@@ -384,6 +451,7 @@ esp_err_t host_comm_get_playback_status(host_comm_t *comm, playback_status_t *st
                 status->disc_inserted, status->disc_type, status->is_playing, status->current_track);
     }
 
+    HOST_COMM_UNLOCK(comm);
     return ret;
 }
 
@@ -391,6 +459,8 @@ esp_err_t host_comm_check_firmware(host_comm_t *comm) {
     if (!comm || !comm->initialized) {
         return ESP_ERR_INVALID_STATE;
     }
+
+    HOST_COMM_LOCK(comm);
 
     ESP_LOGI(TAG, "Checking for firmware updates...");
 
@@ -414,6 +484,7 @@ esp_err_t host_comm_get_firmware_info(host_comm_t *comm, panel_firmware_info_t *
     esp_err_t ret = host_comm_poll_async_result(comm, 2000, 10, sizeof(panel_firmware_info_t), &result_data, &result_size);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to get firmware check result: %s", esp_err_to_name(ret));
+        HOST_COMM_UNLOCK(comm);
         return ret;
     }
 
@@ -427,6 +498,7 @@ esp_err_t host_comm_get_firmware_info(host_comm_t *comm, panel_firmware_info_t *
     ESP_LOGI(TAG, "Firmware info - Available: %d, Size: %lu, Version: 0x%08lx, SHA256: %s",
              info->available, info->size, info->version, sha256_hex);
 
+    HOST_COMM_UNLOCK(comm);
     return ESP_OK;
 }
 
@@ -440,6 +512,8 @@ esp_err_t host_comm_read_firmware_chunk(host_comm_t *comm, uint32_t offset,
         ESP_LOGE(TAG, "Chunk size too large: %d > %d", size, PANEL_FIRMWARE_CHUNK_SIZE);
         return ESP_ERR_INVALID_SIZE;
     }
+
+    HOST_COMM_LOCK(comm);
 
     ESP_LOGD(TAG, "Reading firmware chunk at offset 0x%lx, size %d", offset, size);
 
@@ -456,6 +530,7 @@ esp_err_t host_comm_read_firmware_chunk(host_comm_t *comm, uint32_t offset,
                                                     NULL, 0);      // No immediate read data
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to send firmware read command: %s", esp_err_to_name(ret));
+        HOST_COMM_UNLOCK(comm);
         return ret;
     }
 
@@ -465,11 +540,13 @@ esp_err_t host_comm_read_firmware_chunk(host_comm_t *comm, uint32_t offset,
     ret = host_comm_poll_async_result(comm, 5000, 10, size, &result_data, &result_size);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to get firmware chunk: %s", esp_err_to_name(ret));
+        HOST_COMM_UNLOCK(comm);
         return ret;
     }
 
     if (result_size != size) {
         ESP_LOGE(TAG, "Firmware chunk size mismatch: expected %d, got %d", size, result_size);
+        HOST_COMM_UNLOCK(comm);
         return ESP_ERR_INVALID_SIZE;
     }
 
@@ -477,6 +554,7 @@ esp_err_t host_comm_read_firmware_chunk(host_comm_t *comm, uint32_t offset,
     memcpy(buffer, result_data, size);
 
     ESP_LOGD(TAG, "Successfully read firmware chunk: %d bytes", size);
+    HOST_COMM_UNLOCK(comm);
     return ESP_OK;
 }
 
@@ -493,6 +571,8 @@ esp_err_t host_comm_start_file_upload(host_comm_t *comm, const char *filename, u
         ESP_LOGE(TAG, "Filename too long: %d bytes", filename_len);
         return ESP_ERR_INVALID_ARG;
     }
+
+    HOST_COMM_LOCK(comm);
 
     panel_file_upload_start_t *upload_start = (panel_file_upload_start_t *)tx_buffer;
     upload_start->file_size = file_size;
@@ -512,10 +592,12 @@ esp_err_t host_comm_start_file_upload(host_comm_t *comm, const char *filename, u
 
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start file upload: %s", esp_err_to_name(ret));
+        HOST_COMM_UNLOCK(comm);
         return ret;
     }
 
     ESP_LOGD(TAG, "File upload start command sent successfully");
+    HOST_COMM_UNLOCK(comm);
     return ESP_OK;
 }
 
@@ -528,6 +610,8 @@ esp_err_t host_comm_write_file_chunk(host_comm_t *comm, const uint8_t *data, siz
         ESP_LOGE(TAG, "Chunk size too large: %d bytes (max %d)", size, PANEL_FILE_CHUNK_SIZE);
         return ESP_ERR_INVALID_ARG;
     }
+
+    HOST_COMM_LOCK(comm);
 
     /* ESP_LOGD(TAG, "Writing file chunk: %d bytes", size); */
 
@@ -545,6 +629,7 @@ esp_err_t host_comm_write_file_chunk(host_comm_t *comm, const uint8_t *data, siz
 
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to write file chunk: %s", esp_err_to_name(ret));
+        HOST_COMM_UNLOCK(comm);
         return ret;
     }
 
@@ -552,10 +637,12 @@ esp_err_t host_comm_write_file_chunk(host_comm_t *comm, const uint8_t *data, siz
 
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed async result after write: %s", esp_err_to_name(ret));
+        HOST_COMM_UNLOCK(comm);
         return ret;
     }
 
     /* ESP_LOGD(TAG, "File chunk written successfully"); */
+    HOST_COMM_UNLOCK(comm);
     return ESP_OK;
 }
 
@@ -563,6 +650,8 @@ esp_err_t host_comm_finish_file_upload(host_comm_t *comm, uint8_t *result_code, 
     if (!comm || !comm->initialized) {
         return ESP_ERR_INVALID_ARG;
     }
+
+    HOST_COMM_LOCK(comm);
 
     ESP_LOGI(TAG, "Finishing file upload");
 
@@ -574,6 +663,7 @@ esp_err_t host_comm_finish_file_upload(host_comm_t *comm, uint8_t *result_code, 
 
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to send finish file upload command: %s", esp_err_to_name(ret));
+        HOST_COMM_UNLOCK(comm);
         return ret;
     }
 
@@ -583,11 +673,13 @@ esp_err_t host_comm_finish_file_upload(host_comm_t *comm, uint8_t *result_code, 
     ret = host_comm_poll_async_result(comm, 5000, 10, 33, &result_data, &result_size);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to get file upload result: %s", esp_err_to_name(ret));
+        HOST_COMM_UNLOCK(comm);
         return ret;
     }
 
     if (result_size != 33) {
         ESP_LOGE(TAG, "Upload result size mismatch: expected 33, got %d", result_size);
+        HOST_COMM_UNLOCK(comm);
         return ESP_ERR_INVALID_SIZE;
     }
 
@@ -611,6 +703,7 @@ esp_err_t host_comm_finish_file_upload(host_comm_t *comm, uint8_t *result_code, 
         ESP_LOGE(TAG, "File upload failed with code: 0x%02X", result_data[0]);
     }
 
+    HOST_COMM_UNLOCK(comm);
     return ESP_OK;
 }
 
@@ -618,6 +711,8 @@ esp_err_t host_comm_get_rp2350_fw_status(host_comm_t *comm, rp2350_fw_status_t *
     if (!comm || !comm->initialized || !status) {
         return ESP_ERR_INVALID_ARG;
     }
+
+    HOST_COMM_LOCK(comm);
 
     ESP_LOGI(TAG, "Getting RP2350 firmware status...");
 
@@ -628,6 +723,7 @@ esp_err_t host_comm_get_rp2350_fw_status(host_comm_t *comm, rp2350_fw_status_t *
                                                     NULL, 0); // No immediate read data
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to send RP2350 fw status command: %s", esp_err_to_name(ret));
+        HOST_COMM_UNLOCK(comm);
         return ret;
     }
 
@@ -637,6 +733,7 @@ esp_err_t host_comm_get_rp2350_fw_status(host_comm_t *comm, rp2350_fw_status_t *
     ret = host_comm_poll_async_result(comm, 2000, 10, sizeof(rp2350_fw_status_t), &result_data, &result_size);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to get RP2350 fw status result: %s", esp_err_to_name(ret));
+        HOST_COMM_UNLOCK(comm);
         return ret;
     }
 
@@ -646,6 +743,7 @@ esp_err_t host_comm_get_rp2350_fw_status(host_comm_t *comm, rp2350_fw_status_t *
     ESP_LOGI(TAG, "RP2350 status: version=0x%08lx, avail=0x%08lx",
              status->current_version, status->available_version);
 
+    HOST_COMM_UNLOCK(comm);
     return ESP_OK;
 }
 
@@ -653,6 +751,8 @@ esp_err_t host_comm_start_rp2350_update(host_comm_t *comm) {
     if (!comm || !comm->initialized) {
         return ESP_ERR_INVALID_STATE;
     }
+
+    HOST_COMM_LOCK(comm);
 
     ESP_LOGI(TAG, "Starting RP2350 firmware update...");
 
@@ -664,12 +764,14 @@ esp_err_t host_comm_start_rp2350_update(host_comm_t *comm) {
                                                     NULL, 0); // No immediate read data
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to send RP2350 update command: %s", esp_err_to_name(ret));
+        HOST_COMM_UNLOCK(comm);
         return ret;
     }
 
     // Don't poll - the update happens quickly and the board reboots
     // The caller should detect the reboot and wait for the board to come back
     ESP_LOGI(TAG, "RP2350 update command sent successfully");
+    HOST_COMM_UNLOCK(comm);
     return ESP_OK;
 }
 
@@ -678,9 +780,14 @@ esp_err_t host_comm_get_command_status(host_comm_t *comm, panel_command_status_t
         return ESP_ERR_INVALID_ARG;
     }
 
-    return transport_two_phase_transaction(&comm->transport,
+    HOST_COMM_LOCK(comm);
+
+    esp_err_t ret = transport_two_phase_transaction(&comm->transport,
                                            PANEL_CMD_GET_COMMAND_STATUS, PANEL_ARG_IGNORED,
                                            NULL, 0,
                                            (uint8_t*)status, sizeof(panel_command_status_t));
+
+    HOST_COMM_UNLOCK(comm);
+    return ret;
 }
 

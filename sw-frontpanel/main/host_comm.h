@@ -20,6 +20,8 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "esp_err.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "transport.h"
 #include "panel_protocol_defs.h"
 
@@ -36,6 +38,7 @@ typedef panel_playback_status_t playback_status_t;
 // Host communication handle
 typedef struct {
     transport_handle_t transport;
+    SemaphoreHandle_t mutex;  // Protects transport access from concurrent tasks
     bool initialized;
 } host_comm_t;
 
