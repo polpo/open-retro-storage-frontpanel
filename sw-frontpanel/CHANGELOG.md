@@ -1,3 +1,12 @@
+# v0.3.0
+
+- Config file editor component
+- Better status bar
+- Layout improvements
+- WiFi status display improvements
+- Minification/gzip of static assets for web UI
+- Main board comms reliability improvements
+
 # v0.2.2
 
 - Fix display glitch on firmware update screen
