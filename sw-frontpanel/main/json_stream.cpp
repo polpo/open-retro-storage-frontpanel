@@ -156,6 +156,11 @@ esp_err_t JsonStreamWriter::write(const char* key, const char* value) {
     if (ret != ESP_OK) return ret;
 
     first_item_ = true; // Reset for the value
+    if (value == nullptr) {
+        esp_err_t null_ret = writeSeparator();
+        if (null_ret != ESP_OK) return null_ret;
+        return sendChunk("null");
+    }
     return writeString(value);
 }
 
