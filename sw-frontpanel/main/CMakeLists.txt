@@ -38,7 +38,15 @@ idf_component_register(SRCS "main.c"
                     EMBED_FILES "${WWW_BUILD_DIR}/index.html.gz"
                                 "${WWW_BUILD_DIR}/app.js.gz"
                                 "${WWW_BUILD_DIR}/sha256.js.gz"
+                                "${WWW_BUILD_DIR}/logo.svg.gz"
                 )
+
+# Select product logo based on Kconfig
+if(CONFIG_PRODUCT_BLUESCSI)
+    set(LOGO_SRC "bluescsi-logo.svg")
+else()
+    set(LOGO_SRC "picoide-logo.svg")
+endif()
 
 # Custom commands for minifying web assets (after idf_component_register)
 set(WWW_FILES index.html app.js sha256.js)
@@ -51,3 +59,12 @@ foreach(file ${WWW_FILES})
         VERBATIM
     )
 endforeach()
+
+# Gzip product logo (selected by Kconfig)
+add_custom_command(
+    OUTPUT "${WWW_BUILD_DIR}/logo.svg.gz"
+    COMMAND ${PYTHON} "${MINIFY_SCRIPT}" "${WWW_SRC_DIR}/${LOGO_SRC}" "${WWW_BUILD_DIR}/logo.svg.gz"
+    DEPENDS "${WWW_SRC_DIR}/${LOGO_SRC}" "${MINIFY_SCRIPT}"
+    COMMENT "Gzipping ${LOGO_SRC} as logo.svg"
+    VERBATIM
+)

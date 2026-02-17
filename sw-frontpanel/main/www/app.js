@@ -16,6 +16,8 @@
 
 let currentImage = null;
 let currentPath = "/";
+let productName = "PicoIDE";
+let mainboardFirmwarePending = false;
 
 // API helper function
 async function apiCall(endpoint, options = {}) {
@@ -66,13 +68,38 @@ function showStatus(type, message) {
 async function loadSystemInfo() {
     const data = await apiCall('/status');
     if (data) {
+        if (data.product_name) {
+            productName = data.product_name;
+        }
+        if (data.product_full) {
+            document.title = data.product_full;
+        }
+        // Update header logo/branding
+        const heading = document.getElementById('product-heading');
+        if (heading) {
+            if (data.logo_url && data.logo_url.length > 0) {
+                heading.innerHTML = '<img src="' + data.logo_url + '" alt="' + (data.product_name || 'Front Panel') + '" style="height: 48px;">';
+            } else {
+                heading.textContent = data.product_name || 'Front Panel';
+            }
+            heading.style.visibility = 'visible';
+        }
+        // Update hostname display
+        const hostnameText = document.getElementById('hostname-text');
+        const hostnameUrl = document.getElementById('hostname-url');
+        if (hostnameText && hostnameUrl && data.hostname) {
+            hostnameUrl.textContent = 'http://' + data.hostname + '.local';
+            hostnameText.style.visibility = 'visible';
+        }
         document.getElementById('system-info').innerHTML = `
+            <strong>Product:</strong> ${data.product_full || data.product_name || 'PicoIDE'}<br>
             <strong>Firmware:</strong> ${data.firmware || 'v0.1.0'}<br>
             <strong>Hardware:</strong> ${data.hardware || 'ESP32-C3'}<br>
             <strong>Host Communication:</strong> ${data.transport || 'Unknown'} - ${data.host_connected ? 'Connected' : 'Disconnected'}<br>
             <strong>Free Memory:</strong> ${data.free_memory || 'Unknown'} bytes<br>
             <strong>Uptime:</strong> ${data.uptime || 'Unknown'} seconds
         `;
+        setupMainboardFirmwareUI(productName);
         showStatus('success', 'Connected to front panel');
     } else {
         showStatus('error', 'Failed to connect to front panel');
@@ -296,6 +323,9 @@ async function checkMainboardFirmware() {
             document.getElementById('mainboard-current-version').textContent = formatVersion(data.current_version);
         }
 
+        // BlueSCSI doesn't have SD-card-based available version checks
+        if (productName === 'BlueSCSI') return;
+
         if (data.update_available) {
             document.getElementById('mainboard-available-version').textContent = formatVersion(data.available_version);
             document.getElementById('mainboard-available-version').style.color = '#28a745';
@@ -394,7 +424,10 @@ async function startMainboardFirmwareUpdate() {
         return;
     }
 
-    if (!confirm('Are you sure you want to update the main board firmware? The main board will restart.')) {
+    const confirmMsg = productName === 'BlueSCSI'
+        ? 'Are you sure you want to reboot the main board to apply the uploaded firmware?'
+        : 'Are you sure you want to update the main board firmware? The main board will restart.';
+    if (!confirm(confirmMsg)) {
         return;
     }
 
@@ -402,9 +435,13 @@ async function startMainboardFirmwareUpdate() {
     document.getElementById('mainboard-update-btn').disabled = true;
     document.getElementById('mainboard-update-progress').style.display = 'block';
     document.getElementById('mainboard-update-status').style.display = 'block';
-    document.getElementById('mainboard-update-status').textContent = 'Starting main board update...';
 
-    showStatus('', 'Starting main board firmware update...');
+    const statusMsg = productName === 'BlueSCSI'
+        ? 'Rebooting main board to apply firmware...'
+        : 'Starting main board update...';
+    document.getElementById('mainboard-update-status').textContent = statusMsg;
+
+    showStatus('', statusMsg);
 
     const data = await apiCall('/firmware/mainboard/update', { method: 'POST' });
     if (data && data.success) {
@@ -653,14 +690,24 @@ function resetUploadUI() {
     sha256Context = null;
 }
 
+function getConfigFilename() {
+    return productName.toLowerCase() + '.ini';
+}
+
 // Config editor functions
 async function loadConfig() {
     const editor = document.getElementById('config-editor');
+    const configFile = getConfigFilename();
 
     showStatus('', 'Loading configuration...');
 
+    // Update UI to reflect current product config filename
+    const configHeading = document.getElementById('config-heading');
+    if (configHeading) configHeading.textContent = configFile + ' Editor';
+    editor.placeholder = 'Loading ' + configFile + '...';
+
     try {
-        const response = await fetch('/api/download?path=/picoide.ini');
+        const response = await fetch('/api/download?path=/' + configFile);
         if (!response.ok) {
             throw new Error(`Failed to load config: ${response.status}`);
         }
@@ -691,7 +738,7 @@ async function saveConfig() {
         // Filename starts with '/' to indicate full path (not relative to /uploads/)
         const formData = new FormData();
         formData.append('fileSize', blob.size.toString());
-        formData.append('fileData', blob, '/picoide.ini');
+        formData.append('fileData', blob, '/' + getConfigFilename());
 
         const response = await fetch('/api/upload', {
             method: 'POST',
@@ -711,6 +758,101 @@ async function saveConfig() {
     } catch (error) {
         showStatus('error', `Save error: ${error.message}`);
     }
+}
+
+// Configure main board firmware UI based on product type
+function setupMainboardFirmwareUI(product) {
+    const mainboardType = document.getElementById('mainboard-type');
+    const availableSection = document.getElementById('mainboard-available-section');
+    const uploadSection = document.getElementById('mainboard-upload-section');
+    const updateBtn = document.getElementById('mainboard-update-btn');
+
+    if (product === 'BlueSCSI') {
+        if (mainboardType) mainboardType.textContent = 'BlueSCSI';
+        if (availableSection) availableSection.style.display = 'none';
+        if (uploadSection) uploadSection.style.display = 'block';
+        if (updateBtn) updateBtn.textContent = 'Reboot to Apply Update';
+    } else {
+        if (mainboardType) mainboardType.textContent = 'RP2350';
+        if (availableSection) availableSection.style.display = '';
+        if (uploadSection) uploadSection.style.display = 'none';
+        if (updateBtn) updateBtn.textContent = 'Update Main Board';
+    }
+}
+
+// Upload firmware file to main board (BlueSCSI path)
+async function uploadMainboardFirmware() {
+    const fileInput = document.getElementById('mainboard-firmware-file');
+    const file = fileInput.files[0];
+
+    if (!file) {
+        showStatus('error', 'Please select a firmware file');
+        return;
+    }
+
+    // Validate .bin extension
+    if (!file.name.toLowerCase().endsWith('.bin')) {
+        showStatus('error', 'Please select a .bin firmware file');
+        return;
+    }
+
+    const uploadBtn = document.getElementById('mainboard-upload-btn');
+    const progressBar = document.getElementById('mainboard-upload-progress');
+    const progressFill = document.getElementById('mainboard-upload-progress-fill');
+    const statusDiv = document.getElementById('mainboard-upload-status');
+
+    uploadBtn.disabled = true;
+    progressBar.style.display = 'block';
+    statusDiv.style.display = 'block';
+    statusDiv.textContent = 'Uploading firmware...';
+    progressFill.style.width = '0%';
+
+    const formData = new FormData();
+    formData.append('fileSize', file.size.toString());
+    formData.append('fileData', file, file.name);
+
+    const xhr = new XMLHttpRequest();
+
+    xhr.upload.addEventListener('progress', (e) => {
+        if (e.lengthComputable) {
+            const percent = (e.loaded / e.total) * 100;
+            progressFill.style.width = `${percent}%`;
+            statusDiv.textContent = `Uploading firmware... ${Math.round(percent)}%`;
+        }
+    });
+
+    xhr.addEventListener('load', () => {
+        if (xhr.status === 200) {
+            try {
+                const response = JSON.parse(xhr.responseText);
+                if (response.success) {
+                    statusDiv.textContent = 'Firmware uploaded successfully. Click "Reboot to Apply Update" to apply.';
+                    mainboardFirmwarePending = true;
+                    document.getElementById('mainboard-update-btn').disabled = false;
+                    showStatus('success', 'Firmware uploaded successfully');
+                } else {
+                    statusDiv.textContent = `Upload failed: ${response.error || 'Unknown error'}`;
+                    showStatus('error', `Upload failed: ${response.error || 'Unknown error'}`);
+                }
+            } catch (e) {
+                statusDiv.textContent = 'Upload failed: Invalid response';
+                showStatus('error', 'Upload failed: Invalid response');
+            }
+        } else {
+            statusDiv.textContent = `Upload failed: Server returned ${xhr.status}`;
+            showStatus('error', `Upload failed: Server returned ${xhr.status}`);
+        }
+        uploadBtn.disabled = false;
+    });
+
+    xhr.addEventListener('error', () => {
+        statusDiv.textContent = 'Upload failed: Network error';
+        showStatus('error', 'Upload failed: Network error');
+        uploadBtn.disabled = false;
+    });
+
+    xhr.open('POST', '/api/firmware/mainboard/upload');
+    xhr.send(formData);
 }
 
 // Initialize the page (serialize requests to avoid overwhelming ESP32)

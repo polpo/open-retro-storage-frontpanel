@@ -751,7 +751,7 @@ esp_err_t wifi_manager_start_mdns(wifi_manager_t *manager) {
     }
 
     // Add service instance name
-    ret = mdns_service_instance_name_set("_http", "_tcp", "PicoIDE Front Panel Web Interface");
+    ret = mdns_service_instance_name_set("_http", "_tcp", PRODUCT_NAME_FULL " Web Interface");
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "Failed to set mDNS service instance name: %s", esp_err_to_name(ret));
         // Don't fail for this, it's optional

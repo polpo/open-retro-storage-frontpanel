@@ -88,6 +88,8 @@ static void check_firmware_status(void);
 static void draw_firmware_status_screen(void);
 static void trigger_panel_update(void);
 static void trigger_mainboard_update(void);
+static void reconnect_to_host(void);
+static bool handle_comm_error(esp_err_t err);
 
 // Activity LED handler
 static void handle_activity_event(activity_event_t *event) {
@@ -218,6 +220,7 @@ static void handle_button_event(button_event_t *event) {
                                     refresh_playback_status();
                                 } else {
                                     ESP_LOGW(TAG, "Failed to eject disc: %s", esp_err_to_name(ret));
+                                    handle_comm_error(ret);
                                 }
                             }
                         } else if (selected == 2) { // "Settings"
@@ -238,7 +241,8 @@ static void handle_button_event(button_event_t *event) {
                             }
                             char info_text[160];
                             snprintf(info_text, sizeof(info_text),
-                                     "PicoIDE Front Panel\nPanel: v%s\nMain:  v%s\n%s: %s",
+                                     "%s\nPanel: v%s\nMain:  v%s\n%s: %s",
+                                     PRODUCT_NAME_FULL,
                                      info_app_desc->version,
                                      main_ver_str,
                                      host_comm_get_transport_name(&host_comm),
@@ -301,6 +305,10 @@ static void handle_button_event(button_event_t *event) {
                                     }
                                 } else {
                                     ESP_LOGW(TAG, "Failed to select entry via host comm: %s", esp_err_to_name(ret));
+                                    if (handle_comm_error(ret)) {
+                                        current_screen = SCREEN_MAIN_MENU;
+                                        active_menu = &main_menu;
+                                    }
                                 }
                             }
                         }
@@ -667,6 +675,47 @@ static esp_err_t refresh_directory_list(void) {
     return ESP_OK;
 }
 
+// Reconnect to host after communication error
+static void reconnect_to_host(void) {
+    ESP_LOGI(TAG, "Reconnecting to host...");
+
+    // Show reconnecting status on display
+    ui_draw_info_screen(&display, "Reconnecting...", "Restoring communication\nwith main board...");
+    display_manager_update(&display);
+
+    disc_list_loaded = false;
+
+    // Reset host async state
+    host_comm_reset(&host_comm);
+
+    // Re-enumerate directory
+    esp_err_t ret = refresh_directory_list();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to re-enumerate after reconnect: %s", esp_err_to_name(ret));
+        host_comm.initialized = false;
+    }
+}
+
+// Handle communication error - attempt recovery
+// Returns true if recovery succeeded
+static bool handle_comm_error(esp_err_t err) {
+    if (err == ESP_OK) {
+        return true;
+    }
+
+    ESP_LOGW(TAG, "Communication error: %s, attempting recovery", esp_err_to_name(err));
+
+    switch (err) {
+        case ESP_ERR_TIMEOUT:
+        case ESP_ERR_INVALID_RESPONSE:
+        case ESP_FAIL:
+            reconnect_to_host();
+            return host_comm.initialized;
+        default:
+            return false;
+    }
+}
+
 // Firmware update task
 static void firmware_update_task(void *pvParameters) {
     ota_manager_t *ota = (ota_manager_t *)pvParameters;
@@ -931,7 +980,7 @@ static void host_comm_task(void *pvParameters) {
 #endif
 
 void app_main(void) {
-    ESP_LOGI(TAG, "PicoIDE Front Panel Starting...");
+    ESP_LOGI(TAG, "%s Starting...", PRODUCT_NAME_FULL);
 
     // Initialize shared SPI bus with MISO enabled for host communication
     spi_bus_config_t bus_config = {
@@ -1168,7 +1217,7 @@ void app_main(void) {
         ESP_LOGW(TAG, "Failed to start web server: %s", esp_err_to_name(ret));
     } else {
         ESP_LOGI(TAG, "Web server started successfully");
-        ESP_LOGI(TAG, "Access web interface at: http://picoide.local (when WiFi connects)");
+        ESP_LOGI(TAG, "Access web interface at: http://%s.local (when WiFi connects)", WIFI_MANAGER_MDNS_HOSTNAME);
     }
 
     ui_update_splash_progress(&display, "Ready!", 100);

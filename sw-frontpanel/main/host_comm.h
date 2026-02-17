@@ -83,6 +83,9 @@ esp_err_t host_comm_start_rp2350_update(host_comm_t *comm);
 // Command status polling (immediate read, doesn't interfere with running commands)
 esp_err_t host_comm_get_command_status(host_comm_t *comm, panel_command_status_t *status);
 
+// Reset host async state (clears any pending operation)
+esp_err_t host_comm_reset(host_comm_t *comm);
+
 const char* host_comm_get_transport_name(host_comm_t *comm);
 
 #ifdef __cplusplus

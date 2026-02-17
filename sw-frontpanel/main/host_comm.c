@@ -110,17 +110,22 @@ static esp_err_t host_comm_poll_async_result(host_comm_t *comm, uint32_t timeout
     bool ready = false;
     uint16_t response_size = 0;
 
+    // Immediate poll before delay loop (reduces latency for fast async ops at 20MHz)
+    esp_err_t ret = transport_poll_async_status(&comm->transport, &ready, &response_size,
+                                                rx_buffer, expected_size);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
     while (elapsed_ms < timeout_ms && !ready) {
         vTaskDelay(pdMS_TO_TICKS(poll_interval_ms));
         elapsed_ms += poll_interval_ms;
 
-        esp_err_t ret = transport_poll_async_status(&comm->transport, &ready, &response_size,
+        ret = transport_poll_async_status(&comm->transport, &ready, &response_size,
                                                     rx_buffer, expected_size);
         if (ret != ESP_OK) {
             return ret;
         }
-
-        /* ESP_LOGI(TAG, "Poll response: ready=%u, size=%u", ready, response_size); */
     }
 
     if (!ready) {
@@ -890,6 +895,27 @@ esp_err_t host_comm_get_command_status(host_comm_t *comm, panel_command_status_t
                                            PANEL_CMD_GET_COMMAND_STATUS, PANEL_ARG_IGNORED,
                                            NULL, 0,
                                            (uint8_t*)status, sizeof(panel_command_status_t));
+
+    HOST_COMM_UNLOCK(comm);
+    return ret;
+}
+
+esp_err_t host_comm_reset(host_comm_t *comm) {
+    if (!comm || !comm->initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    HOST_COMM_LOCK(comm);
+
+    ESP_LOGI(TAG, "Resetting host async state");
+
+    esp_err_t ret = transport_two_phase_transaction(&comm->transport,
+                                                    PANEL_CMD_RESET, PANEL_ARG_IGNORED,
+                                                    NULL, 0,
+                                                    NULL, 0);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to send reset command: %s", esp_err_to_name(ret));
+    }
 
     HOST_COMM_UNLOCK(comm);
     return ret;

@@ -25,6 +25,7 @@
 #include "interface_common.h"
 #include "json_stream.h"
 #include "ota_manager.h"
+#include "wifi_manager.h"
 
 static const char *TAG = "web_server";
 
@@ -46,6 +47,7 @@ static esp_err_t api_mainboard_firmware_check_handler(httpd_req_t *req);
 static esp_err_t api_mainboard_firmware_update_handler(httpd_req_t *req);
 static esp_err_t api_mainboard_firmware_status_handler(httpd_req_t *req);
 static esp_err_t api_upload_handler(httpd_req_t *req);
+static esp_err_t api_mainboard_firmware_upload_handler(httpd_req_t *req);
 static esp_err_t api_download_handler(httpd_req_t *req);
 
 // Global server instance for handlers
@@ -53,6 +55,36 @@ static web_server_t *g_server = NULL;
 
 // Global OTA manager instance
 static ota_manager_t g_ota_manager;
+static TaskHandle_t g_ota_task_handle = NULL;
+
+// Background OTA task - processes OTA update without blocking HTTP handler
+static void web_firmware_update_task(void *pvParameters) {
+    ota_manager_t *ota = (ota_manager_t *)pvParameters;
+
+    while (1) {
+        esp_err_t ret = ota_manager_process(ota);
+        if (ret != ESP_OK && ret != ESP_ERR_NOT_FINISHED) {
+            ESP_LOGE(TAG, "OTA process error: %s", esp_err_to_name(ret));
+            break;
+        }
+
+        ota_state_t state = ota_manager_get_state(ota);
+
+        if (state == OTA_STATE_SUCCESS) {
+            ESP_LOGI(TAG, "Web OTA update successful, restarting in 3 seconds...");
+            vTaskDelay(pdMS_TO_TICKS(3000));
+            esp_restart();
+        } else if (state == OTA_STATE_ERROR) {
+            ESP_LOGE(TAG, "Web OTA update failed");
+            break;
+        }
+
+        taskYIELD();
+    }
+
+    g_ota_task_handle = NULL;
+    vTaskDelete(NULL);
+}
 
 // Embedded file content (gzipped, symbols created by CMakeLists.txt)
 extern const uint8_t index_html_gz_start[] asm("_binary_index_html_gz_start");
@@ -61,6 +93,8 @@ extern const uint8_t app_js_gz_start[] asm("_binary_app_js_gz_start");
 extern const uint8_t app_js_gz_end[] asm("_binary_app_js_gz_end");
 extern const uint8_t sha256_js_gz_start[] asm("_binary_sha256_js_gz_start");
 extern const uint8_t sha256_js_gz_end[] asm("_binary_sha256_js_gz_end");
+extern const uint8_t logo_svg_gz_start[] asm("_binary_logo_svg_gz_start");
+extern const uint8_t logo_svg_gz_end[] asm("_binary_logo_svg_gz_end");
 
 // Static file descriptor for common handler
 typedef struct {
@@ -78,12 +112,16 @@ static const static_file_t file_app_js = {
 static const static_file_t file_sha256_js = {
     sha256_js_gz_start, sha256_js_gz_end, "application/javascript; charset=utf-8"
 };
+static const static_file_t file_logo_svg = {
+    logo_svg_gz_start, logo_svg_gz_end, "image/svg+xml"
+};
 
 // URI handlers
 static const httpd_uri_t uri_handlers[] = {
     { .uri = "/", .method = HTTP_GET, .handler = static_file_handler, .user_ctx = (void *)&file_index_html },
     { .uri = "/app.js", .method = HTTP_GET, .handler = static_file_handler, .user_ctx = (void *)&file_app_js },
     { .uri = "/sha256.js", .method = HTTP_GET, .handler = static_file_handler, .user_ctx = (void *)&file_sha256_js },
+    { .uri = "/logo.svg", .method = HTTP_GET, .handler = static_file_handler, .user_ctx = (void *)&file_logo_svg },
     { .uri = "/api/status", .method = HTTP_GET, .handler = api_status_handler, .user_ctx = NULL },
     { .uri = "/api/images", .method = HTTP_GET, .handler = api_images_handler, .user_ctx = NULL },
     { .uri = "/api/select_entry", .method = HTTP_POST, .handler = api_select_entry_handler, .user_ctx = NULL },
@@ -100,6 +138,7 @@ static const httpd_uri_t uri_handlers[] = {
     { .uri = "/api/firmware/mainboard/update", .method = HTTP_POST, .handler = api_mainboard_firmware_update_handler, .user_ctx = NULL },
     { .uri = "/api/firmware/mainboard/status", .method = HTTP_GET, .handler = api_mainboard_firmware_status_handler, .user_ctx = NULL },
     { .uri = "/api/upload", .method = HTTP_POST, .handler = api_upload_handler, .user_ctx = NULL },
+    { .uri = "/api/firmware/mainboard/upload", .method = HTTP_POST, .handler = api_mainboard_firmware_upload_handler, .user_ctx = NULL },
     { .uri = "/api/download", .method = HTTP_GET, .handler = api_download_handler, .user_ctx = NULL }
 };
 
@@ -161,6 +200,15 @@ static esp_err_t api_status_handler(httpd_req_t *req) {
         ret = json.write("uptime", (uint32_t)(esp_log_timestamp() / 1000));
         if (ret != ESP_OK) return ret;
     }
+
+    ret = json.write("product_name", PRODUCT_NAME_SHORT);
+    if (ret != ESP_OK) return ret;
+    ret = json.write("product_full", PRODUCT_NAME_FULL);
+    if (ret != ESP_OK) return ret;
+    ret = json.write("hostname", WIFI_MANAGER_MDNS_HOSTNAME);
+    if (ret != ESP_OK) return ret;
+    ret = json.write("logo_url", PRODUCT_LOGO_URL);
+    if (ret != ESP_OK) return ret;
 
     ret = json.endObject();
     if (ret != ESP_OK) return ret;
@@ -897,11 +945,25 @@ static esp_err_t api_firmware_update_handler(httpd_req_t *req) {
     if (ret != ESP_OK) return ret;
 
     bool success = false;
-    if (g_server && g_server->interface_ctx && g_server->interface_ctx->host_comm) {
+    if (g_ota_task_handle != NULL) {
+        ret = json.write("error", "Update already in progress");
+        if (ret != ESP_OK) return ret;
+    } else if (g_server && g_server->interface_ctx && g_server->interface_ctx->host_comm) {
         esp_err_t update_ret = ota_manager_start_update(&g_ota_manager);
         success = (update_ret == ESP_OK);
 
-        if (!success) {
+        if (success) {
+            // Start background task to process OTA
+            BaseType_t task_ret = xTaskCreate(web_firmware_update_task, "web_ota",
+                                              8192, &g_ota_manager, 10, &g_ota_task_handle);
+            if (task_ret != pdPASS) {
+                ESP_LOGE(TAG, "Failed to create OTA task");
+                ota_manager_abort(&g_ota_manager);
+                success = false;
+                ret = json.write("error", "Failed to create update task");
+                if (ret != ESP_OK) return ret;
+            }
+        } else {
             ret = json.write("error", esp_err_to_name(update_ret));
             if (ret != ESP_OK) return ret;
         }
@@ -926,8 +988,8 @@ static esp_err_t api_firmware_status_handler(httpd_req_t *req) {
     esp_err_t ret = json.beginObject();
     if (ret != ESP_OK) return ret;
 
-    // Process OTA manager to update state
-    ota_manager_process(&g_ota_manager);
+    // OTA processing happens in background task (web_firmware_update_task),
+    // so we just read the current state here without calling ota_manager_process.
 
     // Get current state
     ota_state_t state = ota_manager_get_state(&g_ota_manager);
@@ -1031,6 +1093,8 @@ static esp_err_t api_mainboard_firmware_check_handler(httpd_req_t *req) {
     return json.finalize();
 }
 
+// For PicoIDE: main board firmware is read from SD card by the RP2350, updated via SPI command.
+// For BlueSCSI: main board firmware is uploaded via web UI to SD card, then applied on reboot.
 static esp_err_t api_mainboard_firmware_update_handler(httpd_req_t *req) {
     httpd_resp_set_type(req, "application/json");
 
@@ -1165,8 +1229,8 @@ static inline char* strnmem(const void* haystack, const char* needle, size_t hay
     return (char *)memmem(haystack, haystacklen, needle, strlen(needle));
 }
 
-static esp_err_t api_upload_handler(httpd_req_t *req) {
-    ESP_LOGI(TAG, "Upload request received");
+static esp_err_t handle_file_upload(httpd_req_t *req, const char *path_prefix) {
+    ESP_LOGI(TAG, "Upload request received (prefix: \"%s\")", path_prefix);
 
     // Reset upload state
     memset(&g_upload_state, 0, sizeof(g_upload_state));
@@ -1265,9 +1329,9 @@ static esp_err_t api_upload_handler(httpd_req_t *req) {
         return ESP_FAIL;
     }
 
-    // Set target path (filename should be full path from client)
-    strncpy(g_upload_state.target_path, g_upload_state.filename, sizeof(g_upload_state.target_path) - 1);
-    g_upload_state.target_path[sizeof(g_upload_state.target_path) - 1] = '\0';
+    // Set target path using path_prefix + filename
+    snprintf(g_upload_state.target_path, sizeof(g_upload_state.target_path),
+             "%s%s", path_prefix, g_upload_state.filename);
 
     // Look for start of file data (after the file field headers)
     if (filename_start) {
@@ -1278,7 +1342,6 @@ static esp_err_t api_upload_handler(httpd_req_t *req) {
             file_data_start = data_start - chunk_buffer;
             ESP_LOGI(TAG, "File data starts at offset: %u", file_data_start);
         }
-        // ESP_LOGI(TAG, "buffer starting at data_start: %c\n", tmp);
     }
 
     // Start file upload to RP2350
@@ -1293,7 +1356,7 @@ static esp_err_t api_upload_handler(httpd_req_t *req) {
     host_comm_t *host_comm = g_server->interface_ctx->host_comm;
 
     // Start file upload on RP2350 with actual file size
-    esp_err_t ret = host_comm_start_file_upload(host_comm, g_upload_state.filename, actual_file_size);
+    esp_err_t ret = host_comm_start_file_upload(host_comm, g_upload_state.target_path, actual_file_size);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start file upload: %s", esp_err_to_name(ret));
         free(chunk_buffer);
@@ -1303,7 +1366,8 @@ static esp_err_t api_upload_handler(httpd_req_t *req) {
     }
 
     // Process file data from the first chunk
-    if (file_data_start > 0 && file_data_start < received) {
+    uint32_t file_data_sent = 0;
+    if (file_data_start > 0 && (uint32_t)file_data_start < (uint32_t)received) {
         size_t first_chunk_data_size = received - file_data_start;
         // Cap at actual file size (don't include trailing multipart boundary for small files)
         if (first_chunk_data_size > actual_file_size) {
@@ -1311,8 +1375,6 @@ static esp_err_t api_upload_handler(httpd_req_t *req) {
         }
         ESP_LOGI(TAG, "Processing first chunk data: %d bytes", first_chunk_data_size);
 
-        // Since we're now reading in 256-byte chunks, this should always fit
-        // But let's be safe and check anyway
         if (first_chunk_data_size > PANEL_FILE_CHUNK_SIZE) {
             ESP_LOGE(TAG, "First chunk data too large: %d bytes (max %d)",
                      first_chunk_data_size, PANEL_FILE_CHUNK_SIZE);
@@ -1333,6 +1395,7 @@ static esp_err_t api_upload_handler(httpd_req_t *req) {
             return ESP_FAIL;
         }
 
+        file_data_sent = first_chunk_data_size;
         g_upload_state.bytes_received += first_chunk_data_size;
     }
 
@@ -1416,7 +1479,7 @@ static esp_err_t api_upload_handler(httpd_req_t *req) {
     hash_hex[64] = '\0';
 
     ESP_LOGI(TAG, "File upload completed successfully: %s (%u bytes), SHA256: %s",
-             g_upload_state.filename, g_upload_state.bytes_received, hash_hex);
+             g_upload_state.target_path, g_upload_state.bytes_received, hash_hex);
 
     // Send success response with hash
     httpd_resp_set_type(req, "application/json");
@@ -1444,6 +1507,16 @@ static esp_err_t api_upload_handler(httpd_req_t *req) {
     if (ret != ESP_OK) return ret;
 
     return json.finalize();
+}
+
+// Thin wrapper: regular file upload (JS sends full path in filename)
+static esp_err_t api_upload_handler(httpd_req_t *req) {
+    return handle_file_upload(req, "");
+}
+
+// Thin wrapper: mainboard firmware upload (prefix "/" to ensure root path)
+static esp_err_t api_mainboard_firmware_upload_handler(httpd_req_t *req) {
+    return handle_file_upload(req, "/");
 }
 
 // File download handler - downloads a file from the main board SD card
