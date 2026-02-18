@@ -230,6 +230,15 @@ static void handle_button_event(button_event_t *event) {
                                 ESP_LOGI(TAG, "Loading directory list...");
                                 refresh_directory_list();
                             }
+                            // Show target device in title when multiple devices exist
+                            const char *label = get_active_device_label();
+                            if (label) {
+                                static char disc_title[48];
+                                snprintf(disc_title, sizeof(disc_title), "%.47s", label);
+                                disc_menu.title = disc_title;
+                            } else {
+                                disc_menu.title = "Select Image";
+                            }
                             current_screen = SCREEN_DISC_LIST;
                         } else if (selected == offset + 1) { // "Eject Image"
                             if (current_device_type == PANEL_DEVICE_TYPE_IDE) {
@@ -633,24 +642,38 @@ static void refresh_playback_status(void) {
     } else if (!current_playback_status.disc_inserted) {
         strncpy(current_disc_name, "No disc loaded", sizeof(current_disc_name) - 1);
         current_disc_name[sizeof(current_disc_name) - 1] = '\0';
-    } else {
-        // Copy disc name from playback status
+    } else if (current_playback_status.disc_name[0]) {
+        // PicoIDE: disc_name provided in playback status
         strncpy(current_disc_name, current_playback_status.disc_name, sizeof(current_disc_name) - 1);
         current_disc_name[sizeof(current_disc_name) - 1] = '\0';
+    } else {
+        // BlueSCSI: disc_name not in playback status (ISR can't call getFilename),
+        // fetch it via GET_LOADED_IMAGE_STATUS which runs in the main loop.
+        ret = host_comm_get_loaded_image_status(&host_comm, active_device_index, &current_image_status);
+        if (ret == ESP_OK && current_image_status.image_loaded) {
+            strncpy(current_disc_name, current_image_status.image_name, sizeof(current_disc_name) - 1);
+            current_disc_name[sizeof(current_disc_name) - 1] = '\0';
+            current_device_type = current_image_status.device_type;
+        } else {
+            strncpy(current_disc_name, "No disc loaded", sizeof(current_disc_name) - 1);
+            current_disc_name[sizeof(current_disc_name) - 1] = '\0';
+        }
     }
 
     // Check if disc name actually changed (for fetching full image status and resetting scroll)
     bool name_changed = (strcmp(old_disc_name, current_disc_name) != 0);
 
-    // Fetch loaded image status when disc name changed (reduces SPI traffic)
     if (name_changed) {
         disc_name_changed = true;  // Reset scroll animation
-        ret = host_comm_get_loaded_image_status(&host_comm, active_device_index, &current_image_status);
-        if (ret != ESP_OK) {
-            ESP_LOGW(TAG, "Failed to get loaded image status: %s", esp_err_to_name(ret));
-            memset(&current_image_status, 0, sizeof(current_image_status));
-        } else {
-            current_device_type = current_image_status.device_type;
+        // Fetch loaded image status if not already done above
+        if (current_playback_status.disc_name[0]) {
+            ret = host_comm_get_loaded_image_status(&host_comm, active_device_index, &current_image_status);
+            if (ret != ESP_OK) {
+                ESP_LOGW(TAG, "Failed to get loaded image status: %s", esp_err_to_name(ret));
+                memset(&current_image_status, 0, sizeof(current_image_status));
+            } else {
+                current_device_type = current_image_status.device_type;
+            }
         }
     }
 
@@ -1237,7 +1260,8 @@ void app_main(void) {
     };
 
     ui_update_splash_progress(&display, "Establish comms...", 55);
-    vTaskDelay(pdMS_TO_TICKS(1000));
+    ESP_LOGI(TAG, "Waiting %d ms for main board startup...", HOST_STARTUP_DELAY_MS);
+    vTaskDelay(pdMS_TO_TICKS(HOST_STARTUP_DELAY_MS));
     ret = host_comm_init(&host_comm, &transport_cfg);
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "Failed to initialize host comm: %s", esp_err_to_name(ret));

@@ -45,11 +45,18 @@
 #ifdef TRANSPORT_USE_SPI
 #define HOST_DEVICE_ADDR    -1         // SPI has no device addr
 #define SPI_MODE            0          // SPI mode (0-3)
-#define HOST_CLOCK_SPEED    20000000    // 20MHz for SPI
+#define HOST_CLOCK_SPEED    10000000    // 10MHz for SPI (matches PicoIDE)
 #define SPI_MAX_TRANSFER    4096       // Maximum transfer size in bytes
 // Delay between header and payload phases
 // No longer needed since IRQ handler debug prints are disabled by default on main board
 #define SPI_INTER_PHASE_DELAY_US  0
+#endif
+
+// Startup delay: time to wait for main board to be ready before first comm attempt
+#ifdef CONFIG_PRODUCT_BLUESCSI
+#define HOST_STARTUP_DELAY_MS  5000     // BlueSCSI needs more time to initialize
+#else
+#define HOST_STARTUP_DELAY_MS  1000     // PicoIDE starts quickly
 #endif
 
 #endif // TRANSPORT_CONFIG_H

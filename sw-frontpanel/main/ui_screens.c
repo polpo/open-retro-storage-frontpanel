@@ -798,7 +798,7 @@ esp_err_t ui_draw_status_screen(display_manager_t *display, const char *disc_nam
                      (unsigned long)size_mb);
             display_manager_draw_text(display, 16, y, chs_line);
         } else {
-            display_manager_draw_text(display, 16, y, "IDE Hard Disk");
+            display_manager_draw_text(display, 16, y, "Hard Disk");
         }
     } else {
         // Data CD-ROM
