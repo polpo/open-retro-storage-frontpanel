@@ -33,6 +33,7 @@ typedef enum {
     SCREEN_INFO,
     SCREEN_FIRMWARE_UPDATE,
     SCREEN_FIRMWARE_STATUS,
+    SCREEN_DEVICE_SELECT,
     SCREEN_COUNT  // Sentinel - must be last
 } screen_type_t;
 
@@ -47,7 +48,8 @@ esp_err_t ui_draw_firmware_update(display_manager_t *display, const char *status
 esp_err_t ui_draw_status_screen(display_manager_t *display, const char *disc_name,
                                const loaded_image_status_t *image_status,
                                const playback_status_t *playback_status,
-                               bool title_changed);
+                               bool title_changed,
+                               const char *device_label);
 bool ui_animate_status_screen(display_manager_t *display);
 bool ui_menu_needs_animation(menu_t *menu);
 bool ui_animate_menu(display_manager_t *display, menu_t *menu);

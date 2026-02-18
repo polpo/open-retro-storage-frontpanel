@@ -46,6 +46,7 @@ static menu_t main_menu;
 static menu_t disc_menu;
 static menu_t wifi_menu;
 static menu_t settings_menu;
+static menu_t device_menu;
 static menu_t *active_menu = NULL;  // Pointer to currently displayed menu
 static screen_type_t info_return_screen = SCREEN_MAIN_MENU;  // Screen to return to from SCREEN_INFO
 
@@ -55,6 +56,7 @@ static menu_t* screen_menus[SCREEN_COUNT] = {
     [SCREEN_DISC_LIST] = &disc_menu,
     [SCREEN_SETTINGS] = &settings_menu,
     [SCREEN_WIFI_MENU] = &wifi_menu,
+    [SCREEN_DEVICE_SELECT] = &device_menu,
 };
 static host_comm_t host_comm;
 static wifi_manager_t wifi_manager;
@@ -74,6 +76,13 @@ static loaded_image_status_t current_image_status = {0};  // Full image status i
 // Device type (IDE vs ATAPI) - affects available operations
 static uint8_t current_device_type = PANEL_DEVICE_TYPE_ATAPI;  // Default to ATAPI
 
+// Multi-device support
+static uint8_t device_count = 0;
+static uint16_t active_device_index = 0;
+static uint8_t device_list_buffer[sizeof(device_list_response_t) + CONFIG_MAX_DEVICES * sizeof(device_summary_t)];
+static device_list_response_t *device_list = (device_list_response_t *)device_list_buffer;
+static bool device_list_valid = false;
+
 // Firmware status tracking
 static rp2350_fw_status_t rp2350_fw_status = {0};
 static panel_firmware_info_t panel_fw_info = {0};
@@ -84,6 +93,9 @@ static uint8_t fw_screen_selection = 0;  // 0=Panel, 1=Main board
 static esp_err_t refresh_directory_list(void);
 static void refresh_playback_status(void);
 static void refresh_device_type(void);
+static void refresh_device_list(void);
+static void populate_device_menu(void);
+static const char* get_active_device_label(void);
 static void check_firmware_status(void);
 static void draw_firmware_status_screen(void);
 static void trigger_panel_update(void);
@@ -105,6 +117,14 @@ static void handle_activity_event(activity_event_t *event) {
 }
 
 static menu_item_t main_menu_items[] = {
+    {.text = "Select Image", .action = MENU_ACTION_CUSTOM, .selectable = true},
+    {.text = "Eject Image", .action = MENU_ACTION_CUSTOM, .selectable = true},
+    {.text = "Settings", .action = MENU_ACTION_CUSTOM, .selectable = true},
+    {.text = "System Info", .action = MENU_ACTION_CUSTOM, .selectable = true},
+};
+
+static menu_item_t main_menu_items_multi[] = {
+    {.text = "Select Device", .action = MENU_ACTION_CUSTOM, .selectable = true},
     {.text = "Select Image", .action = MENU_ACTION_CUSTOM, .selectable = true},
     {.text = "Eject Image", .action = MENU_ACTION_CUSTOM, .selectable = true},
     {.text = "Settings", .action = MENU_ACTION_CUSTOM, .selectable = true},
@@ -145,7 +165,7 @@ static void handle_button_event(button_event_t *event) {
                 case 0: // Up button (North) - Previous image
                     if (event->type == BUTTON_EVENT_CLICK) {
                         if (host_comm.initialized && current_image_status.image_loaded) {
-                            esp_err_t ret = host_comm_select_prev_image(&host_comm);
+                            esp_err_t ret = host_comm_select_prev_image(&host_comm, active_device_index);
                             if (ret == ESP_OK) {
                                 refresh_playback_status();
                             }
@@ -160,7 +180,7 @@ static void handle_button_event(button_event_t *event) {
                 case 2: // Down button (South) - Next image
                     if (event->type == BUTTON_EVENT_CLICK) {
                         if (host_comm.initialized && current_image_status.image_loaded) {
-                            esp_err_t ret = host_comm_select_next_image(&host_comm);
+                            esp_err_t ret = host_comm_select_next_image(&host_comm, active_device_index);
                             if (ret == ESP_OK) {
                                 refresh_playback_status();
                             }
@@ -170,7 +190,7 @@ static void handle_button_event(button_event_t *event) {
                 case 3: // Back button (West) - Eject (ATAPI only)
                     if (event->type == BUTTON_EVENT_CLICK) {
                         if (current_device_type != PANEL_DEVICE_TYPE_IDE && host_comm.initialized) {
-                            esp_err_t ret = host_comm_eject_image(&host_comm);
+                            esp_err_t ret = host_comm_eject_image(&host_comm, active_device_index);
                             if (ret == ESP_OK) {
                                 refresh_playback_status();
                                 ESP_LOGI(TAG, "Image ejected from status screen");
@@ -198,14 +218,20 @@ static void handle_button_event(button_event_t *event) {
                 case 1: // Select button (East)
                     if (event->type == BUTTON_EVENT_CLICK) {
                         uint32_t selected = menu_get_selected_index(&main_menu);
-                        if (selected == 0) { // "Select Image"
+                        // In multi-device mode, "Select Device" is item 0, shifting others by 1
+                        uint32_t offset = (device_count > 1) ? 1 : 0;
+
+                        if (device_count > 1 && selected == 0) { // "Select Device"
+                            populate_device_menu();
+                            current_screen = SCREEN_DEVICE_SELECT;
+                        } else if (selected == offset + 0) { // "Select Image"
                             // Refresh directory list before showing it
                             if (!disc_list_loaded && host_comm.initialized) {
                                 ESP_LOGI(TAG, "Loading directory list...");
                                 refresh_directory_list();
                             }
                             current_screen = SCREEN_DISC_LIST;
-                        } else if (selected == 1) { // "Eject Image"
+                        } else if (selected == offset + 1) { // "Eject Image"
                             if (current_device_type == PANEL_DEVICE_TYPE_IDE) {
                                 // IDE mode: eject not supported
                                 info_return_screen = SCREEN_MAIN_MENU;
@@ -213,7 +239,7 @@ static void handle_button_event(button_event_t *event) {
                                 ui_draw_info_screen(&display, "Not Available",
                                     "Eject is not available\nin IDE mode.\n\nUse Select Image to\nchoose a different\nhard disk image.");
                             } else if (host_comm.initialized) {
-                                esp_err_t ret = host_comm_eject_image(&host_comm);
+                                esp_err_t ret = host_comm_eject_image(&host_comm, active_device_index);
                                 if (ret == ESP_OK) {
                                     ESP_LOGI(TAG, "Image ejected");
                                     current_screen = SCREEN_STATUS;
@@ -223,9 +249,9 @@ static void handle_button_event(button_event_t *event) {
                                     handle_comm_error(ret);
                                 }
                             }
-                        } else if (selected == 2) { // "Settings"
+                        } else if (selected == offset + 2) { // "Settings"
                             current_screen = SCREEN_SETTINGS;
-                        } else if (selected == 3) { // "System Info"
+                        } else if (selected == offset + 3) { // "System Info"
                             info_return_screen = SCREEN_MAIN_MENU;
                             current_screen = SCREEN_INFO;
                             const esp_app_desc_t* info_app_desc = esp_app_get_description();
@@ -287,7 +313,7 @@ static void handle_button_event(button_event_t *event) {
                                 // Check if this is directory navigation (".." or "[directory]")
                                 bool is_directory = (selected == 0) || (selected_item->text[0] == '[');
 
-                                esp_err_t ret = host_comm_select_entry(&host_comm, entry_index);
+                                esp_err_t ret = host_comm_select_entry(&host_comm, entry_index, active_device_index);
                                 if (ret == ESP_OK) {
                                     if (is_directory) {
                                         // Directory navigation: refresh the list
@@ -435,6 +461,40 @@ static void handle_button_event(button_event_t *event) {
             }
             break;
 
+        case SCREEN_DEVICE_SELECT:
+            switch (event->button_id) {
+                case 0: // Up button (North)
+                    if (event->type == BUTTON_EVENT_CLICK || event->type == BUTTON_EVENT_REPEAT) {
+                        menu_navigate_up(&device_menu);
+                    }
+                    break;
+                case 2: // Down button (South)
+                    if (event->type == BUTTON_EVENT_CLICK || event->type == BUTTON_EVENT_REPEAT) {
+                        menu_navigate_down(&device_menu);
+                    }
+                    break;
+                case 1: // Select button (East)
+                    if (event->type == BUTTON_EVENT_CLICK && device_list_valid) {
+                        uint32_t selected = menu_get_selected_index(&device_menu);
+                        if (selected < device_list->device_count) {
+                            active_device_index = device_list->devices[selected].device_index;
+                            interface_ctx.active_device_index = active_device_index;
+                            ESP_LOGI(TAG, "Selected device %u: %s",
+                                     active_device_index,
+                                     device_list->devices[selected].device_label);
+                            current_screen = SCREEN_STATUS;
+                            refresh_playback_status();
+                        }
+                    }
+                    break;
+                case 3: // Back button (West)
+                    if (event->type == BUTTON_EVENT_CLICK) {
+                        current_screen = SCREEN_MAIN_MENU;
+                    }
+                    break;
+            }
+            break;
+
         case SCREEN_INFO:
             if (event->type == BUTTON_EVENT_CLICK && event->button_id == 3) {
                 // Back button - return to previous screen
@@ -511,7 +571,8 @@ static void display_update_task(void *pvParameters) {
                     ui_draw_status_screen(&display, current_disc_name,
                                           &current_image_status,
                                           &current_playback_status,
-                                          screen_changed || disc_name_changed);
+                                          screen_changed || disc_name_changed,
+                                          get_active_device_label());
                     disc_name_changed = false;
                     status_needs_redraw = false;
                 } else {
@@ -563,7 +624,7 @@ static void refresh_playback_status(void) {
         return;
     }
 
-    esp_err_t ret = host_comm_get_playback_status(&host_comm, &current_playback_status);
+    esp_err_t ret = host_comm_get_playback_status(&host_comm, active_device_index, &current_playback_status);
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "Failed to get playback status: %s", esp_err_to_name(ret));
         memset(&current_playback_status, 0, sizeof(current_playback_status));
@@ -584,7 +645,7 @@ static void refresh_playback_status(void) {
     // Fetch loaded image status when disc name changed (reduces SPI traffic)
     if (name_changed) {
         disc_name_changed = true;  // Reset scroll animation
-        ret = host_comm_get_loaded_image_status(&host_comm, &current_image_status);
+        ret = host_comm_get_loaded_image_status(&host_comm, active_device_index, &current_image_status);
         if (ret != ESP_OK) {
             ESP_LOGW(TAG, "Failed to get loaded image status: %s", esp_err_to_name(ret));
             memset(&current_image_status, 0, sizeof(current_image_status));
@@ -608,12 +669,68 @@ static void refresh_device_type(void) {
     }
 
     loaded_image_status_t status;
-    esp_err_t ret = host_comm_get_loaded_image_status(&host_comm, &status);
+    esp_err_t ret = host_comm_get_loaded_image_status(&host_comm, active_device_index, &status);
     if (ret == ESP_OK) {
         current_device_type = status.device_type;
         ESP_LOGI(TAG, "Device type: %s",
                  current_device_type == PANEL_DEVICE_TYPE_IDE ? "IDE (Hard Disk)" : "ATAPI (CD-ROM)");
     }
+}
+
+// Function to refresh device list from host
+static void refresh_device_list(void) {
+    if (!host_comm.initialized) {
+        return;
+    }
+
+    esp_err_t ret = host_comm_get_device_list(&host_comm, device_list, sizeof(device_list_buffer));
+    if (ret == ESP_OK) {
+        device_count = device_list->device_count;
+        device_list_valid = true;
+        ESP_LOGI(TAG, "Device list: %u devices (max %u)", device_count, device_list->max_devices);
+    } else {
+        ESP_LOGW(TAG, "Failed to get device list: %s (single device assumed)", esp_err_to_name(ret));
+        // Assume single device if command not supported
+        device_count = 1;
+        device_list_valid = false;
+    }
+}
+
+// Populate the device select menu from cached device list
+static void populate_device_menu(void) {
+    menu_clear_items(&device_menu);
+
+    if (!device_list_valid || device_count == 0) {
+        menu_add_item(&device_menu, "No devices", MENU_ACTION_SELECT, NULL, NULL);
+        return;
+    }
+
+    for (uint8_t i = 0; i < device_list->device_count; i++) {
+        char label[MENU_ITEM_MAX_LENGTH];
+        if (device_list->devices[i].image_name[0]) {
+            snprintf(label, sizeof(label), "%.28s: %.32s",
+                     device_list->devices[i].device_label,
+                     device_list->devices[i].image_name);
+        } else {
+            snprintf(label, sizeof(label), "%.28s: [empty]",
+                     device_list->devices[i].device_label);
+        }
+        menu_add_item(&device_menu, label, MENU_ACTION_SELECT, NULL, NULL);
+    }
+}
+
+// Get the device label for the currently active device (for status screen header)
+static const char* get_active_device_label(void) {
+    if (device_count <= 1 || !device_list_valid) {
+        return NULL;  // Single device, no label needed
+    }
+
+    for (uint8_t i = 0; i < device_list->device_count; i++) {
+        if (device_list->devices[i].device_index == active_device_index) {
+            return device_list->devices[i].device_label;
+        }
+    }
+    return NULL;
 }
 
 // Function to refresh directory entry list from host
@@ -1106,6 +1223,9 @@ void app_main(void) {
     menu_set_items(&wifi_menu, wifi_menu_items,
                   sizeof(wifi_menu_items) / sizeof(wifi_menu_items[0]));
 
+    menu_init(&device_menu, MENU_VISIBLE_ITEMS_WITH_TITLE);
+    device_menu.title = "Select Device";
+
     transport_config_t transport_cfg = {
         .device_addr = HOST_DEVICE_ADDR,
         .sda_miso = PIN_SDA,
@@ -1126,7 +1246,7 @@ void app_main(void) {
                  host_comm_get_transport_name(&host_comm));
 
         uint8_t test_status;
-        ret = host_comm_get_device_status(&host_comm, &test_status);
+        ret = host_comm_get_device_status(&host_comm, 0, &test_status);
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "Failed to communicate with main board: %s", esp_err_to_name(ret));
             led_stop_pulse();
@@ -1169,6 +1289,16 @@ void app_main(void) {
             // Get device type (IDE vs ATAPI)
             refresh_device_type();
 
+            // Get device list for multi-device support
+            refresh_device_list();
+
+            // Switch to multi-device main menu if multiple devices found
+            if (device_count > 1) {
+                menu_set_items(&main_menu, main_menu_items_multi,
+                              sizeof(main_menu_items_multi) / sizeof(main_menu_items_multi[0]));
+                ESP_LOGI(TAG, "Multi-device mode: %u devices", device_count);
+            }
+
             ESP_LOGI(TAG, "Fetching directory list at startup...");
             ui_update_splash_progress(&display, "Load directory...", 70);
             esp_err_t disc_ret = refresh_directory_list();
@@ -1207,6 +1337,7 @@ void app_main(void) {
 
     interface_ctx.host_comm = &host_comm;
     interface_ctx.wifi_manager = &wifi_manager;
+    interface_ctx.active_device_index = active_device_index;
 
     web_server_set_interface_context(&web_server, &interface_ctx);
 
@@ -1230,7 +1361,8 @@ void app_main(void) {
     refresh_playback_status();
     ui_draw_status_screen(&display, current_disc_name,
                           &current_image_status,
-                          &current_playback_status, disc_name_changed);
+                          &current_playback_status, disc_name_changed,
+                          get_active_device_label());
     disc_name_changed = false;
     status_needs_redraw = false;
 

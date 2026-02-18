@@ -46,12 +46,31 @@ static esp_err_t api_firmware_status_handler(httpd_req_t *req);
 static esp_err_t api_mainboard_firmware_check_handler(httpd_req_t *req);
 static esp_err_t api_mainboard_firmware_update_handler(httpd_req_t *req);
 static esp_err_t api_mainboard_firmware_status_handler(httpd_req_t *req);
+static esp_err_t api_devices_handler(httpd_req_t *req);
 static esp_err_t api_upload_handler(httpd_req_t *req);
 static esp_err_t api_mainboard_firmware_upload_handler(httpd_req_t *req);
 static esp_err_t api_download_handler(httpd_req_t *req);
 
 // Global server instance for handlers
 static web_server_t *g_server = NULL;
+
+// Helper: extract device index from optional JSON body, falling back to active_device_index
+static uint16_t get_device_from_body(httpd_req_t *req) {
+    uint16_t default_device = (g_server && g_server->interface_ctx)
+        ? g_server->interface_ctx->active_device_index : 0;
+    if (req->content_len == 0 || req->content_len > 256) return default_device;
+    char buf[256];
+    int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
+    if (len <= 0) return default_device;
+    buf[len] = '\0';
+    cJSON *json = cJSON_Parse(buf);
+    if (!json) return default_device;
+    cJSON *dev = cJSON_GetObjectItem(json, "device");
+    uint16_t result = default_device;
+    if (cJSON_IsNumber(dev)) result = (uint16_t)dev->valueint;
+    cJSON_Delete(json);
+    return result;
+}
 
 // Global OTA manager instance
 static ota_manager_t g_ota_manager;
@@ -123,6 +142,7 @@ static const httpd_uri_t uri_handlers[] = {
     { .uri = "/sha256.js", .method = HTTP_GET, .handler = static_file_handler, .user_ctx = (void *)&file_sha256_js },
     { .uri = "/logo.svg", .method = HTTP_GET, .handler = static_file_handler, .user_ctx = (void *)&file_logo_svg },
     { .uri = "/api/status", .method = HTTP_GET, .handler = api_status_handler, .user_ctx = NULL },
+    { .uri = "/api/devices", .method = HTTP_GET, .handler = api_devices_handler, .user_ctx = NULL },
     { .uri = "/api/images", .method = HTTP_GET, .handler = api_images_handler, .user_ctx = NULL },
     { .uri = "/api/select_entry", .method = HTTP_POST, .handler = api_select_entry_handler, .user_ctx = NULL },
     { .uri = "/api/eject_image", .method = HTTP_POST, .handler = api_eject_image_handler, .user_ctx = NULL },
@@ -216,6 +236,85 @@ static esp_err_t api_status_handler(httpd_req_t *req) {
     return json.finalize();
 }
 
+static esp_err_t api_devices_handler(httpd_req_t *req) {
+    httpd_resp_set_type(req, "application/json");
+
+    JsonStreamWriter json(req);
+    esp_err_t ret = json.beginObject();
+    if (ret != ESP_OK) return ret;
+
+    if (g_server && g_server->interface_ctx) {
+        uint16_t active_device = g_server->interface_ctx->active_device_index;
+        ret = json.write("active_device", (int)active_device);
+        if (ret != ESP_OK) return ret;
+
+        // Get device list from host
+        uint8_t buf[sizeof(device_list_response_t) + CONFIG_MAX_DEVICES * sizeof(device_summary_t)];
+        device_list_response_t *list = (device_list_response_t *)buf;
+
+        esp_err_t list_ret = interface_get_device_list(g_server->interface_ctx, list, sizeof(buf));
+
+        if (list_ret == ESP_OK) {
+            ret = json.write("device_count", (int)list->device_count);
+            if (ret != ESP_OK) return ret;
+
+            ret = json.writeKey("devices");
+            if (ret != ESP_OK) return ret;
+            ret = json.beginArray();
+            if (ret != ESP_OK) return ret;
+
+            for (uint8_t i = 0; i < list->device_count; i++) {
+                ret = json.beginObject();
+                if (ret != ESP_OK) return ret;
+
+                ret = json.write("index", (int)list->devices[i].device_index);
+                if (ret != ESP_OK) return ret;
+                ret = json.write("type", (int)list->devices[i].device_type);
+                if (ret != ESP_OK) return ret;
+                ret = json.write("status", (int)list->devices[i].device_status);
+                if (ret != ESP_OK) return ret;
+                ret = json.write("label", list->devices[i].device_label);
+                if (ret != ESP_OK) return ret;
+                ret = json.write("image", list->devices[i].image_name);
+                if (ret != ESP_OK) return ret;
+
+                ret = json.endObject();
+                if (ret != ESP_OK) return ret;
+            }
+
+            ret = json.endArray();
+            if (ret != ESP_OK) return ret;
+        } else {
+            ret = json.write("device_count", 0);
+            if (ret != ESP_OK) return ret;
+            ret = json.writeKey("devices");
+            if (ret != ESP_OK) return ret;
+            ret = json.beginArray();
+            if (ret != ESP_OK) return ret;
+            ret = json.endArray();
+            if (ret != ESP_OK) return ret;
+            ret = json.write("error", esp_err_to_name(list_ret));
+            if (ret != ESP_OK) return ret;
+        }
+    } else {
+        ret = json.write("active_device", 0);
+        if (ret != ESP_OK) return ret;
+        ret = json.write("device_count", 0);
+        if (ret != ESP_OK) return ret;
+        ret = json.writeKey("devices");
+        if (ret != ESP_OK) return ret;
+        ret = json.beginArray();
+        if (ret != ESP_OK) return ret;
+        ret = json.endArray();
+        if (ret != ESP_OK) return ret;
+    }
+
+    ret = json.endObject();
+    if (ret != ESP_OK) return ret;
+
+    return json.finalize();
+}
+
 // HTTP response writer for ArduinoJson streaming
 class HttpResponseWriter {
 public:
@@ -254,11 +353,26 @@ static esp_err_t api_images_handler(httpd_req_t *req) {
         ret = json.write("current_path", current_path);
         if (ret != ESP_OK) return ret;
 
+        // Get device index from query parameter or use active device
+        uint16_t device_index = g_server->interface_ctx->active_device_index;
+        {
+            size_t query_len = httpd_req_get_url_query_len(req);
+            if (query_len > 0 && query_len < 64) {
+                char query[64];
+                if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+                    char device_str[8];
+                    if (httpd_query_key_value(query, "device", device_str, sizeof(device_str)) == ESP_OK) {
+                        device_index = (uint16_t)atoi(device_str);
+                    }
+                }
+            }
+        }
+
         // Get loaded image status
         loaded_image_status_t image_status = {0};
         bool have_image_status = false;
         if (host_comm && host_comm->initialized) {
-            have_image_status = (host_comm_get_loaded_image_status(host_comm, &image_status) == ESP_OK);
+            have_image_status = (host_comm_get_loaded_image_status(host_comm, device_index, &image_status) == ESP_OK);
         }
 
         if (have_image_status && image_status.image_loaded) {
@@ -368,6 +482,12 @@ static esp_err_t api_select_entry_handler(httpd_req_t *req) {
 
     int32_t entry_index = (int32_t)entry_index_json->valueint;
 
+    // Parse optional device field, falling back to active_device_index
+    cJSON *device_json = cJSON_GetObjectItem(json, "device");
+    uint16_t device_index = (g_server && g_server->interface_ctx)
+        ? g_server->interface_ctx->active_device_index : 0;
+    if (cJSON_IsNumber(device_json)) device_index = (uint16_t)device_json->valueint;
+
     // Send command to host
     httpd_resp_set_type(req, "application/json");
 
@@ -380,7 +500,7 @@ static esp_err_t api_select_entry_handler(httpd_req_t *req) {
 
     bool success = false;
     if (g_server && g_server->interface_ctx) {
-        esp_err_t select_ret = interface_select_entry(g_server->interface_ctx, entry_index);
+        esp_err_t select_ret = interface_select_entry(g_server->interface_ctx, entry_index, device_index);
         success = (select_ret == ESP_OK);
         if (!success) {
             json_ret = json_writer.write("error", esp_err_to_name(select_ret));
@@ -414,6 +534,8 @@ static esp_err_t api_select_entry_handler(httpd_req_t *req) {
 }
 
 static esp_err_t api_eject_image_handler(httpd_req_t *req) {
+    uint16_t device_index = get_device_from_body(req);
+
     httpd_resp_set_type(req, "application/json");
 
     JsonStreamWriter json(req);
@@ -422,7 +544,7 @@ static esp_err_t api_eject_image_handler(httpd_req_t *req) {
 
     bool success = false;
     if (g_server && g_server->interface_ctx) {
-        esp_err_t eject_ret = interface_eject_image(g_server->interface_ctx);
+        esp_err_t eject_ret = interface_eject_image(g_server->interface_ctx, device_index);
         success = (eject_ret == ESP_OK);
         if (!success) {
             ret = json.write("error", esp_err_to_name(eject_ret));
@@ -443,6 +565,8 @@ static esp_err_t api_eject_image_handler(httpd_req_t *req) {
 }
 
 static esp_err_t api_prev_image_handler(httpd_req_t *req) {
+    uint16_t device_index = get_device_from_body(req);
+
     httpd_resp_set_type(req, "application/json");
 
     JsonStreamWriter json(req);
@@ -451,7 +575,7 @@ static esp_err_t api_prev_image_handler(httpd_req_t *req) {
 
     bool success = false;
     if (g_server && g_server->interface_ctx && g_server->interface_ctx->host_comm) {
-        esp_err_t prev_ret = host_comm_select_prev_image(g_server->interface_ctx->host_comm);
+        esp_err_t prev_ret = host_comm_select_prev_image(g_server->interface_ctx->host_comm, device_index);
         success = (prev_ret == ESP_OK);
         if (!success) {
             ret = json.write("error", esp_err_to_name(prev_ret));
@@ -472,6 +596,8 @@ static esp_err_t api_prev_image_handler(httpd_req_t *req) {
 }
 
 static esp_err_t api_next_image_handler(httpd_req_t *req) {
+    uint16_t device_index = get_device_from_body(req);
+
     httpd_resp_set_type(req, "application/json");
 
     JsonStreamWriter json(req);
@@ -480,7 +606,7 @@ static esp_err_t api_next_image_handler(httpd_req_t *req) {
 
     bool success = false;
     if (g_server && g_server->interface_ctx && g_server->interface_ctx->host_comm) {
-        esp_err_t next_ret = host_comm_select_next_image(g_server->interface_ctx->host_comm);
+        esp_err_t next_ret = host_comm_select_next_image(g_server->interface_ctx->host_comm, device_index);
         success = (next_ret == ESP_OK);
         if (!success) {
             ret = json.write("error", esp_err_to_name(next_ret));

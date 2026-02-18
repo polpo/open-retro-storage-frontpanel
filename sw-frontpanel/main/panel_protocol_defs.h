@@ -36,6 +36,7 @@
 #define PANEL_CMD_GET_ENTRY_INFO       0x43  // Get info for entry at index (async, arg: index)
 #define PANEL_CMD_SELECT_ENTRY         0x44  // Select entry by index: -1 (0xFFFF)=parent dir, >=0=select entry (async, arg: signed 16-bit index)
 #define PANEL_CMD_GET_CURRENT_PATH     0x45  // Get current directory path (async)
+#define PANEL_CMD_GET_DEVICE_LIST      0x46  // Get list of all configured devices (async)
 #define PANEL_CMD_EJECT_IMAGE          0x47  // Unload current image (async)
 #define PANEL_CMD_GET_LOADED_IMAGE_STATUS 0x48  // Get status of currently loaded image (async)
 #define PANEL_CMD_SELECT_PREV_IMAGE    0x49  // Load previous image in current directory (async)
@@ -201,6 +202,24 @@ typedef struct __attribute__((packed)) {
 // Device type codes
 #define PANEL_DEVICE_TYPE_ATAPI  0x00  // CD-ROM drive
 #define PANEL_DEVICE_TYPE_IDE    0x01  // Hard disk drive
+#define PANEL_DEVICE_TYPE_SCSI   0x02  // SCSI device (BlueSCSI)
+
+// Device summary (68 bytes)
+typedef struct __attribute__((packed)) {
+    uint16_t device_index;
+    uint8_t  device_type;       // PANEL_DEVICE_TYPE_*
+    uint8_t  device_status;     // PANEL_DEVICE_STATUS_*
+    char     device_label[32];  // e.g. "SCSI ID 3", "CD-ROM"
+    char     image_name[32];    // Current image name or empty
+} device_summary_t;
+
+// Device list response (variable length)
+typedef struct __attribute__((packed)) {
+    uint8_t  device_count;
+    uint8_t  max_devices;
+    uint8_t  reserved[2];
+    device_summary_t devices[];
+} device_list_response_t;
 
 // Currently loaded image status structure (212 bytes)
 typedef struct __attribute__((packed)) {

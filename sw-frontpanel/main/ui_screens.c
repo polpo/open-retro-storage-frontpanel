@@ -644,7 +644,8 @@ static char status_title_text[64] = "";
 esp_err_t ui_draw_status_screen(display_manager_t *display, const char *disc_name,
                                const loaded_image_status_t *image_status,
                                const playback_status_t *playback_status,
-                               bool title_changed) {
+                               bool title_changed,
+                               const char *device_label) {
     if (!display) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -659,8 +660,13 @@ esp_err_t ui_draw_status_screen(display_manager_t *display, const char *disc_nam
     display_manager_set_draw_color(display, 0);
 
     if (has_disc && image_status && image_status->directory_path[0]) {
-        // Get just the directory name
-        const char *dir_name = get_directory_name(image_status->directory_path);
+        // Determine left-side label: device label (multi-device) or directory name
+        const char *left_label;
+        if (device_label && device_label[0]) {
+            left_label = device_label;
+        } else {
+            left_label = get_directory_name(image_status->directory_path);
+        }
 
         // Calculate position indicator width if we have image count
         char pos_indicator[16] = "";
@@ -677,24 +683,27 @@ esp_err_t ui_draw_status_screen(display_manager_t *display, const char *disc_nam
             display_manager_draw_text(display, 126 - pos_indicator_width, 8, pos_indicator);
         }
 
-        // Draw directory name on the left (truncate if needed)
+        // Draw left label (truncate if needed)
         int available_width = 124 - pos_indicator_width - 4;  // Leave margin
-        int dir_name_width = u8g2_GetStrWidth(&display->u8g2, dir_name);
+        int label_width = u8g2_GetStrWidth(&display->u8g2, left_label);
 
-        if (dir_name_width <= available_width) {
-            display_manager_draw_text(display, 2, 8, dir_name);
+        if (label_width <= available_width) {
+            display_manager_draw_text(display, 2, 8, left_label);
         } else {
             // Truncate with ellipsis
             char truncated[32];
-            int len = strlen(dir_name);
+            int len = strlen(left_label);
             int max_chars = (available_width / 6) - 2;  // Approx 6px per char, minus "..."
             if (max_chars > 0 && max_chars < len) {
-                snprintf(truncated, sizeof(truncated), "%.*s...", max_chars, dir_name);
+                snprintf(truncated, sizeof(truncated), "%.*s...", max_chars, left_label);
                 display_manager_draw_text(display, 2, 8, truncated);
             } else {
-                display_manager_draw_text(display, 2, 8, dir_name);
+                display_manager_draw_text(display, 2, 8, left_label);
             }
         }
+    } else if (device_label && device_label[0]) {
+        // No disc but multi-device: still show device label
+        display_manager_draw_text(display, 2, 8, device_label);
     }
 
     display_manager_set_draw_color(display, 1);

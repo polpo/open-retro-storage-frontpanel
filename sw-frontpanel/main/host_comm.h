@@ -49,18 +49,21 @@ esp_err_t host_comm_deinit(host_comm_t *comm);
 // Directory browsing functions
 esp_err_t host_comm_get_entry_count(host_comm_t *comm, uint32_t *count);
 esp_err_t host_comm_get_entry_info(host_comm_t *comm, uint32_t index, dir_entry_info_t *info);
-esp_err_t host_comm_select_entry(host_comm_t *comm, int32_t index);  // -1 = parent dir, >=0 = select entry
+esp_err_t host_comm_select_entry(host_comm_t *comm, int32_t index, uint16_t device_index);  // -1 = parent dir, >=0 = select entry
 esp_err_t host_comm_get_current_path(host_comm_t *comm, char *path, size_t max_len);
 
-// Image management functions
-esp_err_t host_comm_select_prev_image(host_comm_t *comm);
-esp_err_t host_comm_select_next_image(host_comm_t *comm);
-esp_err_t host_comm_eject_image(host_comm_t *comm);
-esp_err_t host_comm_get_loaded_image_status(host_comm_t *comm, loaded_image_status_t *status);
+// Image management functions (device_index selects target device, 0 for default/single device)
+esp_err_t host_comm_select_prev_image(host_comm_t *comm, uint16_t device_index);
+esp_err_t host_comm_select_next_image(host_comm_t *comm, uint16_t device_index);
+esp_err_t host_comm_eject_image(host_comm_t *comm, uint16_t device_index);
+esp_err_t host_comm_get_loaded_image_status(host_comm_t *comm, uint16_t device_index, loaded_image_status_t *status);
 
-// Status functions
-esp_err_t host_comm_get_device_status(host_comm_t *comm, uint8_t *status);
-esp_err_t host_comm_get_playback_status(host_comm_t *comm, playback_status_t *status);
+// Status functions (device_index selects target device, 0 for default/single device)
+esp_err_t host_comm_get_device_status(host_comm_t *comm, uint16_t device_index, uint8_t *status);
+esp_err_t host_comm_get_playback_status(host_comm_t *comm, uint16_t device_index, playback_status_t *status);
+
+// Device list
+esp_err_t host_comm_get_device_list(host_comm_t *comm, device_list_response_t *response, size_t max_size);
 
 // Firmware update functions
 esp_err_t host_comm_check_firmware(host_comm_t *comm, panel_firmware_info_t *info);

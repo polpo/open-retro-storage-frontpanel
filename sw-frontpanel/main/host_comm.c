@@ -237,21 +237,23 @@ esp_err_t host_comm_get_entry_info(host_comm_t *comm, uint32_t index, dir_entry_
     return ret;
 }
 
-esp_err_t host_comm_select_entry(host_comm_t *comm, int32_t index) {
+esp_err_t host_comm_select_entry(host_comm_t *comm, int32_t index, uint16_t device_index) {
     if (!comm) {
         return ESP_ERR_INVALID_ARG;
     }
 
     HOST_COMM_LOCK(comm);
 
-    ESP_LOGI(TAG, "Selecting entry: %ld", index);
+    ESP_LOGI(TAG, "Selecting entry: %ld (device %u)", index, device_index);
 
     // Send command with signed 16-bit index in argument field
     int16_t index16 = (int16_t)index;
 
+    // Send device_index as 1-byte payload so BlueSCSI targets the correct device
+    uint8_t payload[1] = { (uint8_t)device_index };
     esp_err_t ret = transport_two_phase_transaction(&comm->transport,
                                                     PANEL_CMD_SELECT_ENTRY, (uint16_t)index16,
-                                                    NULL, 0,  // No write data
+                                                    payload, sizeof(payload),
                                                     NULL, 0);  // No read data
     if (ret != ESP_OK) {
         HOST_COMM_UNLOCK(comm);
@@ -259,7 +261,8 @@ esp_err_t host_comm_select_entry(host_comm_t *comm, int32_t index) {
     }
 
     // Poll for completion with 2 second timeout (may need to load image)
-    ret = host_comm_poll_async_result(comm, 2000, 10, 0, NULL, NULL);
+    // BlueSCSI returns 1-byte result code that must be read to clear SPI state
+    ret = host_comm_poll_async_result(comm, 2000, 10, 1, NULL, NULL);
     HOST_COMM_UNLOCK(comm);
     return ret;
 }
@@ -306,17 +309,17 @@ esp_err_t host_comm_get_current_path(host_comm_t *comm, char *path, size_t max_l
 
 // Image management functions
 
-esp_err_t host_comm_select_prev_image(host_comm_t *comm) {
+esp_err_t host_comm_select_prev_image(host_comm_t *comm, uint16_t device_index) {
     if (!comm) {
         return ESP_ERR_INVALID_ARG;
     }
 
     HOST_COMM_LOCK(comm);
 
-    ESP_LOGI(TAG, "Selecting previous image");
+    ESP_LOGI(TAG, "Selecting previous image (device %u)", device_index);
 
     esp_err_t ret = transport_two_phase_transaction(&comm->transport,
-                                                    PANEL_CMD_SELECT_PREV_IMAGE, PANEL_ARG_IGNORED,
+                                                    PANEL_CMD_SELECT_PREV_IMAGE, device_index,
                                                     NULL, 0,  // No write data
                                                     NULL, 0);  // No read data
     if (ret != ESP_OK) {
@@ -330,17 +333,17 @@ esp_err_t host_comm_select_prev_image(host_comm_t *comm) {
     return ret;
 }
 
-esp_err_t host_comm_select_next_image(host_comm_t *comm) {
+esp_err_t host_comm_select_next_image(host_comm_t *comm, uint16_t device_index) {
     if (!comm) {
         return ESP_ERR_INVALID_ARG;
     }
 
     HOST_COMM_LOCK(comm);
 
-    ESP_LOGI(TAG, "Selecting next image");
+    ESP_LOGI(TAG, "Selecting next image (device %u)", device_index);
 
     esp_err_t ret = transport_two_phase_transaction(&comm->transport,
-                                                    PANEL_CMD_SELECT_NEXT_IMAGE, PANEL_ARG_IGNORED,
+                                                    PANEL_CMD_SELECT_NEXT_IMAGE, device_index,
                                                     NULL, 0,  // No write data
                                                     NULL, 0);  // No read data
     if (ret != ESP_OK) {
@@ -354,17 +357,17 @@ esp_err_t host_comm_select_next_image(host_comm_t *comm) {
     return ret;
 }
 
-esp_err_t host_comm_eject_image(host_comm_t *comm) {
+esp_err_t host_comm_eject_image(host_comm_t *comm, uint16_t device_index) {
     if (!comm) {
         return ESP_ERR_INVALID_ARG;
     }
 
     HOST_COMM_LOCK(comm);
 
-    ESP_LOGI(TAG, "Ejecting image");
+    ESP_LOGI(TAG, "Ejecting image (device %u)", device_index);
 
     esp_err_t ret = transport_two_phase_transaction(&comm->transport,
-                                                    PANEL_CMD_EJECT_IMAGE, PANEL_ARG_IGNORED,
+                                                    PANEL_CMD_EJECT_IMAGE, device_index,
                                                     NULL, 0,  // No write data
                                                     NULL, 0);  // No read data
     if (ret != ESP_OK) {
@@ -378,18 +381,18 @@ esp_err_t host_comm_eject_image(host_comm_t *comm) {
     return ret;
 }
 
-esp_err_t host_comm_get_loaded_image_status(host_comm_t *comm, loaded_image_status_t *status) {
+esp_err_t host_comm_get_loaded_image_status(host_comm_t *comm, uint16_t device_index, loaded_image_status_t *status) {
     if (!comm || !status) {
         return ESP_ERR_INVALID_ARG;
     }
 
     HOST_COMM_LOCK(comm);
 
-    ESP_LOGI(TAG, "Getting loaded image status");
+    ESP_LOGI(TAG, "Getting loaded image status (device %u)", device_index);
 
     // Start the get status operation
     esp_err_t ret = transport_two_phase_transaction(&comm->transport,
-                                                    PANEL_CMD_GET_LOADED_IMAGE_STATUS, PANEL_ARG_IGNORED,
+                                                    PANEL_CMD_GET_LOADED_IMAGE_STATUS, device_index,
                                                     NULL, 0,  // No write data
                                                     NULL, 0);  // No read data
     if (ret != ESP_OK) {
@@ -416,18 +419,18 @@ esp_err_t host_comm_get_loaded_image_status(host_comm_t *comm, loaded_image_stat
 
 // Status functions
 
-esp_err_t host_comm_get_device_status(host_comm_t *comm, uint8_t *status) {
+esp_err_t host_comm_get_device_status(host_comm_t *comm, uint16_t device_index, uint8_t *status) {
     if (!comm || !status) {
         return ESP_ERR_INVALID_ARG;
     }
 
     HOST_COMM_LOCK(comm);
 
-    ESP_LOGI(TAG, "Getting device status");
+    ESP_LOGI(TAG, "Getting device status (device %u)", device_index);
 
     uint8_t device_status;
     esp_err_t ret = transport_two_phase_transaction(&comm->transport,
-                                                    PANEL_CMD_GET_DEVICE_STATUS, PANEL_ARG_IGNORED,
+                                                    PANEL_CMD_GET_DEVICE_STATUS, device_index,
                                                     NULL, 0,  // No write data
                                                     &device_status, 1);  // Read 1 byte
     if (ret == ESP_OK) {
@@ -438,17 +441,17 @@ esp_err_t host_comm_get_device_status(host_comm_t *comm, uint8_t *status) {
     return ret;
 }
 
-esp_err_t host_comm_get_playback_status(host_comm_t *comm, playback_status_t *status) {
+esp_err_t host_comm_get_playback_status(host_comm_t *comm, uint16_t device_index, playback_status_t *status) {
     if (!comm || !status) {
         return ESP_ERR_INVALID_ARG;
     }
 
     HOST_COMM_LOCK(comm);
 
-    ESP_LOGD(TAG, "Getting playback status");
+    ESP_LOGD(TAG, "Getting playback status (device %u)", device_index);
 
     esp_err_t ret = transport_two_phase_transaction(&comm->transport,
-                                                    PANEL_CMD_GET_PLAYBACK_STATUS, PANEL_ARG_IGNORED,
+                                                    PANEL_CMD_GET_PLAYBACK_STATUS, device_index,
                                                     NULL, 0,
                                                     (uint8_t*)status, sizeof(playback_status_t));
     if (ret == ESP_OK) {
@@ -880,6 +883,43 @@ esp_err_t host_comm_start_rp2350_update(host_comm_t *comm) {
     // Don't poll - the update happens quickly and the board reboots
     // The caller should detect the reboot and wait for the board to come back
     ESP_LOGI(TAG, "RP2350 update command sent successfully");
+    HOST_COMM_UNLOCK(comm);
+    return ESP_OK;
+}
+
+esp_err_t host_comm_get_device_list(host_comm_t *comm, device_list_response_t *response, size_t max_size) {
+    if (!comm || !response || max_size < sizeof(device_list_response_t)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    HOST_COMM_LOCK(comm);
+
+    ESP_LOGI(TAG, "Getting device list");
+
+    // Start the get device list operation
+    esp_err_t ret = transport_two_phase_transaction(&comm->transport,
+                                                    PANEL_CMD_GET_DEVICE_LIST, PANEL_ARG_IGNORED,
+                                                    NULL, 0,  // No write data
+                                                    NULL, 0);  // No read data
+    if (ret != ESP_OK) {
+        HOST_COMM_UNLOCK(comm);
+        return ret;
+    }
+
+    // Poll for completion with 2 second timeout
+    uint8_t *result_data;
+    size_t result_size;
+    ret = host_comm_poll_async_result(comm, 2000, 10, max_size, &result_data, &result_size);
+    if (ret != ESP_OK) {
+        HOST_COMM_UNLOCK(comm);
+        return ret;
+    }
+
+    // Copy result to caller's buffer
+    size_t copy_size = (result_size < max_size) ? result_size : max_size;
+    memcpy(response, result_data, copy_size);
+    ESP_LOGI(TAG, "Device list: %u devices (max %u)", response->device_count, response->max_devices);
+
     HOST_COMM_UNLOCK(comm);
     return ESP_OK;
 }

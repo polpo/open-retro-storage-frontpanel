@@ -18,6 +18,9 @@ let currentImage = null;
 let currentPath = "/";
 let productName = "PicoIDE";
 let mainboardFirmwarePending = false;
+let devices = [];
+let activeDeviceIndex = 0;
+let deviceIndexInitialized = false;
 
 // API helper function
 async function apiCall(endpoint, options = {}) {
@@ -106,8 +109,55 @@ async function loadSystemInfo() {
     }
 }
 
+async function refreshDevices() {
+    const data = await apiCall('/devices');
+    if (data) {
+        devices = data.devices || [];
+        if (!deviceIndexInitialized && data.active_device !== undefined) {
+            activeDeviceIndex = data.active_device;
+            deviceIndexInitialized = true;
+        }
+        renderDeviceSelector();
+    }
+}
+
+// S2S device types that support eject
+const EJECTABLE_TYPES = [1, 2, 3, 4, 7]; // removable, optical, floppy, MO, ZIP
+
+function renderDeviceSelector() {
+    const container = document.getElementById('device-selector');
+    if (!container) return;
+
+    if (devices.length === 0) {
+        container.innerHTML = '<div class="status">No devices found</div>';
+        return;
+    }
+
+    container.innerHTML = '<div class="device-tabs">' +
+        devices.map(dev => {
+            const isActive = dev.index === activeDeviceIndex;
+            const imageLine = dev.image ? dev.image : '[empty]';
+            const canEject = dev.image && EJECTABLE_TYPES.includes(dev.type);
+            const ejectBtn = canEject
+                ? ` <button onclick="event.stopPropagation(); ejectDevice(${dev.index})" style="padding: 2px 8px; font-size: 11px; margin: 0;">Eject</button>`
+                : '';
+            return `<div class="device-tab${isActive ? ' active' : ''}" onclick="selectDevice(${dev.index})">` +
+                `<strong>${dev.label}</strong>` +
+                `<span class="device-image">${imageLine}${ejectBtn}</span>` +
+                `</div>`;
+        }).join('') +
+        '</div>';
+}
+
+async function selectDevice(index) {
+    activeDeviceIndex = index;
+    renderDeviceSelector();
+    await refreshImages();
+}
+
 async function refreshImages() {
-    const data = await apiCall('/images');
+    const endpoint = devices.length > 1 ? `/images?device=${activeDeviceIndex}` : '/images';
+    const data = await apiCall(endpoint);
     if (data) {
         currentPath = data.current_path || "/";
         currentImage = data.current_image;
@@ -116,16 +166,6 @@ async function refreshImages() {
         const pathDisplay = document.getElementById('current-path');
         if (pathDisplay) {
             pathDisplay.textContent = currentPath;
-        }
-
-        // Update current image status
-        const imageNameEl = document.getElementById('current-image-name');
-        if (imageNameEl) {
-            if (data.current_image) {
-                imageNameEl.textContent = `${data.current_image} (${data.image_index + 1} of ${data.total_images})`;
-            } else {
-                imageNameEl.textContent = 'No image loaded';
-            }
         }
 
         // Update prev/next button states
@@ -147,8 +187,9 @@ async function refreshImages() {
             </div>`;
         }
 
-        if (data.entries && data.entries.length > 0) {
-            entriesHtml += data.entries.map(entry => {
+        const entries = (data.entries || []).filter(e => e.name !== '..' && e.name !== '.');
+        if (entries.length > 0) {
+            entriesHtml += entries.map(entry => {
                 if (entry.is_directory) {
                     return `<div class="entry-item directory-item">
                         <span><strong>${entry.name}/</strong></span>
@@ -172,12 +213,15 @@ async function refreshImages() {
 }
 
 async function selectEntry(index) {
+    const body = { index: index };
+    if (devices.length > 1) body.device = activeDeviceIndex;
     const data = await apiCall('/select_entry', {
         method: 'POST',
-        body: JSON.stringify({ index: index })
+        body: JSON.stringify(body)
     });
     if (data && data.success) {
         await refreshImages();
+        await refreshDevices();
         if (index === -1) {
             showStatus('success', 'Navigated to parent directory');
         } else {
@@ -186,26 +230,56 @@ async function selectEntry(index) {
     }
 }
 
-async function ejectImage() {
-    const data = await apiCall('/eject_image', { method: 'POST' });
+async function ejectDevice(deviceIndex) {
+    const data = await apiCall('/eject_image', {
+        method: 'POST',
+        body: JSON.stringify({ device: deviceIndex })
+    });
     if (data && data.success) {
         await refreshImages();
+        await refreshDevices();
+        showStatus('success', 'Image ejected');
+    }
+}
+
+async function ejectImage() {
+    const body = {};
+    if (devices.length > 1) body.device = activeDeviceIndex;
+    const data = await apiCall('/eject_image', {
+        method: 'POST',
+        body: JSON.stringify(body)
+    });
+    if (data && data.success) {
+        await refreshImages();
+        await refreshDevices();
         showStatus('success', 'Image ejected');
     }
 }
 
 async function prevImage() {
-    const data = await apiCall('/prev_image', { method: 'POST' });
+    const body = {};
+    if (devices.length > 1) body.device = activeDeviceIndex;
+    const data = await apiCall('/prev_image', {
+        method: 'POST',
+        body: JSON.stringify(body)
+    });
     if (data && data.success) {
         await refreshImages();
+        await refreshDevices();
         showStatus('success', 'Loaded previous image');
     }
 }
 
 async function nextImage() {
-    const data = await apiCall('/next_image', { method: 'POST' });
+    const body = {};
+    if (devices.length > 1) body.device = activeDeviceIndex;
+    const data = await apiCall('/next_image', {
+        method: 'POST',
+        body: JSON.stringify(body)
+    });
     if (data && data.success) {
         await refreshImages();
+        await refreshDevices();
         showStatus('success', 'Loaded next image');
     }
 }
@@ -858,6 +932,7 @@ async function uploadMainboardFirmware() {
 // Initialize the page (serialize requests to avoid overwhelming ESP32)
 document.addEventListener('DOMContentLoaded', async function() {
     await loadSystemInfo();
+    await refreshDevices();
     await refreshImages();
     await loadWiFiStatus();
     await checkAllFirmware();

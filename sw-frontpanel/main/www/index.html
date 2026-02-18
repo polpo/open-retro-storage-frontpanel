@@ -30,12 +30,13 @@
         button:hover { background-color: #0056b3; }
         button:disabled { background-color: #6c757d; cursor: not-allowed; }
         .entry-list { margin: 10px 0; }
-        .entry-item { display: flex; justify-content: space-between; align-items: center; padding: 8px; border: 1px solid #ddd; margin: 2px 0; border-radius: 3px; }
+        .entry-item { display: flex; justify-content: space-between; align-items: center; padding: 4px 8px; border: 1px solid #ddd; margin: 1px 0; border-radius: 3px; font-size: 13px; }
         .directory-item { background-color: #f8f9fa; }
         .file-item { background-color: #fff; }
-        .path-display { font-family: monospace; background-color: #e9ecef; padding: 5px 10px; border-radius: 3px; margin: 5px 0; }
-        .nav-buttons { margin: 10px 0; }
-        .nav-buttons button { margin-right: 5px; }
+        .path-display { font-family: monospace; background-color: #e9ecef; padding: 3px 8px; border-radius: 3px; margin: 3px 0; font-size: 13px; }
+        .nav-buttons { margin: 6px 0; }
+        .nav-buttons button { margin-right: 5px; padding: 5px 12px; font-size: 13px; }
+        .entry-item button { padding: 3px 10px; font-size: 12px; margin: 0; }
         .status { padding: 10px; background-color: #e9ecef; border-radius: 4px; margin: 10px 0; }
         .error { background-color: #f8d7da; color: #721c24; }
         .success { background-color: #d4edda; color: #155724; }
@@ -53,6 +54,12 @@
         .subtitle { color: #666; margin: 5px 0; }
         .status-bar { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); padding: 8px 16px; border-radius: 20px; font-size: 13px; box-shadow: 0 2px 8px rgba(0,0,0,0.2); z-index: 1000; transition: opacity 0.3s ease, visibility 0.3s ease; }
         .status-bar.hidden { opacity: 0; visibility: hidden; }
+        .device-tabs { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; }
+        .device-tab { display: flex; justify-content: space-between; align-items: center; padding: 6px 12px; border: 1px solid #ddd; border-radius: 4px; cursor: pointer; background: #f8f9fa; font-size: 13px; }
+        .device-tab:hover { background: #e9ecef; }
+        .device-tab.active { background: #007bff; color: white; border-color: #007bff; }
+        .device-tab .device-image { font-size: 11px; color: #999; }
+        .device-tab.active .device-image { color: rgba(255,255,255,0.7); }
         @media (prefers-color-scheme: dark) {
             body { background-color: #1a1a1a; color: #e0e0e0; }
             .container { background: #2d2d2d; box-shadow: 0 2px 4px rgba(0,0,0,0.3); }
@@ -68,6 +75,11 @@
             input[type="text"], input[type="password"] { background-color: #3a3a3a; border: 1px solid #555; color: #e0e0e0; }
             textarea { background-color: #3a3a3a; border: 1px solid #555; color: #e0e0e0; }
             .status-bar { box-shadow: 0 2px 8px rgba(0,0,0,0.5); }
+            .device-tab { background: #3a3a3a; border-color: #555; color: #e0e0e0; }
+            .device-tab:hover { background: #4a4a4a; }
+            .device-tab.active { background: #007bff; color: white; border-color: #007bff; }
+            .device-tab.active .device-image { color: rgba(255,255,255,0.7); }
+            .device-tab .device-image { color: #888; }
         }
     </style>
 </head>
@@ -79,14 +91,14 @@
         </div>
 
         <div class="section">
-            <h3>Image Browser</h3>
-            <div id="current-image" class="status">Current Image: <span id="current-image-name">Loading...</span></div>
+            <h3>Devices</h3>
+            <div id="device-selector"></div>
             <div class="nav-buttons">
                 <button onclick="prevImage()" id="prev-image-btn" disabled>Prev</button>
                 <button onclick="nextImage()" id="next-image-btn" disabled>Next</button>
-                <button onclick="ejectImage()">Eject</button>
-                <button onclick="refreshImages()" class="refresh-btn">Refresh</button>
+                <button onclick="refreshDevices()" class="refresh-btn">Refresh</button>
             </div>
+            <h4 style="margin-bottom: 5px;">Image Browser</h4>
             <div class="path-display">Path: <span id="current-path">/</span></div>
             <div id="entry-list" class="entry-list">
                 <div>Loading...</div>
