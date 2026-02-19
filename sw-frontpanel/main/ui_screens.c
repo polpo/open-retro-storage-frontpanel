@@ -529,6 +529,18 @@ static void format_version_string(char *buf, size_t buf_size, uint32_t version) 
     snprintf(buf, buf_size, "%d.%d.%d", major, minor, patch);
 }
 
+// Format main board version: date-based (YYYY.MM.DD) for BlueSCSI, semver for PicoIDE
+static void format_mainboard_version(char *buf, size_t buf_size, uint32_t version) {
+#ifdef CONFIG_PRODUCT_BLUESCSI
+    uint8_t year_offset = (version >> 16) & 0xFF;
+    uint8_t month = (version >> 8) & 0xFF;
+    uint8_t day = version & 0xFF;
+    snprintf(buf, buf_size, "%d.%02d.%02d", 2000 + year_offset, month, day);
+#else
+    format_version_string(buf, buf_size, version);
+#endif
+}
+
 esp_err_t ui_draw_firmware_status(display_manager_t *display,
                                   uint32_t panel_current_ver, uint32_t panel_avail_ver, bool panel_update_avail,
                                   uint32_t main_current_ver, uint32_t main_avail_ver, bool main_update_avail,
@@ -575,11 +587,11 @@ esp_err_t ui_draw_firmware_status(display_manager_t *display,
         display_manager_set_draw_color(display, 0);
     }
     display_manager_draw_text(display, 2, y, "Main:");
-    format_version_string(version_str, sizeof(version_str), main_current_ver);
+    format_mainboard_version(version_str, sizeof(version_str), main_current_ver);
     display_manager_draw_text(display, 44, y, version_str);
     if (main_update_avail) {
         display_manager_draw_text(display, 79, y, "->");
-        format_version_string(version_str, sizeof(version_str), main_avail_ver);
+        format_mainboard_version(version_str, sizeof(version_str), main_avail_ver);
         display_manager_draw_text(display, 94, y, version_str);
     }
     if (selection == 1) {

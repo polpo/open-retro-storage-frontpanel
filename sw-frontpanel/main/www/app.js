@@ -352,11 +352,14 @@ let mainboardUpdateInProgress = false;
 let mainboardUpdateCheckTimer = null;
 
 // Format version number for display
-function formatVersion(version) {
+function formatVersion(version, isDateBased) {
     if (version === 0) return 'Unknown';
     const major = (version >> 16) & 0xFF;
     const minor = (version >> 8) & 0xFF;
     const patch = version & 0xFF;
+    if (isDateBased) {
+        return `v${2000 + major}.${String(minor).padStart(2, '0')}.${String(patch).padStart(2, '0')}`;
+    }
     return `v${major}.${minor}.${patch}`;
 }
 
@@ -393,15 +396,16 @@ async function checkPanelFirmware() {
 async function checkMainboardFirmware() {
     const data = await apiCall('/firmware/mainboard/check');
     if (data) {
+        const isDateVer = productName === 'BlueSCSI';
         if (data.current_version !== undefined) {
-            document.getElementById('mainboard-current-version').textContent = formatVersion(data.current_version);
+            document.getElementById('mainboard-current-version').textContent = formatVersion(data.current_version, isDateVer);
         }
 
         // BlueSCSI doesn't have SD-card-based available version checks
         if (productName === 'BlueSCSI') return;
 
         if (data.update_available) {
-            document.getElementById('mainboard-available-version').textContent = formatVersion(data.available_version);
+            document.getElementById('mainboard-available-version').textContent = formatVersion(data.available_version, isDateVer);
             document.getElementById('mainboard-available-version').style.color = '#28a745';
             document.getElementById('mainboard-update-btn').disabled = false;
         } else {
@@ -551,9 +555,10 @@ async function runMainboardUpdateAnimation() {
             const data = await apiCall('/firmware/mainboard/check');
             if (data && data.current_version) {
                 // Board is back online!
+                const isDateVer = productName === 'BlueSCSI';
                 document.getElementById('mainboard-update-status').textContent =
-                    `Update complete! Now running ${formatVersion(data.current_version)}`;
-                document.getElementById('mainboard-current-version').textContent = formatVersion(data.current_version);
+                    `Update complete! Now running ${formatVersion(data.current_version, isDateVer)}`;
+                document.getElementById('mainboard-current-version').textContent = formatVersion(data.current_version, isDateVer);
                 showStatus('success', 'Main board firmware update completed!');
                 mainboardUpdateInProgress = false;
                 return;

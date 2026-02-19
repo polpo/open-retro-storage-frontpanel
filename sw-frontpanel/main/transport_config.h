@@ -54,9 +54,9 @@
 
 // Startup delay: time to wait for main board to be ready before first comm attempt
 #ifdef CONFIG_PRODUCT_BLUESCSI
-#define HOST_STARTUP_DELAY_MS  5000     // BlueSCSI needs more time to initialize
+#define HOST_STARTUP_DELAY_MS  2000
 #else
-#define HOST_STARTUP_DELAY_MS  1000     // PicoIDE starts quickly
+#define HOST_STARTUP_DELAY_MS  1000
 #endif
 
 #endif // TRANSPORT_CONFIG_H

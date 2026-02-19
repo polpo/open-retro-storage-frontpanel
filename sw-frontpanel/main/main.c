@@ -282,10 +282,17 @@ static void handle_button_event(button_event_t *event) {
                             if (host_comm.initialized) {
                                 rp2350_fw_status_t fw_status;
                                 if (host_comm_get_rp2350_fw_status(&host_comm, &fw_status) == ESP_OK) {
+#ifdef CONFIG_PRODUCT_BLUESCSI
+                                    snprintf(main_ver_str, sizeof(main_ver_str), "%lu.%02lu.%02lu",
+                                             2000 + ((fw_status.current_version >> 16) & 0xFF),
+                                             (fw_status.current_version >> 8) & 0xFF,
+                                             fw_status.current_version & 0xFF);
+#else
                                     snprintf(main_ver_str, sizeof(main_ver_str), "%lu.%lu.%lu",
                                              (fw_status.current_version >> 16) & 0xFF,
                                              (fw_status.current_version >> 8) & 0xFF,
                                              fw_status.current_version & 0xFF);
+#endif
                                 }
                             }
                             char info_text[160];
@@ -807,6 +814,10 @@ static esp_err_t refresh_directory_list(void) {
         ESP_LOGI(TAG, "Requesting entry info for index %lu", i);
         ret = host_comm_get_entry_info(&host_comm, i, &entry_info);
         if (ret == ESP_OK) {
+            // Skip ".." and "." entries — we already added our own ".." above
+            if (strcmp(entry_info.name, "..") == 0 || strcmp(entry_info.name, ".") == 0) {
+                continue;
+            }
             // Add prefix to distinguish directories from files
             char display_name[68];  // 64 + prefix + null
             if (entry_info.entry_type == 0) {  // DIRECTORY
@@ -1079,10 +1090,17 @@ static void trigger_mainboard_update(void) {
         if (ret == ESP_OK) {
             // Board is back! Show new version
             char version_str[16];
-            uint8_t major = (fw_status.current_version >> 16) & 0xFF;
-            uint8_t minor = (fw_status.current_version >> 8) & 0xFF;
-            uint8_t patch = fw_status.current_version & 0xFF;
-            snprintf(version_str, sizeof(version_str), "%d.%d.%d", major, minor, patch);
+#ifdef CONFIG_PRODUCT_BLUESCSI
+            snprintf(version_str, sizeof(version_str), "%lu.%02lu.%02lu",
+                     2000 + ((fw_status.current_version >> 16) & 0xFF),
+                     (fw_status.current_version >> 8) & 0xFF,
+                     fw_status.current_version & 0xFF);
+#else
+            snprintf(version_str, sizeof(version_str), "%lu.%lu.%lu",
+                     (fw_status.current_version >> 16) & 0xFF,
+                     (fw_status.current_version >> 8) & 0xFF,
+                     fw_status.current_version & 0xFF);
+#endif
 
             char msg[48];
             snprintf(msg, sizeof(msg), "Update complete!\nNow running v%s", version_str);
@@ -1317,10 +1335,17 @@ void app_main(void) {
             rp2350_fw_status_t fw_status;
             if (host_comm_get_rp2350_fw_status(&host_comm, &fw_status) == ESP_OK) {
                 char main_version[16];
+#ifdef CONFIG_PRODUCT_BLUESCSI
+                snprintf(main_version, sizeof(main_version), "%lu.%02lu.%02lu",
+                         2000 + ((fw_status.current_version >> 16) & 0xFF),
+                         (fw_status.current_version >> 8) & 0xFF,
+                         fw_status.current_version & 0xFF);
+#else
                 snprintf(main_version, sizeof(main_version), "%lu.%lu.%lu",
                          (fw_status.current_version >> 16) & 0xFF,
                          (fw_status.current_version >> 8) & 0xFF,
                          fw_status.current_version & 0xFF);
+#endif
                 ui_update_splash_versions(&display, app_desc->version, main_version);
                 ESP_LOGI(TAG, "Main board firmware version: %s", main_version);
             }
