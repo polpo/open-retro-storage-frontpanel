@@ -94,13 +94,18 @@ async function loadSystemInfo() {
             hostnameUrl.textContent = 'http://' + data.hostname + '.local';
             hostnameText.style.visibility = 'visible';
         }
+        const freeMemKB = data.free_memory ? (data.free_memory / 1024).toFixed(1) + ' KB' : 'Unknown';
+        const uptimeSec = data.uptime || 0;
+        const uptimeMin = Math.floor(uptimeSec / 60);
+        const uptimeRemSec = uptimeSec % 60;
+        const uptimeStr = uptimeSec ? `${uptimeMin}:${String(uptimeRemSec).padStart(2, '0')}` : 'Unknown';
         document.getElementById('system-info').innerHTML = `
             <strong>Product:</strong> ${data.product_full || data.product_name || 'PicoIDE'}<br>
             <strong>Firmware:</strong> ${data.firmware || 'v0.1.0'}<br>
             <strong>Hardware:</strong> ${data.hardware || 'ESP32-C3'}<br>
             <strong>Host Communication:</strong> ${data.transport || 'Unknown'} - ${data.host_connected ? 'Connected' : 'Disconnected'}<br>
-            <strong>Free Memory:</strong> ${data.free_memory || 'Unknown'} bytes<br>
-            <strong>Uptime:</strong> ${data.uptime || 'Unknown'} seconds
+            <strong>Free Memory:</strong> ${freeMemKB}<br>
+            <strong>Uptime:</strong> ${uptimeStr}
         `;
         setupMainboardFirmwareUI(productName);
         showStatus('success', 'Connected to front panel');
@@ -284,15 +289,30 @@ async function nextImage() {
     }
 }
 
+let wifiSectionCollapsed = false;
+
+function toggleWiFiSection() {
+    const body = document.getElementById('wifi-config-body');
+    if (!body) return;
+    wifiSectionCollapsed = !wifiSectionCollapsed;
+    body.style.display = wifiSectionCollapsed ? 'none' : '';
+    const heading = document.getElementById('wifi-heading');
+    if (heading) {
+        heading.textContent = wifiSectionCollapsed ? '📶 WiFi Configuration ▸' : '📶 WiFi Configuration ▾';
+    }
+}
+
 async function loadWiFiStatus() {
     const data = await apiCall('/wifi/status');
     if (data) {
         let statusText = data.state || 'Unknown';
+        let wifiConfigured = false;
         if (data.mode === 'Client' && data.ssid) {
             statusText = `Connected to <strong>${data.ssid}</strong>`;
             if (data.ip_address) {
                 statusText += ` (IP: ${data.ip_address})`;
             }
+            wifiConfigured = true;
         } else if (data.mode === 'AP' && data.ssid) {
             statusText = `AP Mode: <strong>${data.ssid}</strong>`;
             if (data.ip_address) {
@@ -301,6 +321,11 @@ async function loadWiFiStatus() {
         }
         document.getElementById('wifi-state').textContent = data.state || 'Unknown';
         document.getElementById('wifi-status').innerHTML = `WiFi Status: ${statusText}`;
+
+        // Collapse WiFi config section if already connected
+        if (wifiConfigured && !wifiSectionCollapsed) {
+            toggleWiFiSection();
+        }
     }
 }
 
@@ -393,6 +418,45 @@ async function checkPanelFirmware() {
     }
 }
 
+async function checkBlueSCSIGitHubRelease(currentVersion) {
+    try {
+        const response = await fetch('https://api.github.com/repos/BlueSCSI/BlueSCSI-v2/releases/latest');
+        if (!response.ok) return;
+        const release = await response.json();
+
+        // Parse tag like "v2025.02.08" or "2025.02.08"
+        const match = release.tag_name.match(/v?(\d{4})\.(\d{1,2})\.(\d{1,2})/);
+        if (!match) return;
+
+        const year = parseInt(match[1]);
+        const month = parseInt(match[2]);
+        const day = parseInt(match[3]);
+        const githubDate = year * 10000 + month * 100 + day;
+
+        // Convert current packed version to comparable integer
+        const curYear = 2000 + ((currentVersion >> 16) & 0xFF);
+        const curMonth = (currentVersion >> 8) & 0xFF;
+        const curDay = currentVersion & 0xFF;
+        const currentDate = curYear * 10000 + curMonth * 100 + curDay;
+
+        const versionStr = `v${year}.${String(month).padStart(2, '0')}.${String(day).padStart(2, '0')}`;
+
+        const availableEl = document.getElementById('mainboard-available-version');
+        const availableSection = document.getElementById('mainboard-available-section');
+        if (availableSection) availableSection.style.display = '';
+
+        if (githubDate > currentDate) {
+            availableEl.textContent = versionStr;
+            availableEl.style.color = '#28a745';
+        } else {
+            availableEl.textContent = versionStr + ' (up to date)';
+            availableEl.style.color = '#666';
+        }
+    } catch (e) {
+        console.log('GitHub release check failed:', e);
+    }
+}
+
 async function checkMainboardFirmware() {
     const data = await apiCall('/firmware/mainboard/check');
     if (data) {
@@ -401,8 +465,12 @@ async function checkMainboardFirmware() {
             document.getElementById('mainboard-current-version').textContent = formatVersion(data.current_version, isDateVer);
         }
 
-        // BlueSCSI doesn't have SD-card-based available version checks
-        if (productName === 'BlueSCSI') return;
+        if (productName === 'BlueSCSI') {
+            if (data.current_version !== undefined) {
+                await checkBlueSCSIGitHubRelease(data.current_version);
+            }
+            return;
+        }
 
         if (data.update_available) {
             document.getElementById('mainboard-available-version').textContent = formatVersion(data.available_version, isDateVer);
@@ -471,11 +539,11 @@ async function checkPanelUpdateProgress() {
                 statusText = 'Applying update...';
                 break;
             case 'success':
-                statusText = 'Update successful! Panel restarting...';
                 panelUpdateInProgress = false;
                 clearInterval(panelUpdateCheckTimer);
                 showStatus('success', 'Panel firmware update completed!');
-                break;
+                startRebootCountdown();
+                return;
             case 'error':
                 statusText = `Failed: ${data.error || 'Unknown error'}`;
                 panelUpdateInProgress = false;
@@ -494,6 +562,21 @@ async function checkPanelUpdateProgress() {
             panelUpdateCheckTimer = null;
         }
     }
+}
+
+function startRebootCountdown() {
+    const statusEl = document.getElementById('panel-update-status');
+    let remaining = 5;
+    statusEl.textContent = `Update successful! Panel restarting... ${remaining}`;
+    const timer = setInterval(() => {
+        remaining--;
+        if (remaining <= 0) {
+            clearInterval(timer);
+            location.reload();
+        } else {
+            statusEl.textContent = `Update successful! Panel restarting... ${remaining}`;
+        }
+    }, 1000);
 }
 
 async function startMainboardFirmwareUpdate() {

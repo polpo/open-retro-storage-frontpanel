@@ -125,17 +125,19 @@
         </div>
 
         <div class="section">
-            <h3>📶 WiFi Configuration</h3>
+            <h3 id="wifi-heading" style="cursor: pointer;" onclick="toggleWiFiSection()">📶 WiFi Configuration</h3>
             <div id="wifi-status" class="status">WiFi Status: <span id="wifi-state">Unknown</span></div>
-            <button onclick="scanWiFi()" class="refresh-btn">🔍 Scan Networks</button>
-            <div id="wifi-list" class="wifi-list">
-                <div>Click "Scan Networks" to see available WiFi networks</div>
-            </div>
-            <div style="margin-top: 15px;">
-                <h4>Manual Connection</h4>
-                <input type="text" id="manual-ssid" placeholder="Network Name (SSID)" />
-                <input type="password" id="manual-password" placeholder="Password" />
-                <button onclick="connectToWiFi(document.getElementById('manual-ssid').value, document.getElementById('manual-password').value)">🔗 Connect</button>
+            <div id="wifi-config-body">
+                <button onclick="scanWiFi()" class="refresh-btn">🔍 Scan Networks</button>
+                <div id="wifi-list" class="wifi-list">
+                    <div>Click "Scan Networks" to see available WiFi networks</div>
+                </div>
+                <div style="margin-top: 15px;">
+                    <h4>Manual Connection</h4>
+                    <input type="text" id="manual-ssid" placeholder="Network Name (SSID)" />
+                    <input type="password" id="manual-password" placeholder="Password" />
+                    <button onclick="connectToWiFi(document.getElementById('manual-ssid').value, document.getElementById('manual-password').value)">🔗 Connect</button>
+                </div>
             </div>
         </div>
 
@@ -188,7 +190,7 @@
                 <button onclick="loadConfig()" class="refresh-btn">🔄 Reload</button>
                 <button onclick="saveConfig()">💾 Save Config</button>
             </div>
-            <textarea id="config-editor" style="width: 100%; height: 300px; font-family: monospace; font-size: 14px; padding: 10px; box-sizing: border-box;" placeholder="Loading config..."></textarea>
+            <textarea id="config-editor" spellcheck="false" style="width: 100%; height: 300px; font-family: monospace; font-size: 14px; padding: 10px; box-sizing: border-box;" placeholder="Loading config..."></textarea>
         </div>
 
         <div class="section">
