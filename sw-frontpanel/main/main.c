@@ -633,11 +633,27 @@ static void display_update_task(void *pvParameters) {
 // Status screen refresh task - updates playback data from host
 static void status_refresh_task(void *pvParameters) {
     while (1) {
-        // Only refresh if on status screen and host is initialized
-        if (current_screen == SCREEN_STATUS && host_comm.initialized) {
+        uint32_t poll_interval_ms = 1000;
+
+        if (display.state == DISPLAY_STATE_OFF) {
+            // Screen off: no need to poll at all
+            poll_interval_ms = 0;
+        } else if (current_screen == SCREEN_STATUS && host_comm.initialized) {
+            if (current_device_type == PANEL_DEVICE_TYPE_IDE ||
+                current_device_type == PANEL_DEVICE_TYPE_SCSI) {
+                // HDD: image can only change via web UI, poll infrequently
+                poll_interval_ms = 5000;
+            } else if (!current_playback_status.is_playing) {
+                // ATAPI with no audio playing: poll less frequently
+                poll_interval_ms = 5000;
+            } else {
+                // ATAPI with audio playing: fast poll for track position updates
+                poll_interval_ms = 1000;
+            }
             refresh_playback_status();
         }
-        vTaskDelay(pdMS_TO_TICKS(1000)); // Update every 1 second
+
+        vTaskDelay(pdMS_TO_TICKS(poll_interval_ms ? poll_interval_ms : 10000));
     }
 }
 
