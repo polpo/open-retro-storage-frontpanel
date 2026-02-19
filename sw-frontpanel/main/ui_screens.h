@@ -49,7 +49,8 @@ esp_err_t ui_draw_status_screen(display_manager_t *display, const char *disc_nam
                                const loaded_image_status_t *image_status,
                                const playback_status_t *playback_status,
                                bool title_changed,
-                               const char *device_label);
+                               const char *device_label,
+                               bool eject_in_progress);
 bool ui_animate_status_screen(display_manager_t *display);
 bool ui_menu_needs_animation(menu_t *menu);
 bool ui_animate_menu(display_manager_t *display, menu_t *menu);

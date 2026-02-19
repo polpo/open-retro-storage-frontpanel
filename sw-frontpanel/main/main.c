@@ -190,6 +190,13 @@ static void handle_button_event(button_event_t *event) {
                 case 3: // Back button (West) - Eject (ATAPI only)
                     if (event->type == BUTTON_EVENT_CLICK) {
                         if (current_device_type != PANEL_DEVICE_TYPE_IDE && host_comm.initialized) {
+                            // Show inverted icon as eject feedback
+                            ui_draw_status_screen(&display, current_disc_name,
+                                                  &current_image_status,
+                                                  &current_playback_status,
+                                                  false, get_active_device_label(),
+                                                  true);
+                            display_manager_update(&display);
                             esp_err_t ret = host_comm_eject_image(&host_comm, active_device_index);
                             if (ret == ESP_OK) {
                                 refresh_playback_status();
@@ -248,6 +255,13 @@ static void handle_button_event(button_event_t *event) {
                                 ui_draw_info_screen(&display, "Not Available",
                                     "Eject is not available\nin IDE mode.\n\nUse Select Image to\nchoose a different\nhard disk image.");
                             } else if (host_comm.initialized) {
+                                // Show inverted icon as eject feedback
+                                ui_draw_status_screen(&display, current_disc_name,
+                                                      &current_image_status,
+                                                      &current_playback_status,
+                                                      false, get_active_device_label(),
+                                                      true);
+                                display_manager_update(&display);
                                 esp_err_t ret = host_comm_eject_image(&host_comm, active_device_index);
                                 if (ret == ESP_OK) {
                                     ESP_LOGI(TAG, "Image ejected");
@@ -581,7 +595,8 @@ static void display_update_task(void *pvParameters) {
                                           &current_image_status,
                                           &current_playback_status,
                                           screen_changed || disc_name_changed,
-                                          get_active_device_label());
+                                          get_active_device_label(),
+                                          false);
                     disc_name_changed = false;
                     status_needs_redraw = false;
                 } else {
@@ -1386,7 +1401,8 @@ void app_main(void) {
     ui_draw_status_screen(&display, current_disc_name,
                           &current_image_status,
                           &current_playback_status, disc_name_changed,
-                          get_active_device_label());
+                          get_active_device_label(),
+                          false);
     disc_name_changed = false;
     status_needs_redraw = false;
 

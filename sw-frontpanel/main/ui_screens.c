@@ -645,7 +645,8 @@ esp_err_t ui_draw_status_screen(display_manager_t *display, const char *disc_nam
                                const loaded_image_status_t *image_status,
                                const playback_status_t *playback_status,
                                bool title_changed,
-                               const char *device_label) {
+                               const char *device_label,
+                               bool eject_in_progress) {
     if (!display) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -740,7 +741,14 @@ esp_err_t ui_draw_status_screen(display_manager_t *display, const char *disc_nam
     } else {
         type_icon = 0xe0ab;  // Disc icon
     }
+    if (eject_in_progress) {
+        display_manager_draw_box(display, 0, y - 12, 14, 14);
+        display_manager_set_draw_color(display, 0);
+    }
     display_manager_draw_glyph(display, 2, y, type_icon);
+    if (eject_in_progress) {
+        display_manager_set_draw_color(display, 1);
+    }
 
     // For audio/mixed discs, show playback status
     if (playback_status->disc_type == PANEL_DISC_TYPE_AUDIO ||
