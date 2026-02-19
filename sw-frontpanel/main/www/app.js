@@ -870,6 +870,11 @@ async function loadConfig() {
 
     try {
         const response = await fetch('/api/download?path=/' + configFile);
+        if (response.status === 404) {
+            editor.value = '';
+            editor.placeholder = 'No ' + configFile + ' found — enter configuration below and save to create it.';
+            return;
+        }
         if (!response.ok) {
             throw new Error(`Failed to load config: ${response.status}`);
         }
