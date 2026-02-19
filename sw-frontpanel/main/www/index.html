@@ -29,14 +29,15 @@
         button { background-color: #007bff; color: white; border: none; padding: 10px 20px; border-radius: 4px; cursor: pointer; margin: 5px; }
         button:hover { background-color: #0056b3; }
         button:disabled { background-color: #6c757d; cursor: not-allowed; }
-        .entry-list { margin: 10px 0; }
-        .entry-item { display: flex; justify-content: space-between; align-items: center; padding: 4px 8px; border: 1px solid #ddd; margin: 1px 0; border-radius: 3px; font-size: 13px; }
-        .directory-item { background-color: #f8f9fa; }
-        .file-item { background-color: #fff; }
+        .entry-list { display: flex; flex-direction: column; gap: 4px; margin: 10px 0; }
+        .entry-item { display: flex; justify-content: space-between; align-items: center; padding: 6px 12px; border: 1px solid #ddd; border-radius: 4px; background: #f8f9fa; font-size: 13px; }
+        .entry-item:hover { background: #e9ecef; }
+        .directory-item { }
+        .file-item { }
         .path-display { font-family: monospace; background-color: #e9ecef; padding: 3px 8px; border-radius: 3px; margin: 3px 0; font-size: 13px; }
         .nav-buttons { margin: 6px 0; }
         .nav-buttons button { margin-right: 5px; padding: 5px 12px; font-size: 13px; }
-        .entry-item button { padding: 3px 10px; font-size: 12px; margin: 0; }
+        .entry-item button { padding: 2px 8px; font-size: 11px; line-height: 1; margin: 0; }
         .status { padding: 10px; background-color: #e9ecef; border-radius: 4px; margin: 10px 0; }
         .error { background-color: #f8d7da; color: #721c24; }
         .success { background-color: #d4edda; color: #155724; }
@@ -65,9 +66,8 @@
             .container { background: #2d2d2d; box-shadow: 0 2px 4px rgba(0,0,0,0.3); }
             .section { border-color: #444; }
             .section h3 { color: #e0e0e0; }
-            .entry-item, .wifi-item { border-color: #444; }
-            .directory-item { background-color: #3a3a3a; }
-            .file-item { background-color: #2d2d2d; }
+            .entry-item, .wifi-item { border-color: #555; background: #3a3a3a; }
+            .entry-item:hover { background: #4a4a4a; }
             .path-display, .status, .progress-bar { background-color: #3a3a3a; }
             .error { background-color: #5c2a2a; color: #f8d7da; }
             .success { background-color: #2a4a2a; color: #d4edda; }
