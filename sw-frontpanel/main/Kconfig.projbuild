@@ -1,0 +1,25 @@
+menu "Product Configuration"
+
+    choice PRODUCT_TYPE
+        prompt "Product type"
+        default PRODUCT_PICOIDE
+        help
+            Select the product type for branding and feature configuration.
+
+        config PRODUCT_PICOIDE
+            bool "PicoIDE"
+            help
+                Build for PicoIDE product.
+
+        config PRODUCT_BLUESCSI
+            bool "BlueSCSI"
+            help
+                Build for BlueSCSI product.
+    endchoice
+
+    config MAX_DEVICES
+        int
+        default 8 if PRODUCT_BLUESCSI
+        default 2 if PRODUCT_PICOIDE
+
+endmenu

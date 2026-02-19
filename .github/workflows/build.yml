@@ -3,21 +3,30 @@ on: [push, pull_request]
 jobs:
   build-frontpanel-firmware:
     runs-on: ubuntu-22.04
-    env:
-      OUTPUT_DIR: ${{github.workspace}}/binaries
+    strategy:
+      matrix:
+        product:
+          - name: picoide
+            sdkconfig_extra: sdkconfig.defaults.picoide
+          - name: bluescsi
+            sdkconfig_extra: sdkconfig.defaults.bluescsi
     steps:
       - name: Checkout repo with submodules
         uses: actions/checkout@v4
         with:
           submodules: recursive
-      - name: Build Front Panel Firmware
+      - name: Build Front Panel Firmware (${{ matrix.product.name }})
         uses: espressif/esp-idf-ci-action@v1
         with:
           esp_idf_version: v5.5.1
           target: esp32c3
           path: 'sw-frontpanel'
+          command: 'idf.py -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;${{ matrix.product.sdkconfig_extra }}" build'
       - name: Upload Front Panel Firmware
         uses: actions/upload-artifact@v4
         with:
-          name: Front Panel Firmware
-          path: 'sw-frontpanel/build/picoide-frontpanel.bin'
+          name: frontpanel-firmware-${{ matrix.product.name }}
+          path: |
+            sw-frontpanel/build/ors-frontpanel.bin
+            sw-frontpanel/build/bootloader/bootloader.bin
+            sw-frontpanel/build/partition_table/partition-table.bin
