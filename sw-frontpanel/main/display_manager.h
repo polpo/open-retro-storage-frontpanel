@@ -28,17 +28,57 @@
 typedef enum {
     DISPLAY_STATE_FULL_BRIGHTNESS,
     DISPLAY_STATE_DIMMED,
+    DISPLAY_STATE_SCREENSAVER,
     DISPLAY_STATE_OFF
 } display_state_t;
+
+typedef enum {
+    DISPLAY_IDLE_MODE_DIM = 0,
+    DISPLAY_IDLE_MODE_TOASTERS = 1,
+    DISPLAY_IDLE_MODE_DVD_LOGO = 2,
+    DISPLAY_IDLE_MODE_NONE = 3,
+} display_idle_mode_t;
+
+#define SCREENSAVER_MAX_SPRITES 5
+
+typedef enum {
+    SPRITE_KIND_TOASTER = 0,  // Animated, 3 frames
+    SPRITE_KIND_TOAST   = 1,  // Static, single frame
+} sprite_kind_t;
+
+typedef struct {
+    int16_t x;
+    int16_t y;
+    int16_t offset;
+    bool fully_hidden;       // True while offscreen, waiting to respawn
+    uint32_t respawn_at_ms;  // Absolute time to respawn when fully_hidden
+    sprite_kind_t kind;
+} sprite_state_t;
+
+typedef struct {
+    int16_t x, y;
+    int8_t  dx, dy;          // -1 or +1
+} bouncing_logo_state_t;
+
+typedef struct {
+    sprite_state_t sprites[SCREENSAVER_MAX_SPRITES];
+    bouncing_logo_state_t logo;
+    uint8_t frame;           // Shared animation frame for all toaster sprites
+    uint32_t last_step_ms;
+} screensaver_state_t;
 
 typedef struct {
     u8g2_t u8g2;
     bool needs_update;
+    bool needs_full_redraw;  // Set when waking from a state that overwrote the buffer
     bool initialized;
     uint32_t last_update_ms;
     uint32_t min_update_interval_ms;
     uint32_t last_activity_ms;
     display_state_t state;
+    display_idle_mode_t idle_mode;
+    uint32_t idle_timeout_ms;  // Time until intermediate (dim/screensaver) state engages
+    screensaver_state_t saver;
     esp_timer_handle_t dim_timer;
     esp_timer_handle_t off_timer;
     SemaphoreHandle_t spi_mutex;
@@ -57,7 +97,14 @@ esp_err_t display_manager_draw_box(display_manager_t *display, uint8_t x, uint8_
 esp_err_t display_manager_draw_frame(display_manager_t *display, uint8_t x, uint8_t y, uint8_t width, uint8_t height);
 esp_err_t display_manager_wake(display_manager_t *display);
 
-#define DISPLAY_DIM_TIMEOUT_MS (120 * 1000)    // 2 minutes
-#define DISPLAY_OFF_TIMEOUT_MS (600 * 1000)   // 10 minutes
+esp_err_t display_manager_set_idle_mode(display_manager_t *display, display_idle_mode_t mode);
+display_idle_mode_t display_manager_get_idle_mode(display_manager_t *display);
+esp_err_t display_manager_set_idle_timeout(display_manager_t *display, uint32_t timeout_ms);
+uint32_t display_manager_get_idle_timeout(display_manager_t *display);
+bool display_manager_screensaver_active(display_manager_t *display);
+void display_manager_screensaver_tick(display_manager_t *display);
+
+#define DISPLAY_IDLE_TIMEOUT_DEFAULT_MS (120 * 1000)  // 2 minutes
+#define DISPLAY_OFF_TIMEOUT_MS          (600 * 1000)  // 10 minutes (fixed)
 
 #endif

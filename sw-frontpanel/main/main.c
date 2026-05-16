@@ -37,6 +37,7 @@
 #include "ota_manager.h"
 #include "driver/gpio.h"
 #include "freertos/queue.h"
+#include "nvs_flash.h"
 
 static const char *TAG = "main";
 
@@ -46,6 +47,9 @@ static menu_t main_menu;
 static menu_t disc_menu;
 static menu_t wifi_menu;
 static menu_t settings_menu;
+static menu_t display_settings_menu;  // Parent: Idle Mode / Idle Timeout
+static menu_t idle_mode_menu;
+static menu_t idle_timeout_menu;
 static menu_t *active_menu = NULL;  // Pointer to currently displayed menu
 static screen_type_t info_return_screen = SCREEN_MAIN_MENU;  // Screen to return to from SCREEN_INFO
 
@@ -55,6 +59,9 @@ static menu_t* screen_menus[SCREEN_COUNT] = {
     [SCREEN_DISC_LIST] = &disc_menu,
     [SCREEN_SETTINGS] = &settings_menu,
     [SCREEN_WIFI_MENU] = &wifi_menu,
+    [SCREEN_DISPLAY_SETTINGS] = &display_settings_menu,
+    [SCREEN_IDLE_MODE] = &idle_mode_menu,
+    [SCREEN_IDLE_TIMEOUT] = &idle_timeout_menu,
 };
 static host_comm_t host_comm;
 static wifi_manager_t wifi_manager;
@@ -78,7 +85,6 @@ static uint8_t current_device_type = PANEL_DEVICE_TYPE_ATAPI;  // Default to ATA
 static rp2350_fw_status_t rp2350_fw_status = {0};
 static panel_firmware_info_t panel_fw_info = {0};
 static bool fw_status_valid = false;
-static uint8_t fw_screen_selection = 0;  // 0=Panel, 1=Main board
 
 // Forward declarations
 static esp_err_t refresh_directory_list(void);
@@ -88,6 +94,14 @@ static void check_firmware_status(void);
 static void draw_firmware_status_screen(void);
 static void trigger_panel_update(void);
 static void trigger_mainboard_update(void);
+static void show_info_screen(const char *title, const char *body);
+static void redraw_current_screen(void);
+
+// SCREEN_INFO state. Title is always a string literal (caller-owned). Body is
+// often built on the caller's stack, so we copy it so the screen survives
+// being re-rendered later (e.g. after the screensaver clears the buffer).
+static const char *info_screen_title = "";
+static char info_screen_body[256] = "";
 
 // Activity LED handler
 static void handle_activity_event(activity_event_t *event) {
@@ -120,6 +134,72 @@ static menu_item_t wifi_menu_items[] = {
     {.text = "Reset WiFi", .action = MENU_ACTION_CUSTOM, .selectable = true},
 };
 
+// Display Settings parent — text rewritten by refresh_display_settings_labels()
+// to show the currently-selected value of each sub-setting.
+static menu_item_t display_settings_menu_items[] = {
+    {.text = "Idle Mode", .action = MENU_ACTION_CUSTOM, .selectable = true},
+    {.text = "Idle Timeout", .action = MENU_ACTION_CUSTOM, .selectable = true},
+};
+
+// Idle Mode picker — order matches display_idle_mode_t enum values.
+static menu_item_t idle_mode_menu_items[] = {
+    {.text = "Dim", .action = MENU_ACTION_CUSTOM, .selectable = true},
+    {.text = "Flying Toasters", .action = MENU_ACTION_CUSTOM, .selectable = true},
+    {.text = "DVD Logo", .action = MENU_ACTION_CUSTOM, .selectable = true},
+    {.text = "None", .action = MENU_ACTION_CUSTOM, .selectable = true},
+};
+static const char *idle_mode_names[] = { "Dim", "Flying Toasters", "DVD Logo", "None" };
+
+// Idle Timeout picker. Values in milliseconds; labels rebuilt with selection mark.
+static const uint32_t idle_timeout_options_ms[] = {
+    30 * 1000,
+    60 * 1000,
+    120 * 1000,
+    300 * 1000,
+};
+static const char *idle_timeout_labels[] = { "30 sec", "1 min", "2 min", "5 min" };
+#define IDLE_TIMEOUT_OPTION_COUNT (sizeof(idle_timeout_options_ms) / sizeof(idle_timeout_options_ms[0]))
+static menu_item_t idle_timeout_menu_items[IDLE_TIMEOUT_OPTION_COUNT] = {
+    {.action = MENU_ACTION_CUSTOM, .selectable = true},
+    {.action = MENU_ACTION_CUSTOM, .selectable = true},
+    {.action = MENU_ACTION_CUSTOM, .selectable = true},
+    {.action = MENU_ACTION_CUSTOM, .selectable = true},
+};
+
+static const char *idle_timeout_short_label(uint32_t timeout_ms) {
+    for (size_t i = 0; i < IDLE_TIMEOUT_OPTION_COUNT; i++) {
+        if (idle_timeout_options_ms[i] == timeout_ms) return idle_timeout_labels[i];
+    }
+    return "Custom";
+}
+
+static void refresh_idle_mode_labels(void) {
+    display_idle_mode_t current = display_manager_get_idle_mode(&display);
+    for (size_t i = 0; i < sizeof(idle_mode_names) / sizeof(idle_mode_names[0]); i++) {
+        snprintf(idle_mode_menu_items[i].text, MENU_ITEM_MAX_LENGTH,
+                 "%s %s", (current == (display_idle_mode_t)i) ? "*" : " ", idle_mode_names[i]);
+    }
+    idle_mode_menu.needs_redraw = true;
+}
+
+static void refresh_idle_timeout_labels(void) {
+    uint32_t current = display_manager_get_idle_timeout(&display);
+    for (size_t i = 0; i < IDLE_TIMEOUT_OPTION_COUNT; i++) {
+        snprintf(idle_timeout_menu_items[i].text, MENU_ITEM_MAX_LENGTH,
+                 "%s %s", (idle_timeout_options_ms[i] == current) ? "*" : " ",
+                 idle_timeout_labels[i]);
+    }
+    idle_timeout_menu.needs_redraw = true;
+}
+
+static void refresh_display_settings_labels(void) {
+    snprintf(display_settings_menu_items[0].text, MENU_ITEM_MAX_LENGTH,
+             "Idle Mode: %s", idle_mode_names[display_manager_get_idle_mode(&display)]);
+    snprintf(display_settings_menu_items[1].text, MENU_ITEM_MAX_LENGTH,
+             "Timeout: %s", idle_timeout_short_label(display_manager_get_idle_timeout(&display)));
+    display_settings_menu.needs_redraw = true;
+}
+
 // Button event handler
 static void handle_button_event(button_event_t *event) {
     if (!event) return;
@@ -131,7 +211,7 @@ static void handle_button_event(button_event_t *event) {
     if (event->type == BUTTON_EVENT_CLICK) {
         esp_err_t wake_result = display_manager_wake(&display);
         if (wake_result == ESP_ERR_NOT_FINISHED) {
-            ESP_LOGI(TAG, "Display was off - ignoring button action, just waking up");
+            ESP_LOGI(TAG, "Display was idle - just waking, ignoring action");
             return;
         }
     }
@@ -208,7 +288,7 @@ static void handle_button_event(button_event_t *event) {
                                 // IDE mode: eject not supported
                                 info_return_screen = SCREEN_MAIN_MENU;
                                 current_screen = SCREEN_INFO;
-                                ui_draw_info_screen(&display, "Not Available",
+                                show_info_screen("Not Available",
                                     "Eject is not available\nin IDE mode.\n\nUse Select Image to\nchoose a different\nhard disk image.");
                             } else if (host_comm.initialized) {
                                 esp_err_t ret = host_comm_eject_image(&host_comm);
@@ -243,7 +323,7 @@ static void handle_button_event(button_event_t *event) {
                                      main_ver_str,
                                      host_comm_get_transport_name(&host_comm),
                                      host_comm.initialized ? "Connected" : "Disconnected");
-                            ui_draw_info_screen(&display, "System Info", info_text);
+                            show_info_screen("System Info", info_text);
                         }
                     }
                     break;
@@ -292,7 +372,7 @@ static void handle_button_event(button_event_t *event) {
                                         // IDE mode: image selected for next boot
                                         info_return_screen = SCREEN_DISC_LIST;
                                         current_screen = SCREEN_INFO;
-                                        ui_draw_info_screen(&display, "Image Selected",
+                                        show_info_screen("Image Selected",
                                             "Image will be loaded\non next power cycle.\n\nPress back to\nreturn to browser.");
                                     } else {
                                         // ATAPI mode: image loaded, return to status screen
@@ -336,7 +416,8 @@ static void handle_button_event(button_event_t *event) {
                         } else if (selected == 1) { // "WiFi Setup"
                             current_screen = SCREEN_WIFI_MENU;
                         } else if (selected == 2) { // "Display Settings"
-                            ESP_LOGI(TAG, "Display settings not implemented yet");
+                            refresh_display_settings_labels();
+                            current_screen = SCREEN_DISPLAY_SETTINGS;
                         }
                     }
                     break;
@@ -400,7 +481,7 @@ static void handle_button_event(button_event_t *event) {
                             }
                             info_return_screen = SCREEN_WIFI_MENU;
                             current_screen = SCREEN_INFO;
-                            ui_draw_info_screen(&display, "WiFi Status", info_text);
+                            show_info_screen("WiFi Status", info_text);
                         } else if (selected == 1) { // "Reset WiFi"
                             ESP_LOGI(TAG, "Resetting WiFi to defaults");
                             wifi_manager_disconnect(&wifi_manager);
@@ -415,13 +496,104 @@ static void handle_button_event(button_event_t *event) {
                                 WIFI_MANAGER_AP_SSID, WIFI_MANAGER_AP_PASSWORD);
                             info_return_screen = SCREEN_WIFI_MENU;
                             current_screen = SCREEN_INFO;
-                            ui_draw_info_screen(&display, "WiFi Reset", info_text);
+                            show_info_screen("WiFi Reset", info_text);
                         }
                     }
                     break;
                 case 3: // Back button (West)
                     if (event->type == BUTTON_EVENT_CLICK) {
                         current_screen = SCREEN_SETTINGS;
+                    }
+                    break;
+            }
+            break;
+
+        case SCREEN_DISPLAY_SETTINGS:
+            switch (event->button_id) {
+                case 0: // Up (North)
+                    if (event->type == BUTTON_EVENT_CLICK || event->type == BUTTON_EVENT_REPEAT) {
+                        menu_navigate_up(&display_settings_menu);
+                    }
+                    break;
+                case 2: // Down (South)
+                    if (event->type == BUTTON_EVENT_CLICK || event->type == BUTTON_EVENT_REPEAT) {
+                        menu_navigate_down(&display_settings_menu);
+                    }
+                    break;
+                case 1: // Select (East)
+                    if (event->type == BUTTON_EVENT_CLICK) {
+                        uint32_t selected = menu_get_selected_index(&display_settings_menu);
+                        if (selected == 0) {
+                            refresh_idle_mode_labels();
+                            current_screen = SCREEN_IDLE_MODE;
+                        } else if (selected == 1) {
+                            refresh_idle_timeout_labels();
+                            current_screen = SCREEN_IDLE_TIMEOUT;
+                        }
+                    }
+                    break;
+                case 3: // Back (West)
+                    if (event->type == BUTTON_EVENT_CLICK) {
+                        current_screen = SCREEN_SETTINGS;
+                    }
+                    break;
+            }
+            break;
+
+        case SCREEN_IDLE_MODE:
+            switch (event->button_id) {
+                case 0:
+                    if (event->type == BUTTON_EVENT_CLICK || event->type == BUTTON_EVENT_REPEAT) {
+                        menu_navigate_up(&idle_mode_menu);
+                    }
+                    break;
+                case 2:
+                    if (event->type == BUTTON_EVENT_CLICK || event->type == BUTTON_EVENT_REPEAT) {
+                        menu_navigate_down(&idle_mode_menu);
+                    }
+                    break;
+                case 1:
+                    if (event->type == BUTTON_EVENT_CLICK) {
+                        uint32_t selected = menu_get_selected_index(&idle_mode_menu);
+                        display_manager_set_idle_mode(&display, (display_idle_mode_t)selected);
+                        refresh_idle_mode_labels();
+                    }
+                    break;
+                case 3:
+                    if (event->type == BUTTON_EVENT_CLICK) {
+                        refresh_display_settings_labels();
+                        current_screen = SCREEN_DISPLAY_SETTINGS;
+                    }
+                    break;
+            }
+            break;
+
+        case SCREEN_IDLE_TIMEOUT:
+            switch (event->button_id) {
+                case 0:
+                    if (event->type == BUTTON_EVENT_CLICK || event->type == BUTTON_EVENT_REPEAT) {
+                        menu_navigate_up(&idle_timeout_menu);
+                    }
+                    break;
+                case 2:
+                    if (event->type == BUTTON_EVENT_CLICK || event->type == BUTTON_EVENT_REPEAT) {
+                        menu_navigate_down(&idle_timeout_menu);
+                    }
+                    break;
+                case 1:
+                    if (event->type == BUTTON_EVENT_CLICK) {
+                        uint32_t selected = menu_get_selected_index(&idle_timeout_menu);
+                        if (selected < IDLE_TIMEOUT_OPTION_COUNT) {
+                            display_manager_set_idle_timeout(&display,
+                                                             idle_timeout_options_ms[selected]);
+                            refresh_idle_timeout_labels();
+                        }
+                    }
+                    break;
+                case 3:
+                    if (event->type == BUTTON_EVENT_CLICK) {
+                        refresh_display_settings_labels();
+                        current_screen = SCREEN_DISPLAY_SETTINGS;
                     }
                     break;
             }
@@ -488,16 +660,66 @@ static void handle_button_event(button_event_t *event) {
     }
 }
 
+static void show_info_screen(const char *title, const char *body) {
+    info_screen_title = title ? title : "";
+    if (body) {
+        strncpy(info_screen_body, body, sizeof(info_screen_body) - 1);
+        info_screen_body[sizeof(info_screen_body) - 1] = '\0';
+    } else {
+        info_screen_body[0] = '\0';
+    }
+    ui_draw_info_screen(&display, info_screen_title, info_screen_body);
+}
+
+// Re-render whatever screen is currently active. Used after the screensaver
+// has overwritten the buffer.
+static void redraw_current_screen(void) {
+    switch (current_screen) {
+        case SCREEN_STATUS:
+            disc_name_changed = true;     // Reset scroll animation
+            status_needs_redraw = true;   // display_update_task will draw next tick
+            break;
+        case SCREEN_MAIN_MENU:
+        case SCREEN_DISC_LIST:
+        case SCREEN_SETTINGS:
+        case SCREEN_WIFI_MENU:
+        case SCREEN_DISPLAY_SETTINGS:
+        case SCREEN_IDLE_MODE:
+        case SCREEN_IDLE_TIMEOUT:
+            if (active_menu) active_menu->needs_redraw = true;
+            break;
+        case SCREEN_INFO:
+            ui_draw_info_screen(&display, info_screen_title, info_screen_body);
+            break;
+        case SCREEN_FIRMWARE_STATUS:
+            draw_firmware_status_screen();
+            break;
+        case SCREEN_FIRMWARE_UPDATE:
+        case SCREEN_SPLASH:
+        default:
+            // FW update task owns its own rendering; splash only runs at boot
+            break;
+    }
+}
+
 // Display update task
 static void display_update_task(void *pvParameters) {
     static screen_type_t last_screen = SCREEN_COUNT;  // Invalid value forces initial draw
 
     while (1) {
         if (display.initialized) {
+            // Honor a deferred full-redraw request first (e.g. waking from screensaver).
+            if (display.needs_full_redraw) {
+                display.needs_full_redraw = false;
+                redraw_current_screen();
+            }
+
             bool screen_changed = (current_screen != last_screen);
             last_screen = current_screen;
 
-            if (current_screen == SCREEN_STATUS) {
+            if (display_manager_screensaver_active(&display)) {
+                display_manager_screensaver_tick(&display);
+            } else if (current_screen == SCREEN_STATUS) {
                 if (screen_changed || status_needs_redraw) {
                     // Full redraw when entering status screen or status changed
                     ui_draw_status_screen(&display, current_disc_name,
@@ -764,17 +986,16 @@ static void check_firmware_status(void) {
     ESP_LOGI(TAG, "Checking firmware status...");
 
     // Show loading screen
-    ui_draw_info_screen(&display, "Firmware", "Checking...");
+    show_info_screen("Firmware", "Checking...");
     display_manager_update(&display);  // Force immediate display update before blocking operations
 
     fw_status_valid = false;
-    fw_screen_selection = 0;
     memset(&panel_fw_info, 0, sizeof(panel_fw_info));
     memset(&rp2350_fw_status, 0, sizeof(rp2350_fw_status));
 
     if (!host_comm.initialized) {
         ESP_LOGW(TAG, "Host communication not initialized");
-        ui_draw_info_screen(&display, "Error", "Host not connected");
+        show_info_screen("Error", "Host not connected");
         display_manager_update(&display);
         return;
     }
@@ -933,6 +1154,16 @@ static void host_comm_task(void *pvParameters) {
 void app_main(void) {
     ESP_LOGI(TAG, "PicoIDE Front Panel Starting...");
 
+    // NVS must be ready before display_manager_init loads its idle-mode/timeout
+    // config. wifi_manager_init also calls nvs_flash_init later, but that's
+    // idempotent.
+    esp_err_t nvs_ret = nvs_flash_init();
+    if (nvs_ret == ESP_ERR_NVS_NO_FREE_PAGES || nvs_ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        nvs_ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(nvs_ret);
+
     // Initialize shared SPI bus with MISO enabled for host communication
     spi_bus_config_t bus_config = {
         .mosi_io_num = PIN_SPI_MOSI,
@@ -1056,6 +1287,20 @@ void app_main(void) {
     wifi_menu.title = "WiFi Setup";
     menu_set_items(&wifi_menu, wifi_menu_items,
                   sizeof(wifi_menu_items) / sizeof(wifi_menu_items[0]));
+
+    menu_init(&display_settings_menu, MENU_VISIBLE_ITEMS_WITH_TITLE);
+    display_settings_menu.title = "Display";
+    menu_set_items(&display_settings_menu, display_settings_menu_items,
+                  sizeof(display_settings_menu_items) / sizeof(display_settings_menu_items[0]));
+
+    menu_init(&idle_mode_menu, MENU_VISIBLE_ITEMS_WITH_TITLE);
+    idle_mode_menu.title = "Idle Mode";
+    menu_set_items(&idle_mode_menu, idle_mode_menu_items,
+                  sizeof(idle_mode_menu_items) / sizeof(idle_mode_menu_items[0]));
+
+    menu_init(&idle_timeout_menu, MENU_VISIBLE_ITEMS_WITH_TITLE);
+    idle_timeout_menu.title = "Idle Timeout";
+    menu_set_items(&idle_timeout_menu, idle_timeout_menu_items, IDLE_TIMEOUT_OPTION_COUNT);
 
     transport_config_t transport_cfg = {
         .device_addr = HOST_DEVICE_ADDR,
