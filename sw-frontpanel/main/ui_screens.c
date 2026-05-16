@@ -518,6 +518,10 @@ esp_err_t ui_draw_firmware_update(display_manager_t *display, const char *status
 
     display_manager_request_update(display);
 
+    // FW updates count as activity — keep the display awake so dim/screensaver
+    // don't engage over the progress UI.
+    display_manager_wake(display);
+
     return ESP_OK;
 }
 
