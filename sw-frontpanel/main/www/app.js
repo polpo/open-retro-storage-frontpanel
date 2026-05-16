@@ -17,7 +17,9 @@
 let currentImage = null;
 let currentPath = "/";
 let productName = "PicoIDE";
+// #ifdef PRODUCT_BLUESCSI
 let mainboardFirmwarePending = false;
+// #endif
 let devices = [];
 let activeDeviceIndex = 0;
 let deviceIndexInitialized = false;
@@ -107,7 +109,9 @@ async function loadSystemInfo() {
             <strong>Free Memory:</strong> ${freeMemKB}<br>
             <strong>Uptime:</strong> ${uptimeStr}
         `;
+        // #ifdef PRODUCT_BLUESCSI
         setupMainboardFirmwareUI(productName);
+        // #endif
         showStatus('success', 'Connected to front panel');
     } else {
         showStatus('error', 'Failed to connect to front panel');
@@ -371,6 +375,7 @@ async function connectToWiFi(ssid, password, isOpen = false) {
 }
 
 // Firmware update variables
+// #ifdef PRODUCT_BLUESCSI
 let panelUpdateInProgress = false;
 let panelUpdateCheckTimer = null;
 let mainboardUpdateInProgress = false;
@@ -657,6 +662,122 @@ async function runMainboardUpdateAnimation() {
     mainboardUpdateInProgress = false;
     document.getElementById('mainboard-update-btn').disabled = false;
 }
+// #else
+let systemUpdateInProgress = false;
+let systemUpdateCheckTimer = null;
+
+// Format version number for display.
+// Encoding is 0xMMmmppPP; the low byte is 0xFF for a final release or 0-254
+// for a "-preN" prerelease. Unsigned shifts (>>>) since major can set bit 31.
+function formatVersion(version) {
+    if (version === 0) return 'Unknown';
+    const major = (version >>> 24) & 0xFF;
+    const minor = (version >>> 16) & 0xFF;
+    const patch = (version >>> 8) & 0xFF;
+    const pre = version & 0xFF;
+    const base = `v${major}.${minor}.${patch}`;
+    return pre === 0xFF ? base : `${base}-pre${pre}`;
+}
+
+async function checkFirmware() {
+    showStatus('', 'Checking for firmware updates...');
+    const data = await apiCall('/firmware/check');
+    if (data) {
+        if (data.current_version !== undefined) {
+            document.getElementById('system-current-version').textContent = formatVersion(data.current_version);
+        }
+
+        if (data.update_available) {
+            document.getElementById('system-available-version').textContent = formatVersion(data.available_version);
+            document.getElementById('system-available-version').style.color = '#28a745';
+            document.getElementById('system-update-btn').disabled = false;
+        } else {
+            document.getElementById('system-available-version').textContent = 'Up to date';
+            document.getElementById('system-available-version').style.color = '#666';
+            document.getElementById('system-update-btn').disabled = true;
+        }
+
+        if (data.error) {
+            document.getElementById('system-available-version').textContent = 'Error';
+            document.getElementById('system-available-version').style.color = '#dc3545';
+        }
+
+        showStatus('success', 'Firmware check complete');
+    }
+}
+
+async function startSystemUpdate() {
+    if (systemUpdateInProgress) {
+        showStatus('error', 'Update already in progress');
+        return;
+    }
+
+    if (!confirm('Are you sure you want to update the system firmware? The device will restart.')) {
+        return;
+    }
+
+    systemUpdateInProgress = true;
+    document.getElementById('system-update-btn').disabled = true;
+    document.getElementById('system-update-progress').style.display = 'block';
+    document.getElementById('system-update-status').style.display = 'block';
+    document.getElementById('system-update-status').textContent = 'Starting update...';
+
+    showStatus('', 'Starting firmware update...');
+
+    const data = await apiCall('/firmware/update', { method: 'POST' });
+    if (data && data.success) {
+        systemUpdateCheckTimer = setInterval(checkSystemUpdateProgress, 2000);
+    } else {
+        systemUpdateInProgress = false;
+        document.getElementById('system-update-btn').disabled = false;
+        document.getElementById('system-update-progress').style.display = 'none';
+        document.getElementById('system-update-status').style.display = 'none';
+        showStatus('error', `Failed to start update: ${data?.error || 'Unknown error'}`);
+    }
+}
+
+async function checkSystemUpdateProgress() {
+    const data = await apiCall('/firmware/status');
+    if (data) {
+        const progress = data.progress || 0;
+        const state = data.state || 'unknown';
+
+        document.getElementById('system-update-progress-fill').style.width = `${progress}%`;
+
+        let statusText = '';
+        switch (state) {
+            case 'updating_panel':
+                statusText = `Updating panel firmware... ${progress}%`;
+                break;
+            case 'updating_mainboard':
+                statusText = 'Updating main board...';
+                break;
+            case 'rebooting':
+                statusText = 'Waiting for reboot...';
+                break;
+            case 'success':
+                statusText = 'Update complete! Device restarting...';
+                systemUpdateInProgress = false;
+                clearInterval(systemUpdateCheckTimer);
+                systemUpdateCheckTimer = null;
+                showStatus('success', 'Firmware update completed!');
+                break;
+            case 'error':
+                statusText = `Failed: ${data.error || 'Unknown error'}`;
+                systemUpdateInProgress = false;
+                clearInterval(systemUpdateCheckTimer);
+                systemUpdateCheckTimer = null;
+                document.getElementById('system-update-btn').disabled = false;
+                showStatus('error', statusText);
+                break;
+            default:
+                statusText = 'Preparing...';
+        }
+
+        document.getElementById('system-update-status').textContent = statusText;
+    }
+}
+// #endif
 
 // File upload variables
 let uploadXHR = null;
@@ -928,6 +1049,7 @@ async function saveConfig() {
 }
 
 // Configure main board firmware UI based on product type
+// #ifdef PRODUCT_BLUESCSI
 function setupMainboardFirmwareUI(product) {
     const mainboardType = document.getElementById('mainboard-type');
     const availableSection = document.getElementById('mainboard-available-section');
@@ -1021,6 +1143,7 @@ async function uploadMainboardFirmware() {
     xhr.open('POST', '/api/firmware/mainboard/upload');
     xhr.send(formData);
 }
+// #endif
 
 // Initialize the page (serialize requests to avoid overwhelming ESP32)
 document.addEventListener('DOMContentLoaded', async function() {
@@ -1028,7 +1151,11 @@ document.addEventListener('DOMContentLoaded', async function() {
     await refreshDevices();
     await refreshImages();
     await loadWiFiStatus();
+    // #ifdef PRODUCT_BLUESCSI
     await checkAllFirmware();
+    // #else
+    await checkFirmware();
+    // #endif
     await loadConfig();
 
     // Add file input change listener to set file size

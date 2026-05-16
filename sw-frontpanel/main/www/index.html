@@ -141,6 +141,7 @@
             </div>
         </div>
 
+        <!-- #ifdef PRODUCT_BLUESCSI -->
         <div class="section">
             <h3>🔄 Firmware Update</h3>
             <button onclick="checkAllFirmware()" class="refresh-btn">🔍 Check for Updates</button>
@@ -183,7 +184,26 @@
                 <div id="mainboard-update-status" class="status" style="display: none;"></div>
             </div>
         </div>
+        <!-- #else -->
+        <div class="section">
+            <h3>🔄 Firmware Update</h3>
+            <button onclick="checkFirmware()" class="refresh-btn">🔍 Check for Updates</button>
 
+            <div style="margin-top: 15px;">
+                <div id="firmware-status" class="status">
+                    <div class="version-info">
+                        <strong>System Version:</strong> <span id="system-current-version">Loading...</span>
+                        <strong style="margin-left: 15px;">Available:</strong> <span id="system-available-version">Checking...</span>
+                    </div>
+                </div>
+                <button onclick="startSystemUpdate()" class="update-btn" id="system-update-btn" disabled>📥 Update System</button>
+                <div id="system-update-progress" class="progress-bar" style="display: none;">
+                    <div id="system-update-progress-fill" class="progress-fill" style="width: 0%;"></div>
+                </div>
+                <div id="system-update-status" class="status" style="display: none;"></div>
+            </div>
+        </div>
+        <!-- #endif -->
         <div class="section">
             <h3>⚙️ <span id="config-heading">Config Editor</span></h3>
             <div style="margin-bottom: 10px;">

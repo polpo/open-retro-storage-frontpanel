@@ -15,6 +15,7 @@
 //  with this program; if not, see <https://www.gnu.org/licenses/>.
 
 #include "ui_screens.h"
+#include "ota_manager.h"
 #include "sdkconfig.h"
 #include "esp_log.h"
 #include "esp_app_desc.h"
@@ -525,30 +526,25 @@ esp_err_t ui_draw_firmware_update(display_manager_t *display, const char *status
     return ESP_OK;
 }
 
-// Helper to format version number to string
-static void format_version_string(char *buf, size_t buf_size, uint32_t version) {
-    uint8_t major = (version >> 16) & 0xFF;
-    uint8_t minor = (version >> 8) & 0xFF;
-    uint8_t patch = version & 0xFF;
-    snprintf(buf, buf_size, "%d.%d.%d", major, minor, patch);
-}
-
-// Format main board version: date-based (YYYY.MM.DD) for BlueSCSI, semver for PicoIDE
-static void format_mainboard_version(char *buf, size_t buf_size, uint32_t version) {
 #ifdef CONFIG_PRODUCT_BLUESCSI
+// Main board firmware uses date-based versioning (YYYY.MM.DD); the panel
+// version is semver (formatted via ota_manager_format_version_string).
+static void format_mainboard_version(char *buf, size_t buf_size, uint32_t version) {
     uint8_t year_offset = (version >> 16) & 0xFF;
     uint8_t month = (version >> 8) & 0xFF;
     uint8_t day = version & 0xFF;
     snprintf(buf, buf_size, "%d.%02d.%02d", 2000 + year_offset, month, day);
-#else
-    format_version_string(buf, buf_size, version);
-#endif
 }
 
 esp_err_t ui_draw_firmware_status(display_manager_t *display,
                                   uint32_t panel_current_ver, uint32_t panel_avail_ver, bool panel_update_avail,
                                   uint32_t main_current_ver, uint32_t main_avail_ver, bool main_update_avail,
                                   uint8_t selection) {
+#else
+esp_err_t ui_draw_firmware_status(display_manager_t *display,
+                                  uint32_t current_ver, uint32_t avail_ver,
+                                  bool update_avail) {
+#endif
     if (!display) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -559,10 +555,12 @@ esp_err_t ui_draw_firmware_status(display_manager_t *display,
     display_manager_set_font(display, u8g2_font_6x10_tf);
     display_manager_draw_box(display, 0, 0, 128, 12);
     display_manager_set_draw_color(display, 0);
-    display_manager_draw_text(display, 2, 10, "Firmware Updates");
+    display_manager_draw_text(display, 2, 10, "Firmware Update");
     display_manager_set_draw_color(display, 1);
 
-    char version_str[16];
+    char version_str[20];
+
+#ifdef CONFIG_PRODUCT_BLUESCSI
     int y = 24;
     const int row_height = 12;
 
@@ -572,17 +570,17 @@ esp_err_t ui_draw_firmware_status(display_manager_t *display,
         display_manager_set_draw_color(display, 0);
     }
     display_manager_draw_text(display, 2, y, "Panel:");
-    format_version_string(version_str, sizeof(version_str), panel_current_ver);
+    ota_manager_format_version_string(version_str, panel_current_ver);
     display_manager_draw_text(display, 44, y, version_str);
     if (panel_update_avail) {
         display_manager_draw_text(display, 79, y, "->");
-        format_version_string(version_str, sizeof(version_str), panel_avail_ver);
+        ota_manager_format_version_string(version_str, panel_avail_ver);
         display_manager_draw_text(display, 94, y, version_str);
     }
     if (selection == 0) {
         display_manager_set_draw_color(display, 1);
     }
-
+    
     y += row_height;
 
     // Main board firmware row
@@ -611,6 +609,28 @@ esp_err_t ui_draw_firmware_status(display_manager_t *display,
     } else {
         display_manager_draw_text(display, 0, 62, "No updates  [<] Back");
     }
+#else
+    // System version (main board version is user-facing)
+    display_manager_draw_text(display, 2, 26, "Version:");
+    ota_manager_format_version_string(version_str, current_ver);
+    display_manager_draw_text(display, 56, 26, version_str);
+
+    // Available version
+    if (update_avail) {
+        display_manager_draw_text(display, 2, 40, "Available:");
+        ota_manager_format_version_string(version_str, avail_ver);
+        display_manager_draw_text(display, 68, 40, version_str);
+    } else {
+        display_manager_draw_text(display, 2, 40, "Up to date");
+    }
+
+    // Instructions at bottom
+    if (update_avail) {
+        display_manager_draw_text(display, 0, 62, "[>] Update  [<] Back");
+    } else {
+        display_manager_draw_text(display, 0, 62, "[<] Back");
+    }
+#endif
 
     display_manager_request_update(display);
 

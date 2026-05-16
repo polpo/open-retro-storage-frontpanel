@@ -18,6 +18,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <inttypes.h>
+#include <sys/param.h>  // MIN()
 #include "esp_log.h"
 #include "esp_http_server.h"
 #include "esp_system.h"
@@ -43,12 +44,14 @@ static esp_err_t api_wifi_status_handler(httpd_req_t *req);
 static esp_err_t api_firmware_check_handler(httpd_req_t *req);
 static esp_err_t api_firmware_update_handler(httpd_req_t *req);
 static esp_err_t api_firmware_status_handler(httpd_req_t *req);
+#ifdef CONFIG_PRODUCT_BLUESCSI
 static esp_err_t api_mainboard_firmware_check_handler(httpd_req_t *req);
 static esp_err_t api_mainboard_firmware_update_handler(httpd_req_t *req);
 static esp_err_t api_mainboard_firmware_status_handler(httpd_req_t *req);
+static esp_err_t api_mainboard_firmware_upload_handler(httpd_req_t *req);
+#endif
 static esp_err_t api_devices_handler(httpd_req_t *req);
 static esp_err_t api_upload_handler(httpd_req_t *req);
-static esp_err_t api_mainboard_firmware_upload_handler(httpd_req_t *req);
 static esp_err_t api_download_handler(httpd_req_t *req);
 
 // Global server instance for handlers
@@ -76,6 +79,7 @@ static uint16_t get_device_from_body(httpd_req_t *req) {
 static ota_manager_t g_ota_manager;
 static TaskHandle_t g_ota_task_handle = NULL;
 
+#ifdef CONFIG_PRODUCT_BLUESCSI
 // Background OTA task - processes OTA update without blocking HTTP handler
 static void web_firmware_update_task(void *pvParameters) {
     ota_manager_t *ota = (ota_manager_t *)pvParameters;
@@ -104,6 +108,7 @@ static void web_firmware_update_task(void *pvParameters) {
     g_ota_task_handle = NULL;
     vTaskDelete(NULL);
 }
+#endif
 
 // Embedded file content (gzipped, symbols created by CMakeLists.txt)
 extern const uint8_t index_html_gz_start[] asm("_binary_index_html_gz_start");
@@ -154,11 +159,13 @@ static const httpd_uri_t uri_handlers[] = {
     { .uri = "/api/firmware/check", .method = HTTP_GET, .handler = api_firmware_check_handler, .user_ctx = NULL },
     { .uri = "/api/firmware/update", .method = HTTP_POST, .handler = api_firmware_update_handler, .user_ctx = NULL },
     { .uri = "/api/firmware/status", .method = HTTP_GET, .handler = api_firmware_status_handler, .user_ctx = NULL },
+#ifdef CONFIG_PRODUCT_BLUESCSI
     { .uri = "/api/firmware/mainboard/check", .method = HTTP_GET, .handler = api_mainboard_firmware_check_handler, .user_ctx = NULL },
     { .uri = "/api/firmware/mainboard/update", .method = HTTP_POST, .handler = api_mainboard_firmware_update_handler, .user_ctx = NULL },
     { .uri = "/api/firmware/mainboard/status", .method = HTTP_GET, .handler = api_mainboard_firmware_status_handler, .user_ctx = NULL },
-    { .uri = "/api/upload", .method = HTTP_POST, .handler = api_upload_handler, .user_ctx = NULL },
     { .uri = "/api/firmware/mainboard/upload", .method = HTTP_POST, .handler = api_mainboard_firmware_upload_handler, .user_ctx = NULL },
+#endif
+    { .uri = "/api/upload", .method = HTTP_POST, .handler = api_upload_handler, .user_ctx = NULL },
     { .uri = "/api/download", .method = HTTP_GET, .handler = api_download_handler, .user_ctx = NULL }
 };
 
@@ -1016,6 +1023,7 @@ static esp_err_t api_firmware_check_handler(httpd_req_t *req) {
 
     // Initialize OTA manager if needed
     if (g_server && g_server->interface_ctx && g_server->interface_ctx->host_comm) {
+#ifdef CONFIG_PRODUCT_BLUESCSI
         ota_manager_init(&g_ota_manager, g_server->interface_ctx->host_comm);
 
         // Get current version
@@ -1040,14 +1048,60 @@ static esp_err_t api_firmware_check_handler(httpd_req_t *req) {
                 if (ret != ESP_OK) return ret;
             }
         } else {
+            ret = json.write("current_version", 0);
+            if (ret != ESP_OK) return ret;
+
             ret = json.write("update_available", 0);
             if (ret != ESP_OK) return ret;
 
             ret = json.write("error", esp_err_to_name(check_ret));
             if (ret != ESP_OK) return ret;
         }
+#else
+        host_comm_t *comm = g_server->interface_ctx->host_comm;
+
+        // Get main board firmware status (user-facing "system version")
+        rp2350_fw_status_t rp_status = {};
+        esp_err_t rp_ret = host_comm_get_rp2350_fw_status(comm, &rp_status);
+
+        if (rp_ret == ESP_OK) {
+            ret = json.write("current_version", rp_status.current_version);
+            if (ret != ESP_OK) return ret;
+
+            // Check if any update is available (main board or panel)
+            bool main_update = (rp_status.available_version != 0);
+
+            // Also check panel firmware from combined UF2
+            ota_manager_init(&g_ota_manager, comm);
+            bool panel_update = false;
+            panel_firmware_info_t panel_info = {};
+            esp_err_t panel_ret = host_comm_check_firmware(comm, &panel_info);
+            if (panel_ret == ESP_OK && panel_info.available) {
+                uint32_t current_panel_ver = ota_manager_get_current_version();
+                panel_update = (panel_info.version > current_panel_ver);
+            }
+
+            bool any_update = main_update || panel_update;
+            ret = json.write("update_available", any_update ? 1 : 0);
+            if (ret != ESP_OK) return ret;
+
+            if (any_update) {
+                ret = json.write("available_version", rp_status.available_version);
+                if (ret != ESP_OK) return ret;
+            }
+        } else {
+            ret = json.write("current_version", 0);
+            if (ret != ESP_OK) return ret;
+
+            ret = json.write("update_available", 0);
+            if (ret != ESP_OK) return ret;
+
+            ret = json.write("error", esp_err_to_name(rp_ret));
+            if (ret != ESP_OK) return ret;
+        }
+#endif
     } else {
-        ret = json.write("current_version", 0x00010000);
+        ret = json.write("current_version", 0);
         if (ret != ESP_OK) return ret;
 
         ret = json.write("update_available", 0);
@@ -1063,6 +1117,121 @@ static esp_err_t api_firmware_check_handler(httpd_req_t *req) {
     return json.finalize();
 }
 
+#ifndef CONFIG_PRODUCT_BLUESCSI
+// Unified update state tracking for web UI
+typedef enum {
+    WEB_UPDATE_IDLE = 0,
+    WEB_UPDATE_PANEL,
+    WEB_UPDATE_MAINBOARD,
+    WEB_UPDATE_WAITING_REBOOT,
+    WEB_UPDATE_SUCCESS,
+    WEB_UPDATE_ERROR
+} web_update_phase_t;
+
+static volatile web_update_phase_t g_web_update_phase = WEB_UPDATE_IDLE;
+static volatile uint8_t g_web_update_progress = 0;
+static const char* g_web_update_error = NULL;
+
+// Background task that runs the unified update flow
+static void web_firmware_update_task(void *pvParameters) {
+    host_comm_t *comm = (host_comm_t *)pvParameters;
+
+    // Check what needs updating
+    panel_firmware_info_t panel_info = {};
+    esp_err_t ret = host_comm_check_firmware(comm, &panel_info);
+    bool panel_needs_update = (ret == ESP_OK && panel_info.available &&
+                               panel_info.version > ota_manager_get_current_version());
+
+    rp2350_fw_status_t rp_status = {};
+    ret = host_comm_get_rp2350_fw_status(comm, &rp_status);
+    bool main_needs_update = (ret == ESP_OK && rp_status.available_version != 0);
+
+    bool panel_ota_written = false;
+
+    // Phase 1: Panel OTA (if needed)
+    if (panel_needs_update) {
+        g_web_update_phase = WEB_UPDATE_PANEL;
+        g_web_update_progress = 0;
+
+        ota_manager_init(&g_ota_manager, comm);
+        memcpy(&g_ota_manager.firmware_info, &panel_info, sizeof(panel_firmware_info_t));
+
+        ret = ota_manager_start_update(&g_ota_manager);
+        if (ret != ESP_OK) {
+            g_web_update_error = "Failed to start panel OTA";
+            g_web_update_phase = WEB_UPDATE_ERROR;
+            vTaskDelete(NULL);
+            return;
+        }
+
+        while (1) {
+            ret = ota_manager_process(&g_ota_manager);
+            ota_state_t state = ota_manager_get_state(&g_ota_manager);
+            g_web_update_progress = ota_manager_get_progress(&g_ota_manager);
+
+            if (state == OTA_STATE_SUCCESS) {
+                panel_ota_written = true;
+                break;
+            } else if (state == OTA_STATE_ERROR) {
+                g_web_update_error = "Panel OTA failed";
+                g_web_update_phase = WEB_UPDATE_ERROR;
+                vTaskDelete(NULL);
+                return;
+            }
+            taskYIELD();
+        }
+    }
+
+    // Phase 2: Main board update
+    if (main_needs_update) {
+        g_web_update_phase = WEB_UPDATE_MAINBOARD;
+        g_web_update_progress = 0;
+
+        ret = host_comm_start_rp2350_update(comm);
+        if (ret != ESP_OK) {
+            g_web_update_error = "Failed to start main board update";
+            if (panel_ota_written) {
+                // Panel OTA was already written, reboot to apply it at least
+                esp_restart();
+            }
+            g_web_update_phase = WEB_UPDATE_ERROR;
+            vTaskDelete(NULL);
+            return;
+        }
+
+        // Wait for main board to reboot
+        g_web_update_phase = WEB_UPDATE_WAITING_REBOOT;
+        g_web_update_progress = 50;
+
+        // Give it time to flash and reboot
+        vTaskDelay(pdMS_TO_TICKS(5000));
+
+        // Poll for main board to come back
+        for (int attempts = 0; attempts < 20; attempts++) {
+            vTaskDelay(pdMS_TO_TICKS(500));
+            rp2350_fw_status_t new_status;
+            if (host_comm_get_rp2350_fw_status(comm, &new_status) == ESP_OK) {
+                g_web_update_progress = 100;
+                break;
+            }
+        }
+    }
+
+    // Phase 3: Reboot panel if OTA was written
+    if (panel_ota_written) {
+        g_web_update_phase = WEB_UPDATE_SUCCESS;
+        g_web_update_progress = 100;
+        vTaskDelay(pdMS_TO_TICKS(2000));
+        esp_restart();
+    }
+
+    g_web_update_phase = WEB_UPDATE_SUCCESS;
+    g_web_update_progress = 100;
+    vTaskDelete(NULL);
+}
+#endif
+
+#ifdef CONFIG_PRODUCT_BLUESCSI
 static esp_err_t api_firmware_update_handler(httpd_req_t *req) {
     httpd_resp_set_type(req, "application/json");
 
@@ -1106,7 +1275,51 @@ static esp_err_t api_firmware_update_handler(httpd_req_t *req) {
 
     return json.finalize();
 }
+#else
+// Unified firmware update trigger
+static esp_err_t api_firmware_update_handler(httpd_req_t *req) {
+    httpd_resp_set_type(req, "application/json");
 
+    JsonStreamWriter json(req);
+    esp_err_t ret = json.beginObject();
+    if (ret != ESP_OK) return ret;
+
+    bool success = false;
+    if (g_server && g_server->interface_ctx && g_server->interface_ctx->host_comm &&
+        g_web_update_phase == WEB_UPDATE_IDLE) {
+
+        g_web_update_phase = WEB_UPDATE_PANEL;  // Will be adjusted by task
+        g_web_update_progress = 0;
+        g_web_update_error = NULL;
+
+        BaseType_t task_ret = xTaskCreate(web_firmware_update_task, "web_fw_update", 8192,
+                                          g_server->interface_ctx->host_comm, 10, NULL);
+        success = (task_ret == pdPASS);
+
+        if (!success) {
+            g_web_update_phase = WEB_UPDATE_IDLE;
+            ret = json.write("error", "Failed to create update task");
+            if (ret != ESP_OK) return ret;
+        }
+    } else if (g_web_update_phase != WEB_UPDATE_IDLE) {
+        ret = json.write("error", "Update already in progress");
+        if (ret != ESP_OK) return ret;
+    } else {
+        ret = json.write("error", "Interface not available");
+        if (ret != ESP_OK) return ret;
+    }
+
+    ret = json.write("success", success ? 1 : 0);
+    if (ret != ESP_OK) return ret;
+
+    ret = json.endObject();
+    if (ret != ESP_OK) return ret;
+
+    return json.finalize();
+}
+#endif
+
+#ifdef CONFIG_PRODUCT_BLUESCSI
 static esp_err_t api_firmware_status_handler(httpd_req_t *req) {
     httpd_resp_set_type(req, "application/json");
 
@@ -1165,7 +1378,50 @@ static esp_err_t api_firmware_status_handler(httpd_req_t *req) {
 
     return json.finalize();
 }
+#else
+// Unified firmware status
+static esp_err_t api_firmware_status_handler(httpd_req_t *req) {
+    httpd_resp_set_type(req, "application/json");
 
+    JsonStreamWriter json(req);
+    esp_err_t ret = json.beginObject();
+    if (ret != ESP_OK) return ret;
+
+    const char* state_str;
+    switch (g_web_update_phase) {
+        case WEB_UPDATE_IDLE:       state_str = "idle"; break;
+        case WEB_UPDATE_PANEL:      state_str = "updating_panel"; break;
+        case WEB_UPDATE_MAINBOARD:  state_str = "updating_mainboard"; break;
+        case WEB_UPDATE_WAITING_REBOOT: state_str = "rebooting"; break;
+        case WEB_UPDATE_SUCCESS:    state_str = "success"; break;
+        case WEB_UPDATE_ERROR:      state_str = "error"; break;
+        default:                    state_str = "unknown"; break;
+    }
+
+    ret = json.write("state", state_str);
+    if (ret != ESP_OK) return ret;
+
+    ret = json.write("progress", (uint32_t)g_web_update_progress);
+    if (ret != ESP_OK) return ret;
+
+    if (g_web_update_phase == WEB_UPDATE_ERROR && g_web_update_error) {
+        ret = json.write("error", g_web_update_error);
+        if (ret != ESP_OK) return ret;
+    }
+
+    // Reset to idle after client reads success/error
+    if (g_web_update_phase == WEB_UPDATE_SUCCESS || g_web_update_phase == WEB_UPDATE_ERROR) {
+        g_web_update_phase = WEB_UPDATE_IDLE;
+    }
+
+    ret = json.endObject();
+    if (ret != ESP_OK) return ret;
+
+    return json.finalize();
+}
+#endif
+
+#ifdef CONFIG_PRODUCT_BLUESCSI
 // Mainboard (RP2350) firmware tracking state
 static bool g_mainboard_update_started = false;
 
@@ -1331,6 +1587,7 @@ static esp_err_t api_mainboard_firmware_status_handler(httpd_req_t *req) {
 
     return json.finalize();
 }
+#endif // #ifdef CONFIG_PRODUCT_BLUESCSI
 
 // File upload state
 typedef struct {
@@ -1640,10 +1897,12 @@ static esp_err_t api_upload_handler(httpd_req_t *req) {
     return handle_file_upload(req, "");
 }
 
+#ifdef CONFIG_PRODUCT_BLUESCSI
 // Thin wrapper: mainboard firmware upload (prefix "/" to ensure root path)
 static esp_err_t api_mainboard_firmware_upload_handler(httpd_req_t *req) {
     return handle_file_upload(req, "/");
 }
+#endif
 
 // File download handler - downloads a file from the main board SD card
 // Usage: GET /api/download?path=/picoide.ini

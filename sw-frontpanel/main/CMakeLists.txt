@@ -41,21 +41,27 @@ idf_component_register(SRCS "main.c"
                                 "${WWW_BUILD_DIR}/logo.svg.gz"
                 )
 
-# Select product logo based on Kconfig
+# Select product (web-asset preprocessing + logo) based on Kconfig
 if(CONFIG_PRODUCT_BLUESCSI)
+    set(WWW_PRODUCT "bluescsi")
     set(LOGO_SRC "bluescsi-logo.svg")
 else()
+    set(WWW_PRODUCT "picoide")
     set(LOGO_SRC "picoide-logo.svg")
 endif()
 
-# Custom commands for minifying web assets (after idf_component_register)
+# Depend on sdkconfig so assets are re-processed when the product changes,
+# even if the source files themselves are untouched.
+idf_build_get_property(SDKCONFIG_PATH SDKCONFIG)
+
+# Custom commands for preprocessing + minifying web assets (after idf_component_register)
 set(WWW_FILES index.html app.js sha256.js)
 foreach(file ${WWW_FILES})
     add_custom_command(
         OUTPUT "${WWW_BUILD_DIR}/${file}.gz"
-        COMMAND ${PYTHON} "${MINIFY_SCRIPT}" "${WWW_SRC_DIR}/${file}" "${WWW_BUILD_DIR}/${file}.gz"
-        DEPENDS "${WWW_SRC_DIR}/${file}" "${MINIFY_SCRIPT}"
-        COMMENT "Minifying ${file}"
+        COMMAND ${PYTHON} "${MINIFY_SCRIPT}" --product ${WWW_PRODUCT} "${WWW_SRC_DIR}/${file}" "${WWW_BUILD_DIR}/${file}.gz"
+        DEPENDS "${WWW_SRC_DIR}/${file}" "${MINIFY_SCRIPT}" "${SDKCONFIG_PATH}"
+        COMMENT "Processing ${file} (${WWW_PRODUCT})"
         VERBATIM
     )
 endforeach()
@@ -63,8 +69,8 @@ endforeach()
 # Gzip product logo (selected by Kconfig)
 add_custom_command(
     OUTPUT "${WWW_BUILD_DIR}/logo.svg.gz"
-    COMMAND ${PYTHON} "${MINIFY_SCRIPT}" "${WWW_SRC_DIR}/${LOGO_SRC}" "${WWW_BUILD_DIR}/logo.svg.gz"
-    DEPENDS "${WWW_SRC_DIR}/${LOGO_SRC}" "${MINIFY_SCRIPT}"
+    COMMAND ${PYTHON} "${MINIFY_SCRIPT}" --product ${WWW_PRODUCT} "${WWW_SRC_DIR}/${LOGO_SRC}" "${WWW_BUILD_DIR}/logo.svg.gz"
+    DEPENDS "${WWW_SRC_DIR}/${LOGO_SRC}" "${MINIFY_SCRIPT}" "${SDKCONFIG_PATH}"
     COMMENT "Gzipping ${LOGO_SRC} as logo.svg"
     VERBATIM
 )

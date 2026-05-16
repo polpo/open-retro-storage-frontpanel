@@ -24,7 +24,6 @@
 #include "esp_netif_ip_addr.h"
 #include "esp_mac.h"
 #include "mdns.h"
-#include "nvs_flash.h"
 #include "nvs.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -172,14 +171,6 @@ esp_err_t wifi_manager_init(wifi_manager_t *manager) {
 
     memset(manager, 0, sizeof(wifi_manager_t));
     s_manager = manager;
-
-    // Initialize NVS for configuration storage
-    esp_err_t ret = nvs_flash_init();
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        ret = nvs_flash_init();
-    }
-    ESP_ERROR_CHECK(ret);
 
     // Initialize TCP/IP stack
     ESP_ERROR_CHECK(esp_netif_init());

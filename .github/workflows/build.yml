@@ -10,6 +10,8 @@ jobs:
             sdkconfig_extra: sdkconfig.defaults.picoide
           - name: bluescsi
             sdkconfig_extra: sdkconfig.defaults.bluescsi
+    env:
+      OUTPUT_DIR: ${{github.workspace}}/binaries
     steps:
       - name: Checkout repo with submodules
         uses: actions/checkout@v4
@@ -23,10 +25,58 @@ jobs:
           path: 'sw-frontpanel'
           command: 'idf.py -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;${{ matrix.product.sdkconfig_extra }}" build'
       - name: Upload Front Panel Firmware
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: frontpanel-firmware-${{ matrix.product.name }}
           path: |
-            sw-frontpanel/build/ors-frontpanel.bin
+            sw-frontpanel/build/${{ matrix.product.name }}-frontpanel.bin
             sw-frontpanel/build/bootloader/bootloader.bin
             sw-frontpanel/build/partition_table/partition-table.bin
+
+  create-release:
+    if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
+    runs-on: ubuntu-24.04
+    needs: [build-frontpanel-firmware]
+    permissions:
+      contents: write
+    env:
+      STAGING_DIR: ${{github.workspace}}/release-staging-dir
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+      - name: Classify release
+        id: relinfo
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          if [[ "$VERSION" == *-* ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+            echo "base_version=${VERSION%%-*}" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+            echo "base_version=$VERSION" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Generate release body
+        shell: bash
+        run: |
+          VERSION="${{ steps.relinfo.outputs.version }}"
+          BASE="${{ steps.relinfo.outputs.base_version }}"
+          awk -v ver="$VERSION" '$0 ~ "^# v" ver "$" {a=1;next} /^# /{a=0} a' sw-frontpanel/CHANGELOG.md > release-body.md
+          if [ ! -s release-body.md ] && [ "$VERSION" != "$BASE" ]; then
+            awk -v ver="$BASE" '$0 ~ "^# v" ver "$" {a=1;next} /^# /{a=0} a' sw-frontpanel/CHANGELOG.md > release-body.md
+          fi
+      - name: Download firmware artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: ${{env.STAGING_DIR}}
+          pattern: *-frontpanel.bin
+          merge-multiple: true
+      - name: Release
+        uses: softprops/action-gh-release@v1
+        with:
+          body_path: release-body.md
+          files: |
+            */picoide-frontpanel.bin
+          draft: true
+          prerelease: ${{ steps.relinfo.outputs.prerelease }}

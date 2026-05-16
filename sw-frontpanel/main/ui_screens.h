@@ -30,6 +30,9 @@ typedef enum {
     SCREEN_DISC_LIST,
     SCREEN_SETTINGS,
     SCREEN_WIFI_MENU,
+    SCREEN_DISPLAY_SETTINGS,
+    SCREEN_IDLE_MODE,
+    SCREEN_IDLE_TIMEOUT,
     SCREEN_INFO,
     SCREEN_FIRMWARE_UPDATE,
     SCREEN_FIRMWARE_STATUS,
@@ -54,9 +57,15 @@ esp_err_t ui_draw_status_screen(display_manager_t *display, const char *disc_nam
 bool ui_animate_status_screen(display_manager_t *display);
 bool ui_menu_needs_animation(menu_t *menu);
 bool ui_animate_menu(display_manager_t *display, menu_t *menu);
+#ifdef CONFIG_PRODUCT_BLUESCSI
 esp_err_t ui_draw_firmware_status(display_manager_t *display,
                                   uint32_t panel_current_ver, uint32_t panel_avail_ver, bool panel_update_avail,
                                   uint32_t main_current_ver, uint32_t main_avail_ver, bool main_update_avail,
                                   uint8_t selection);
+#else
+esp_err_t ui_draw_firmware_status(display_manager_t *display,
+                                  uint32_t current_ver, uint32_t avail_ver,
+                                  bool update_avail);
+#endif
 
 #endif
