@@ -113,7 +113,7 @@ typedef enum {
 // Firmware info structure (45 bytes)
 typedef struct __attribute__((packed)) {
     uint32_t size;         // Firmware size in bytes
-    uint32_t version;      // Version number (major.minor.patch as 0x00MMmmpp)
+    uint32_t version;      // Version number (major.minor.patch.prerelease as 0xMMmmppPP; PP=0xFF final, 0x01-0xFE prerelease)
     uint8_t sha256[32];    // SHA256 hash (32 bytes)
     uint8_t available;     // 1 if update available, 0 if not
     uint8_t reserved[8];   // Reserved for alignment
@@ -121,7 +121,7 @@ typedef struct __attribute__((packed)) {
 
 // RP2350 firmware status structure
 typedef struct __attribute__((packed)) {
-    uint32_t current_version;      // Running version (0x00MMmmpp)
+    uint32_t current_version;      // Running version (0xMMmmppPP)
     uint32_t available_version;    // Available update version (0 if none)
     uint8_t update_progress;       // Update progress (0-100), 0 if not updating
     uint8_t last_update_result;    // Result of last update attempt

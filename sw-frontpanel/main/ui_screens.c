@@ -483,16 +483,20 @@ esp_err_t ui_draw_firmware_update(display_manager_t *display, const char *status
 
 // Helper to format version number to string
 static void format_version_string(char *buf, size_t buf_size, uint32_t version) {
-    uint8_t major = (version >> 16) & 0xFF;
-    uint8_t minor = (version >> 8) & 0xFF;
-    uint8_t patch = version & 0xFF;
-    snprintf(buf, buf_size, "%d.%d.%d", major, minor, patch);
+    uint8_t major = (version >> 24) & 0xFF;
+    uint8_t minor = (version >> 16) & 0xFF;
+    uint8_t patch = (version >> 8) & 0xFF;
+    uint8_t pre = version & 0xFF;
+    if (pre == 0xFF) {
+        snprintf(buf, buf_size, "%d.%d.%d", major, minor, patch);
+    } else {
+        snprintf(buf, buf_size, "%d.%d.%d-pre%d", major, minor, patch, pre);
+    }
 }
 
 esp_err_t ui_draw_firmware_status(display_manager_t *display,
-                                  uint32_t panel_current_ver, uint32_t panel_avail_ver, bool panel_update_avail,
-                                  uint32_t main_current_ver, uint32_t main_avail_ver, bool main_update_avail,
-                                  uint8_t selection) {
+                                  uint32_t current_ver, uint32_t avail_ver,
+                                  bool update_avail) {
     if (!display) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -503,57 +507,30 @@ esp_err_t ui_draw_firmware_status(display_manager_t *display,
     display_manager_set_font(display, u8g2_font_6x10_tf);
     display_manager_draw_box(display, 0, 0, 128, 12);
     display_manager_set_draw_color(display, 0);
-    display_manager_draw_text(display, 2, 10, "Firmware Updates");
+    display_manager_draw_text(display, 2, 10, "Firmware Update");
     display_manager_set_draw_color(display, 1);
 
-    char version_str[16];
-    int y = 24;
-    const int row_height = 12;
+    char version_str[20];
 
-    // Panel firmware row
-    if (selection == 0) {
-        display_manager_draw_box(display, 0, y - 9, 128, row_height);
-        display_manager_set_draw_color(display, 0);
-    }
-    display_manager_draw_text(display, 2, y, "Panel:");
-    format_version_string(version_str, sizeof(version_str), panel_current_ver);
-    display_manager_draw_text(display, 44, y, version_str);
-    if (panel_update_avail) {
-        display_manager_draw_text(display, 79, y, "->");
-        format_version_string(version_str, sizeof(version_str), panel_avail_ver);
-        display_manager_draw_text(display, 94, y, version_str);
-    }
-    if (selection == 0) {
-        display_manager_set_draw_color(display, 1);
-    }
+    // System version (main board version is user-facing)
+    display_manager_draw_text(display, 2, 26, "Version:");
+    format_version_string(version_str, sizeof(version_str), current_ver);
+    display_manager_draw_text(display, 56, 26, version_str);
 
-    y += row_height;
-
-    // Main board firmware row
-    if (selection == 1) {
-        display_manager_draw_box(display, 0, y - 9, 128, row_height);
-        display_manager_set_draw_color(display, 0);
-    }
-    display_manager_draw_text(display, 2, y, "Main:");
-    format_version_string(version_str, sizeof(version_str), main_current_ver);
-    display_manager_draw_text(display, 44, y, version_str);
-    if (main_update_avail) {
-        display_manager_draw_text(display, 79, y, "->");
-        format_version_string(version_str, sizeof(version_str), main_avail_ver);
-        display_manager_draw_text(display, 94, y, version_str);
-    }
-    if (selection == 1) {
-        display_manager_set_draw_color(display, 1);
+    // Available version
+    if (update_avail) {
+        display_manager_draw_text(display, 2, 40, "Available:");
+        format_version_string(version_str, sizeof(version_str), avail_ver);
+        display_manager_draw_text(display, 68, 40, version_str);
+    } else {
+        display_manager_draw_text(display, 2, 40, "Up to date");
     }
 
     // Instructions at bottom
-    bool has_update = (selection == 0 && panel_update_avail) ||
-                      (selection == 1 && main_update_avail);
-
-    if (has_update) {
+    if (update_avail) {
         display_manager_draw_text(display, 0, 62, "[>] Update  [<] Back");
     } else {
-        display_manager_draw_text(display, 0, 62, "No updates  [<] Back");
+        display_manager_draw_text(display, 0, 62, "[<] Back");
     }
 
     display_manager_request_update(display);

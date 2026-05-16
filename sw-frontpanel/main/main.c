@@ -92,8 +92,7 @@ static void refresh_playback_status(void);
 static void refresh_device_type(void);
 static void check_firmware_status(void);
 static void draw_firmware_status_screen(void);
-static void trigger_panel_update(void);
-static void trigger_mainboard_update(void);
+static void trigger_system_update(void);
 static void show_info_screen(const char *title, const char *body);
 static void redraw_current_screen(void);
 
@@ -306,14 +305,11 @@ static void handle_button_event(button_event_t *event) {
                             info_return_screen = SCREEN_MAIN_MENU;
                             current_screen = SCREEN_INFO;
                             const esp_app_desc_t* info_app_desc = esp_app_get_description();
-                            char main_ver_str[16] = "N/A";
+                            char main_ver_str[20] = "N/A";
                             if (host_comm.initialized) {
                                 rp2350_fw_status_t fw_status;
                                 if (host_comm_get_rp2350_fw_status(&host_comm, &fw_status) == ESP_OK) {
-                                    snprintf(main_ver_str, sizeof(main_ver_str), "%lu.%lu.%lu",
-                                             (fw_status.current_version >> 16) & 0xFF,
-                                             (fw_status.current_version >> 8) & 0xFF,
-                                             fw_status.current_version & 0xFF);
+                                    ota_manager_format_version_string(main_ver_str, fw_status.current_version);
                                 }
                             }
                             char info_text[160];
@@ -613,28 +609,13 @@ static void handle_button_event(button_event_t *event) {
 
         case SCREEN_FIRMWARE_STATUS:
             switch (event->button_id) {
-                case 0: // Up button (North)
+                case 1: // Select button (East) - trigger unified update
                     if (event->type == BUTTON_EVENT_CLICK) {
-                        if (fw_screen_selection > 0) {
-                            fw_screen_selection--;
-                            draw_firmware_status_screen();
-                        }
-                    }
-                    break;
-                case 2: // Down button (South)
-                    if (event->type == BUTTON_EVENT_CLICK) {
-                        if (fw_screen_selection < 1) {
-                            fw_screen_selection++;
-                            draw_firmware_status_screen();
-                        }
-                    }
-                    break;
-                case 1: // Select button (East) - trigger update
-                    if (event->type == BUTTON_EVENT_CLICK) {
-                        if (fw_screen_selection == 0 && panel_fw_info.available) {
-                            trigger_panel_update();
-                        } else if (fw_screen_selection == 1 && rp2350_fw_status.available_version != 0) {
-                            trigger_mainboard_update();
+                        bool panel_needs_update = panel_fw_info.available &&
+                            (panel_fw_info.version > ota_manager_get_current_version());
+                        bool main_needs_update = (rp2350_fw_status.available_version != 0);
+                        if (panel_needs_update || main_needs_update) {
+                            trigger_system_update();
                         }
                     }
                     break;
@@ -890,95 +871,159 @@ static esp_err_t refresh_directory_list(void) {
 }
 
 // Firmware update task
+// Unified firmware update task: panel OTA (if needed) -> RP2350 update -> wait -> reboot self
 static void firmware_update_task(void *pvParameters) {
-    ota_manager_t *ota = (ota_manager_t *)pvParameters;
-
     led_start_pulse(COLOR_RED);
 
-    uint32_t last_display_update_ms = 0;
-    uint8_t last_progress = 0;
+    bool panel_needs_update = panel_fw_info.available &&
+        (panel_fw_info.version > ota_manager_get_current_version());
+    bool main_needs_update = (rp2350_fw_status.available_version != 0);
+    bool panel_ota_written = false;
 
-    while (1) {
-        esp_err_t ret = ota_manager_process(ota);
-        if (ret != ESP_OK && ret != ESP_ERR_NOT_FINISHED) {
-            ESP_LOGE(TAG, "OTA process error: %s", esp_err_to_name(ret));
-            break;
+    // Phase 1: Panel OTA (download and write, but don't reboot yet)
+    if (panel_needs_update) {
+        ESP_LOGI(TAG, "Phase 1: Updating panel firmware...");
+        ui_draw_firmware_update(&display, "Updating panel...", 0);
+
+        // Initialize OTA manager
+        esp_err_t ret = ota_manager_init(&ota_manager, &host_comm);
+        if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+            ESP_LOGE(TAG, "Failed to initialize OTA manager: %s", esp_err_to_name(ret));
+            goto error;
         }
 
-        ota_state_t state = ota_manager_get_state(ota);
-        uint8_t progress = ota_manager_get_progress(ota);
+        // Copy firmware info and start OTA
+        memcpy(&ota_manager.firmware_info, &panel_fw_info, sizeof(panel_firmware_info_t));
+        ret = ota_manager_start_update(&ota_manager);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to start panel OTA: %s", esp_err_to_name(ret));
+            goto error;
+        }
 
-        // Update display only every 100ms or when progress changes
-        uint32_t current_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
-        if (state != OTA_STATE_DOWNLOADING ||
-            progress != last_progress ||
-            (current_ms - last_display_update_ms) >= 100) {
-
-            const char *status_msg = "Initializing...";
-            switch (state) {
-                case OTA_STATE_CHECKING:
-                    status_msg = "Checking for updates...";
-                    break;
-                case OTA_STATE_DOWNLOADING:
-                    status_msg = "Downloading firmware...";
-                    break;
-                case OTA_STATE_VERIFYING:
-                    status_msg = "Verifying firmware...";
-                    break;
-                case OTA_STATE_APPLYING:
-                    status_msg = "Applying update...";
-                    break;
-                case OTA_STATE_SUCCESS:
-                    status_msg = "Update complete!";
-                    break;
-                case OTA_STATE_ERROR:
-                    status_msg = "Update failed!";
-                    break;
-                default:
-                    break;
+        // Process OTA chunks until complete
+        uint8_t last_progress = 0;
+        while (1) {
+            ret = ota_manager_process(&ota_manager);
+            if (ret != ESP_OK && ret != ESP_ERR_NOT_FINISHED) {
+                ESP_LOGE(TAG, "Panel OTA error: %s", esp_err_to_name(ret));
+                goto error;
             }
 
-            if (state != OTA_STATE_IDLE) {
-                ui_draw_firmware_update(&display, status_msg, progress);
+            ota_state_t state = ota_manager_get_state(&ota_manager);
+            uint8_t progress = ota_manager_get_progress(&ota_manager);
+
+            if (progress != last_progress) {
+                ui_draw_firmware_update(&display, "Updating panel...", progress);
+                last_progress = progress;
             }
 
-            last_display_update_ms = current_ms;
-            last_progress = progress;
-        }
+            if (state == OTA_STATE_SUCCESS) {
+                panel_ota_written = true;
+                ESP_LOGI(TAG, "Panel OTA written successfully (reboot deferred)");
+                break;
+            } else if (state == OTA_STATE_ERROR) {
+                ESP_LOGE(TAG, "Panel OTA failed");
+                goto error;
+            }
 
-        // Exit on completion or error
-        if (state == OTA_STATE_SUCCESS) {
-            ESP_LOGI(TAG, "Firmware update successful, restarting in 3 seconds...");
-            led_stop_pulse();
-            led_set_color(COLOR_GREEN);
-            vTaskDelay(pdMS_TO_TICKS(3000));
-            esp_restart();
-        } else if (state == OTA_STATE_ERROR) {
-            ESP_LOGE(TAG, "Firmware update failed");
-            led_stop_pulse();
-            led_set_color(COLOR_RED);
-            vTaskDelay(pdMS_TO_TICKS(3000));
-            break;
+            taskYIELD();
         }
-
-        // Only yield briefly to other tasks, don't sleep
-        taskYIELD();
     }
 
+    // Phase 2: Main board update
+    if (main_needs_update) {
+        ESP_LOGI(TAG, "Phase 2: Updating main board...");
+        ui_draw_firmware_update(&display, "Updating main board...", 0);
+
+        esp_err_t ret = host_comm_start_rp2350_update(&host_comm);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to start RP2350 update: %s", esp_err_to_name(ret));
+            // If panel OTA was written, we have a version mismatch - still reboot panel
+            if (panel_ota_written) {
+                ui_draw_firmware_update(&display, "Main board failed!", 0);
+                vTaskDelay(pdMS_TO_TICKS(2000));
+                ESP_LOGW(TAG, "Rebooting panel despite main board failure");
+                esp_restart();
+            }
+            goto error;
+        }
+
+        // Show progress animation while main board flashes and reboots
+        for (int progress = 0; progress <= 100; progress += 2) {
+            char msg[32];
+            snprintf(msg, sizeof(msg), "Main board: %d%%", progress);
+            ui_draw_firmware_update(&display, msg, progress);
+            vTaskDelay(pdMS_TO_TICKS(100));  // 50 steps * 100ms = 5 seconds
+        }
+
+        // Wait for main board to come back online
+        ui_draw_firmware_update(&display, "Waiting for reboot...", 100);
+
+        bool main_board_back = false;
+        for (int attempts = 0; attempts < 20; attempts++) {  // Up to 10 seconds
+            vTaskDelay(pdMS_TO_TICKS(500));
+
+            rp2350_fw_status_t fw_status;
+            ret = host_comm_get_rp2350_fw_status(&host_comm, &fw_status);
+            if (ret == ESP_OK) {
+                char version_str[20];
+                ota_manager_format_version_string(version_str, fw_status.current_version);
+                ESP_LOGI(TAG, "Main board back online: v%s", version_str);
+                main_board_back = true;
+                break;
+            }
+        }
+
+        if (!main_board_back) {
+            ESP_LOGW(TAG, "Main board did not come back in time");
+        }
+    }
+
+    // Phase 3: Reboot panel if OTA was written, otherwise just show success
+    if (panel_ota_written) {
+        ESP_LOGI(TAG, "Phase 3: Rebooting panel into new firmware...");
+        ui_draw_firmware_update(&display, "Restarting...", 100);
+        led_stop_pulse();
+        led_set_color(COLOR_GREEN);
+        vTaskDelay(pdMS_TO_TICKS(1500));
+        esp_restart();
+    }
+
+    // Only main board was updated, no panel reboot needed
+    ESP_LOGI(TAG, "System update complete");
+    ui_draw_firmware_update(&display, "Update complete!", 100);
     led_stop_pulse();
-    current_screen = SCREEN_MAIN_MENU;
+    led_set_color(COLOR_GREEN);
+    vTaskDelay(pdMS_TO_TICKS(3000));
+
+    current_screen = SCREEN_SETTINGS;
+    active_menu = screen_menus[current_screen];
+    ui_draw_menu(&display, active_menu);
+    vTaskDelete(NULL);
+    return;
+
+error:
+    ui_draw_firmware_update(&display, "Update failed!", 0);
+    led_stop_pulse();
+    led_set_color(COLOR_RED);
+    vTaskDelay(pdMS_TO_TICKS(3000));
+    current_screen = SCREEN_SETTINGS;
     active_menu = screen_menus[current_screen];
     ui_draw_menu(&display, active_menu);
     vTaskDelete(NULL);
 }
 
 static void draw_firmware_status_screen(void) {
-    uint32_t panel_current = ota_manager_get_current_version();
+    bool panel_update_avail = panel_fw_info.available &&
+        (panel_fw_info.version > ota_manager_get_current_version());
+    bool main_update_avail = (rp2350_fw_status.available_version != 0);
+    bool any_update = panel_update_avail || main_update_avail;
+
+    // Use main board version as the user-facing "system version"
     ui_draw_firmware_status(&display,
-                            panel_current, panel_fw_info.version, panel_fw_info.available,
-                            rp2350_fw_status.current_version, rp2350_fw_status.available_version,
-                            rp2350_fw_status.available_version != 0,
-                            fw_screen_selection);
+                            rp2350_fw_status.current_version,
+                            rp2350_fw_status.available_version,
+                            any_update);
 }
 
 // Check firmware status for both panel and main board
@@ -1006,7 +1051,7 @@ static void check_firmware_status(void) {
         ESP_LOGW(TAG, "Failed to initialize OTA manager: %s", esp_err_to_name(ret));
     }
 
-    // Check for panel firmware update
+    // Check for panel firmware update (ESP32 firmware from combined UF2)
     ret = host_comm_check_firmware(&host_comm, &panel_fw_info);
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "Failed to check panel firmware: %s", esp_err_to_name(ret));
@@ -1023,102 +1068,14 @@ static void check_firmware_status(void) {
     display_manager_update(&display);
 }
 
-// Trigger panel firmware update
-static void trigger_panel_update(void) {
-    ESP_LOGI(TAG, "Triggering panel firmware update...");
-
-    // Initialize OTA manager if needed
-    esp_err_t ret = ota_manager_init(&ota_manager, &host_comm);
-    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
-        ESP_LOGE(TAG, "Failed to initialize OTA manager: %s", esp_err_to_name(ret));
-        ui_draw_info_screen(&display, "Error", "Failed to init OTA");
-        return;
-    }
-
-    // Copy firmware info to OTA manager
-    memcpy(&ota_manager.firmware_info, &panel_fw_info, sizeof(panel_firmware_info_t));
-
-    ret = ota_manager_start_update(&ota_manager);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to start update: %s", esp_err_to_name(ret));
-        ui_draw_info_screen(&display, "Error", "Failed to start update");
-        return;
-    }
+// Trigger unified system update (panel OTA + main board update)
+static void trigger_system_update(void) {
+    ESP_LOGI(TAG, "Triggering system firmware update...");
 
     current_screen = SCREEN_FIRMWARE_UPDATE;
+    ui_draw_firmware_update(&display, "Starting update...", 0);
 
-    char version_str[14];
-    ota_manager_format_version_string(version_str, panel_fw_info.version);
-    char status_msg[64];
-    snprintf(status_msg, sizeof(status_msg), "Updating panel: v%s", version_str);
-    ui_draw_firmware_update(&display, status_msg, 0);
-    vTaskDelay(pdMS_TO_TICKS(1500));
-
-    xTaskCreate(firmware_update_task, "firmware_update", 8192, &ota_manager, 10, NULL);
-}
-
-// Trigger main board firmware update
-static void trigger_mainboard_update(void) {
-    ESP_LOGI(TAG, "Triggering main board firmware update...");
-
-    // Show updating screen
-    ui_draw_firmware_update(&display, "Main board updating...", 0);
-
-    esp_err_t ret = host_comm_start_rp2350_update(&host_comm);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to start RP2350 update: %s", esp_err_to_name(ret));
-        ui_draw_info_screen(&display, "Error", "Failed to start update");
-        vTaskDelay(pdMS_TO_TICKS(2000));
-        current_screen = SCREEN_SETTINGS;
-        active_menu = screen_menus[current_screen];
-        return;
-    }
-
-    // Show progress animation for 5 seconds while update happens
-    // The actual update is fast, but we show progress for better UX
-    for (int progress = 0; progress <= 100; progress += 2) {
-        char msg[32];
-        snprintf(msg, sizeof(msg), "Main board: %d%%", progress);
-        ui_draw_firmware_update(&display, msg, progress);
-        vTaskDelay(pdMS_TO_TICKS(100));  // 50 steps * 100ms = 5 seconds
-    }
-
-    // Now check if the board is back online
-    ui_draw_info_screen(&display, "Main Board", "Waiting for reboot...");
-
-    int attempts = 0;
-    while (attempts < 20) {  // Up to 10 seconds
-        vTaskDelay(pdMS_TO_TICKS(500));
-
-        rp2350_fw_status_t fw_status;
-        ret = host_comm_get_rp2350_fw_status(&host_comm, &fw_status);
-
-        if (ret == ESP_OK) {
-            // Board is back! Show new version
-            char version_str[16];
-            uint8_t major = (fw_status.current_version >> 16) & 0xFF;
-            uint8_t minor = (fw_status.current_version >> 8) & 0xFF;
-            uint8_t patch = fw_status.current_version & 0xFF;
-            snprintf(version_str, sizeof(version_str), "%d.%d.%d", major, minor, patch);
-
-            char msg[48];
-            snprintf(msg, sizeof(msg), "Update complete!\nNow running v%s", version_str);
-            ui_draw_info_screen(&display, "Main Board", msg);
-            vTaskDelay(pdMS_TO_TICKS(3000));
-            break;
-        }
-
-        attempts++;
-    }
-
-    if (attempts >= 20) {
-        ui_draw_info_screen(&display, "Main Board", "Update sent.\nBoard may still be\nrebooting...");
-        vTaskDelay(pdMS_TO_TICKS(3000));
-    }
-
-    // Return to settings
-    current_screen = SCREEN_SETTINGS;
-    active_menu = screen_menus[current_screen];
+    xTaskCreate(firmware_update_task, "firmware_update", 8192, NULL, 10, NULL);
 }
 
 // Host communication task (currently unused)
@@ -1353,11 +1310,8 @@ void app_main(void) {
             // Get and display main board firmware version
             rp2350_fw_status_t fw_status;
             if (host_comm_get_rp2350_fw_status(&host_comm, &fw_status) == ESP_OK) {
-                char main_version[16];
-                snprintf(main_version, sizeof(main_version), "%lu.%lu.%lu",
-                         (fw_status.current_version >> 16) & 0xFF,
-                         (fw_status.current_version >> 8) & 0xFF,
-                         fw_status.current_version & 0xFF);
+                char main_version[20];
+                ota_manager_format_version_string(main_version, fw_status.current_version);
                 ui_update_splash_versions(&display, app_desc->version, main_version);
                 ESP_LOGI(TAG, "Main board firmware version: %s", main_version);
             }

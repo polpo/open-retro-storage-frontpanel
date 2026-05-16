@@ -2,7 +2,7 @@ name: Build
 on: [push, pull_request]
 jobs:
   build-frontpanel-firmware:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     env:
       OUTPUT_DIR: ${{github.workspace}}/binaries
     steps:
@@ -21,3 +21,51 @@ jobs:
         with:
           name: Front Panel Firmware
           path: 'sw-frontpanel/build/picoide-frontpanel.bin'
+
+  create-release:
+    if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
+    runs-on: ubuntu-24.04
+    needs: [build-frontpanel-firmware]
+    permissions:
+      contents: write
+    env:
+      STAGING_DIR: ${{github.workspace}}/release-staging-dir
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+      - name: Classify release
+        id: relinfo
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          if [[ "$VERSION" == *-* ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+            echo "base_version=${VERSION%%-*}" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+            echo "base_version=$VERSION" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Generate release body
+        shell: bash
+        run: |
+          VERSION="${{ steps.relinfo.outputs.version }}"
+          BASE="${{ steps.relinfo.outputs.base_version }}"
+          awk -v ver="$VERSION" '$0 ~ "^# v" ver "$" {a=1;next} /^# /{a=0} a' sw-frontpanel/CHANGELOG.md > release-body.md
+          if [ ! -s release-body.md ] && [ "$VERSION" != "$BASE" ]; then
+            awk -v ver="$BASE" '$0 ~ "^# v" ver "$" {a=1;next} /^# /{a=0} a' sw-frontpanel/CHANGELOG.md > release-body.md
+          fi
+      # Asset name must stay exactly picoide-frontpanel.bin: the picoide
+      # project downloads it by that filename via robinraju/release-downloader.
+      - name: Download firmware artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: Front Panel Firmware
+          path: ${{env.STAGING_DIR}}
+      - name: Release
+        uses: softprops/action-gh-release@v1
+        with:
+          body_path: release-body.md
+          files: ${{env.STAGING_DIR}}/picoide-frontpanel.bin
+          draft: true
+          prerelease: ${{ steps.relinfo.outputs.prerelease }}
