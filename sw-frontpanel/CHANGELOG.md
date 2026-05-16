@@ -1,3 +1,9 @@
+# v0.4.0
+
+- Add screensavers
+- Combine main board & front panel firmware updates into one operation
+- Create releases
+
 # v0.3.0
 
 - Config file editor component
