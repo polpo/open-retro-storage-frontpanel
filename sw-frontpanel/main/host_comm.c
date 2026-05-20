@@ -434,15 +434,7 @@ esp_err_t host_comm_get_device_status(host_comm_t *comm, uint16_t device_index, 
                                                     NULL, 0,  // No write data
                                                     &device_status, 1);  // Read 1 byte
     if (ret == ESP_OK) {
-      // A dead SPI bus reads back 0x00 (PANEL_DEVICE_STATUS_NONE) and a live
-      // board never reports a value outside 0x01-0x06, so anything else means
-      // the main board isn't responding
-      if (device_status < PANEL_DEVICE_STATUS_NO_IMAGE ||
-          device_status > PANEL_DEVICE_STATUS_WRONG_MODE) {
-        ret = ESP_ERR_INVALID_RESPONSE;
-      } else {
         *status = device_status;
-      }
     }
 
     HOST_COMM_UNLOCK(comm);
@@ -463,15 +455,8 @@ esp_err_t host_comm_get_playback_status(host_comm_t *comm, uint16_t device_index
                                                     NULL, 0,
                                                     (uint8_t*)status, sizeof(playback_status_t));
     if (ret == ESP_OK) {
-        // device_status is PANEL_DEVICE_STATUS_NONE (0) on a dead bus and a live
-        // board always stamps a value in 0x01-0x06
-        if (status->device_status < PANEL_DEVICE_STATUS_NO_IMAGE ||
-            status->device_status > PANEL_DEVICE_STATUS_WRONG_MODE) {
-            ret = ESP_ERR_INVALID_RESPONSE;
-        } else {
-            ESP_LOGD(TAG, "Playback status: disc_inserted=%d, type=%d, playing=%d, track=%d",
-                    status->disc_inserted, status->disc_type, status->is_playing, status->current_track);
-        }
+        ESP_LOGD(TAG, "Playback status: disc_inserted=%d, type=%d, playing=%d, track=%d",
+                status->disc_inserted, status->disc_type, status->is_playing, status->current_track);
     }
 
     HOST_COMM_UNLOCK(comm);

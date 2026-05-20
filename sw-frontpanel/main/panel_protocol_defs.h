@@ -25,6 +25,12 @@
 #define PANEL_PROTOCOL_HEADER_SIZE     5
 #define PANEL_PROTOCOL_MAX_PAYLOAD     4096
 
+// Liveness magic: a live main board running this protocol stamps
+// PANEL_ALIVE_MAGIC into panel_playback_status_t.alive_magic on every reply. A
+// dead/disconnected bus instead reads back uniformly 0x00 or 0xFF, so 0xA5 is
+// deliberately distinct from 0x00/0xFF
+#define PANEL_ALIVE_MAGIC              0xA5
+
 // Command bit masks
 #define PANEL_CMD_DIR_WRITE           0x00
 #define PANEL_CMD_DIR_READ            0x80
@@ -68,15 +74,12 @@
 #define PANEL_STATUS_NO_OPERATION      0x03  // No operation pending
 
 // Device status codes for GET_DEVICE_STATUS
-// 0x00 is reserved: it is what a dead/disconnected bus reads back, so a live
-// main board never reports it.  Every real status is >= 0x01
-#define PANEL_DEVICE_STATUS_NONE        0x00  // No response (main board absent)
-#define PANEL_DEVICE_STATUS_NO_IMAGE    0x01  // No image loaded
-#define PANEL_DEVICE_STATUS_LOADED      0x02  // Image loaded and ready
-#define PANEL_DEVICE_STATUS_LOADING     0x03  // Image loading in progress
-#define PANEL_DEVICE_STATUS_ERROR       0x04  // Image error
-#define PANEL_DEVICE_STATUS_NO_CARD     0x05  // SD card not present
-#define PANEL_DEVICE_STATUS_WRONG_MODE  0x06  // SD card configured for the other device type
+#define PANEL_DEVICE_STATUS_NO_IMAGE    0x00  // No image loaded
+#define PANEL_DEVICE_STATUS_LOADED      0x01  // Image loaded and ready
+#define PANEL_DEVICE_STATUS_LOADING     0x02  // Image loading in progress
+#define PANEL_DEVICE_STATUS_ERROR       0x03  // Image error
+#define PANEL_DEVICE_STATUS_NO_CARD     0x04  // SD card not present
+#define PANEL_DEVICE_STATUS_WRONG_MODE  0x05  // SD card configured for the other device type
 
 // Special argument values
 #define PANEL_ARG_EXTENDED             0xFFFF  // Use payload for extended data
@@ -108,12 +111,9 @@ typedef struct __attribute__((packed)) {
 #define PANEL_CMD_IS_WRITE(cmd) (!PANEL_CMD_IS_READ(cmd))
 #define PANEL_CMD_IS_ASYNC(cmd) ((cmd) & PANEL_CMD_ASYNC_FLAG)
 
-// Async operation states (internal to main board).
-// 0 is reserved: a dead/disconnected bus reads back 0, so a live main board
-// never reports it. Every real state is >= 1
+// Async operation states (internal to main board)
 typedef enum {
-    PANEL_ASYNC_NO_RESPONSE = 0,  // Main board not answering
-    PANEL_ASYNC_IDLE = 1,
+    PANEL_ASYNC_IDLE = 0,
     PANEL_ASYNC_PROCESSING,
     PANEL_ASYNC_READY,
     PANEL_ASYNC_ERROR
@@ -193,8 +193,9 @@ typedef struct __attribute__((packed)) {
     uint8_t track_position_s; // Track position: seconds
     uint8_t track_position_f; // Track position: frames
     char disc_name[64];       // Current disc name (null-terminated)
-    uint8_t device_status;    // PANEL_DEVICE_STATUS_* (NONE if main board absent)
-    uint8_t reserved[3];      // Reserved for future use
+    uint8_t device_status;    // PANEL_DEVICE_STATUS_*
+    uint8_t alive_magic;      // PANEL_ALIVE_MAGIC when written by a live main board
+    uint8_t reserved[2];      // Reserved for future use
 } panel_playback_status_t;
 
 // Entry type for directory listings
