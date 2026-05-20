@@ -74,7 +74,7 @@ static ota_manager_t ota_manager;
 
 // Dynamic disc list - populated from I2C communication
 static bool disc_list_loaded = false;
-static char current_disc_name[64] = "No disc loaded";
+static char current_disc_name[64] = "No main board";
 static playback_status_t current_playback_status = {0};
 static bool disc_name_changed = true;  // Flag to signal title changed (resets scroll)
 static bool status_needs_redraw = true;  // Flag to signal status screen needs redraw
@@ -881,11 +881,20 @@ static void refresh_playback_status(void) {
     strncpy(old_disc_name, current_disc_name, sizeof(old_disc_name) - 1);
     old_disc_name[sizeof(old_disc_name) - 1] = '\0';
 
-    if (!host_comm.initialized) {
+    // Liveness check via the device status read
+    uint8_t status_byte;
+    if (!host_comm.initialized ||
+        host_comm_get_device_status(&host_comm, &status_byte) != ESP_OK) {
         memset(&current_playback_status, 0, sizeof(current_playback_status));
         memset(&current_image_status, 0, sizeof(current_image_status));
-        strncpy(current_disc_name, "No disc loaded", sizeof(current_disc_name) - 1);
+        strncpy(current_disc_name, "No main board", sizeof(current_disc_name) - 1);
         current_disc_name[sizeof(current_disc_name) - 1] = '\0';
+        // This path returns early, so flag the redraw here the way the
+        // normal path does at the end
+        if (strcmp(old_disc_name, current_disc_name) != 0) {
+            disc_name_changed = true;  // Refresh the status title, reset scroll
+        }
+        status_needs_redraw = true;
         return;
     }
 
@@ -893,7 +902,7 @@ static void refresh_playback_status(void) {
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "Failed to get playback status: %s", esp_err_to_name(ret));
         memset(&current_playback_status, 0, sizeof(current_playback_status));
-        strncpy(current_disc_name, "No disc loaded", sizeof(current_disc_name) - 1);
+        strncpy(current_disc_name, "No main board", sizeof(current_disc_name) - 1);
         current_disc_name[sizeof(current_disc_name) - 1] = '\0';
     } else if (current_playback_status.disc_name[0] != '\0') {
       // Trust whatever string the main board put in disc_name — it carries the
@@ -907,22 +916,17 @@ static void refresh_playback_status(void) {
         current_disc_name[sizeof(current_disc_name) - 1] = '\0';
     }
 
-    // Poll device status for LED color in handle_activity_event so SD error
-    // states get distinct indication
-    uint8_t status_byte;
-    if (host_comm_get_device_status(&host_comm, &status_byte) == ESP_OK) {
-        uint8_t prev = current_device_status;
-        current_device_status = status_byte;
-        // SD recovered from error: any cached directory listing from the old
-        // card is stale — force a refetch on next disc-list entry.
-        bool prev_err = (prev == PANEL_DEVICE_STATUS_NO_CARD ||
-                         prev == PANEL_DEVICE_STATUS_WRONG_MODE);
-        bool now_err  = (status_byte == PANEL_DEVICE_STATUS_NO_CARD ||
-                         status_byte == PANEL_DEVICE_STATUS_WRONG_MODE);
-        if (prev_err && !now_err) {
-            ESP_LOGI(TAG, "SD card recovered; invalidating disc list cache");
-            disc_list_loaded = false;
-        }
+    // Track recovery from an SD error so a stale directory listing from the old
+    // card gets refetched
+    uint8_t prev = current_device_status;
+    current_device_status = status_byte;
+    bool prev_err = (prev == PANEL_DEVICE_STATUS_NO_CARD ||
+                     prev == PANEL_DEVICE_STATUS_WRONG_MODE);
+    bool now_err  = (status_byte == PANEL_DEVICE_STATUS_NO_CARD ||
+                     status_byte == PANEL_DEVICE_STATUS_WRONG_MODE);
+    if (prev_err && !now_err) {
+        ESP_LOGI(TAG, "SD card recovered; invalidating disc list cache");
+        disc_list_loaded = false;
     }
 
     // Check if disc name actually changed (for fetching full image status and resetting scroll)
