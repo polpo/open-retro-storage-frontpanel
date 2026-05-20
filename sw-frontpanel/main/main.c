@@ -881,10 +881,13 @@ static void refresh_playback_status(void) {
     strncpy(old_disc_name, current_disc_name, sizeof(old_disc_name) - 1);
     old_disc_name[sizeof(old_disc_name) - 1] = '\0';
 
-    // Liveness check via the device status read
-    uint8_t status_byte;
-    if (!host_comm.initialized ||
-        host_comm_get_device_status(&host_comm, &status_byte) != ESP_OK) {
+    // The playback status poll doubles as the liveness probe by checking for
+    // PANEL_ALIVE_MAGIC
+    esp_err_t ret = host_comm.initialized
+        ? host_comm_get_playback_status(&host_comm, &current_playback_status)
+        : ESP_FAIL;
+    if (ret != ESP_OK ||
+        current_playback_status.alive_magic != PANEL_ALIVE_MAGIC) {
         memset(&current_playback_status, 0, sizeof(current_playback_status));
         memset(&current_image_status, 0, sizeof(current_image_status));
         strncpy(current_disc_name, "No main board", sizeof(current_disc_name) - 1);
@@ -898,13 +901,7 @@ static void refresh_playback_status(void) {
         return;
     }
 
-    esp_err_t ret = host_comm_get_playback_status(&host_comm, &current_playback_status);
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "Failed to get playback status: %s", esp_err_to_name(ret));
-        memset(&current_playback_status, 0, sizeof(current_playback_status));
-        strncpy(current_disc_name, "No main board", sizeof(current_disc_name) - 1);
-        current_disc_name[sizeof(current_disc_name) - 1] = '\0';
-    } else if (current_playback_status.disc_name[0] != '\0') {
+    if (current_playback_status.disc_name[0] != '\0') {
       // Trust whatever string the main board put in disc_name — it carries the
       // image name when a disc is loaded, and the error text ("No SD card" /
       // "Wrong-mode card") when in an SD error state
@@ -917,13 +914,13 @@ static void refresh_playback_status(void) {
     }
 
     // Track recovery from an SD error so a stale directory listing from the old
-    // card gets refetched
+    // card gets refetched. device_status rides along in the playback status.
     uint8_t prev = current_device_status;
-    current_device_status = status_byte;
+    current_device_status = current_playback_status.device_status;
     bool prev_err = (prev == PANEL_DEVICE_STATUS_NO_CARD ||
                      prev == PANEL_DEVICE_STATUS_WRONG_MODE);
-    bool now_err  = (status_byte == PANEL_DEVICE_STATUS_NO_CARD ||
-                     status_byte == PANEL_DEVICE_STATUS_WRONG_MODE);
+    bool now_err  = (current_device_status == PANEL_DEVICE_STATUS_NO_CARD ||
+                     current_device_status == PANEL_DEVICE_STATUS_WRONG_MODE);
     if (prev_err && !now_err) {
         ESP_LOGI(TAG, "SD card recovered; invalidating disc list cache");
         disc_list_loaded = false;
@@ -1438,10 +1435,13 @@ void app_main(void) {
         ESP_LOGI(TAG, "Host comm initialized successfully using %s",
                  host_comm_get_transport_name(&host_comm));
 
-        uint8_t test_status;
-        ret = host_comm_get_device_status(&host_comm, &test_status);
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to communicate with main board: %s", esp_err_to_name(ret));
+        // Probe the main board with a playback-status read and check the
+        // alive_magic
+        playback_status_t probe_status;
+        ret = host_comm_get_playback_status(&host_comm, &probe_status);
+        if (ret != ESP_OK || probe_status.alive_magic != PANEL_ALIVE_MAGIC) {
+            ESP_LOGE(TAG, "Failed to communicate with main board: %s",
+                     ret == ESP_OK ? "no heartbeat" : esp_err_to_name(ret));
             led_stop_pulse();
 
             for (int i = 0; i < 6; i++) {
@@ -1465,7 +1465,7 @@ void app_main(void) {
             led_start_pulse(COLOR_CYAN);
             host_comm.initialized = false;
         } else {
-            ESP_LOGI(TAG, "Communication with main board verified (status: 0x%02X)", test_status);
+            ESP_LOGI(TAG, "Communication with main board verified");
 
             // Get and display main board firmware version
             rp2350_fw_status_t fw_status;
