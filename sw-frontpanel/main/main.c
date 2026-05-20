@@ -47,9 +47,10 @@ static menu_t main_menu;
 static menu_t disc_menu;
 static menu_t wifi_menu;
 static menu_t settings_menu;
-static menu_t display_settings_menu;  // Parent: Idle Mode / Idle Timeout
+static menu_t display_settings_menu;  // Parent: Idle Mode / Idle Timeout / Blank Timeout
 static menu_t idle_mode_menu;
 static menu_t idle_timeout_menu;
+static menu_t blank_timeout_menu;
 static menu_t *active_menu = NULL;  // Pointer to currently displayed menu
 static screen_type_t info_return_screen = SCREEN_MAIN_MENU;  // Screen to return to from SCREEN_INFO
 
@@ -62,6 +63,7 @@ static menu_t* screen_menus[SCREEN_COUNT] = {
     [SCREEN_DISPLAY_SETTINGS] = &display_settings_menu,
     [SCREEN_IDLE_MODE] = &idle_mode_menu,
     [SCREEN_IDLE_TIMEOUT] = &idle_timeout_menu,
+    [SCREEN_BLANK_TIMEOUT] = &blank_timeout_menu,
 };
 static host_comm_t host_comm;
 static wifi_manager_t wifi_manager;
@@ -80,6 +82,11 @@ static loaded_image_status_t current_image_status = {0};  // Full image status i
 
 // Device type (IDE vs ATAPI) - affects available operations
 static uint8_t current_device_type = PANEL_DEVICE_TYPE_ATAPI;  // Default to ATAPI
+
+// Latest PANEL_CMD_GET_DEVICE_STATUS reply, refreshed alongside playback
+// status. Drives the LED color so SD error states (NO_CARD, WRONG_MODE) get
+// distinct indication beyond just "no disc."
+static uint8_t current_device_status = PANEL_DEVICE_STATUS_NO_IMAGE;
 
 // Firmware status tracking
 static rp2350_fw_status_t rp2350_fw_status = {0};
@@ -102,17 +109,63 @@ static void redraw_current_screen(void);
 static const char *info_screen_title = "";
 static char info_screen_body[256] = "";
 
+// Cached state used to refresh the LED both on activity events and on display
+// off-state transitions so breathing can pick up the current color
+static activity_event_t last_activity_event = {0};
+static bool display_is_off = false;
+
+// Computes the LED color implied by current state. Returns true via the
+// out-param when the color represents in-progress disc activity, which
+// suppresses the slow breathe so reads/writes remain clearly visible
+static rgb_color_t compute_led_state_color(bool *is_activity) {
+    *is_activity = false;
+    // SD-card error states win over the normal disc-inserted check so the
+    // user sees a clearly different color than the generic "no image" idle
+    switch (current_device_status) {
+        case PANEL_DEVICE_STATUS_NO_CARD:
+            return COLOR_RED;
+        case PANEL_DEVICE_STATUS_WRONG_MODE:
+            return COLOR_MAGENTA;
+        default:
+            break;
+    }
+    if (!current_playback_status.disc_inserted) {
+        return COLOR_ORANGE;  // No image loaded
+    }
+    if (last_activity_event.pin_state) {
+        *is_activity = true;
+        return COLOR_YELLOW;  // Activity
+    }
+    return COLOR_CYAN;        // Idle with image
+}
+
+// Re-applies the LED color and breathe state from current cached state.
+// Safe to call whenever device status, playback status, last activity event,
+// or display-off state changes
+static void refresh_led_state(void) {
+    bool is_activity;
+    rgb_color_t color = compute_led_state_color(&is_activity);
+
+    if (display_is_off && !is_activity) {
+        led_set_color(color);     // updates cache; breathe task picks up
+        led_start_breathe();      // idempotent
+    } else {
+        led_stop_breathe();       // idempotent
+        led_set_color(color);
+    }
+}
+
 // Activity LED handler
 static void handle_activity_event(activity_event_t *event) {
     if (!event) return;
+    last_activity_event = *event;
+    refresh_led_state();
+}
 
-    if (!current_playback_status.disc_inserted) {
-        led_set_color(COLOR_ORANGE);  // No image loaded
-    } else if (event->pin_state) {
-        led_set_color(COLOR_YELLOW);  // Activity
-    } else {
-        led_set_color(COLOR_CYAN);    // Idle with image
-    }
+static void on_display_off_state_change(bool now_off, void *ctx) {
+    (void)ctx;
+    display_is_off = now_off;
+    refresh_led_state();
 }
 
 static menu_item_t main_menu_items[] = {
@@ -138,27 +191,51 @@ static menu_item_t wifi_menu_items[] = {
 static menu_item_t display_settings_menu_items[] = {
     {.text = "Idle Mode", .action = MENU_ACTION_CUSTOM, .selectable = true},
     {.text = "Idle Timeout", .action = MENU_ACTION_CUSTOM, .selectable = true},
+    {.text = "Blank Timeout", .action = MENU_ACTION_CUSTOM, .selectable = true},
 };
 
 // Idle Mode picker — order matches display_idle_mode_t enum values.
+// To disable the idle stage entirely, set Idle Timeout to "Never".
 static menu_item_t idle_mode_menu_items[] = {
     {.text = "Dim", .action = MENU_ACTION_CUSTOM, .selectable = true},
     {.text = "Flying Toasters", .action = MENU_ACTION_CUSTOM, .selectable = true},
     {.text = "DVD Logo", .action = MENU_ACTION_CUSTOM, .selectable = true},
-    {.text = "None", .action = MENU_ACTION_CUSTOM, .selectable = true},
 };
-static const char *idle_mode_names[] = { "Dim", "Flying Toasters", "DVD Logo", "None" };
+static const char *idle_mode_names[] = { "Dim", "Flying Toasters", "DVD Logo" };
 
 // Idle Timeout picker. Values in milliseconds; labels rebuilt with selection mark.
+// DISPLAY_IDLE_TIMEOUT_NEVER (0) disables the dim/screensaver intermediate stage.
 static const uint32_t idle_timeout_options_ms[] = {
     30 * 1000,
     60 * 1000,
     120 * 1000,
     300 * 1000,
+    DISPLAY_IDLE_TIMEOUT_NEVER,
 };
-static const char *idle_timeout_labels[] = { "30 sec", "1 min", "2 min", "5 min" };
+static const char *idle_timeout_labels[] = { "30 sec", "1 min", "2 min", "5 min", "Never" };
 #define IDLE_TIMEOUT_OPTION_COUNT (sizeof(idle_timeout_options_ms) / sizeof(idle_timeout_options_ms[0]))
 static menu_item_t idle_timeout_menu_items[IDLE_TIMEOUT_OPTION_COUNT] = {
+    {.action = MENU_ACTION_CUSTOM, .selectable = true},
+    {.action = MENU_ACTION_CUSTOM, .selectable = true},
+    {.action = MENU_ACTION_CUSTOM, .selectable = true},
+    {.action = MENU_ACTION_CUSTOM, .selectable = true},
+    {.action = MENU_ACTION_CUSTOM, .selectable = true},
+};
+
+// Blank Timeout picker. Total inactivity time before the screen is fully blanked.
+// While blanked, the LED slowly breathes the current idle color.
+// DISPLAY_OFF_TIMEOUT_NEVER (0) disables blanking entirely.
+static const uint32_t blank_timeout_options_ms[] = {
+    10 * 60 * 1000,
+    20 * 60 * 1000,
+    30 * 60 * 1000,
+    60 * 60 * 1000,
+    DISPLAY_OFF_TIMEOUT_NEVER,
+};
+static const char *blank_timeout_labels[] = { "10 min", "20 min", "30 min", "1 hour", "Never" };
+#define BLANK_TIMEOUT_OPTION_COUNT (sizeof(blank_timeout_options_ms) / sizeof(blank_timeout_options_ms[0]))
+static menu_item_t blank_timeout_menu_items[BLANK_TIMEOUT_OPTION_COUNT] = {
+    {.action = MENU_ACTION_CUSTOM, .selectable = true},
     {.action = MENU_ACTION_CUSTOM, .selectable = true},
     {.action = MENU_ACTION_CUSTOM, .selectable = true},
     {.action = MENU_ACTION_CUSTOM, .selectable = true},
@@ -168,6 +245,13 @@ static menu_item_t idle_timeout_menu_items[IDLE_TIMEOUT_OPTION_COUNT] = {
 static const char *idle_timeout_short_label(uint32_t timeout_ms) {
     for (size_t i = 0; i < IDLE_TIMEOUT_OPTION_COUNT; i++) {
         if (idle_timeout_options_ms[i] == timeout_ms) return idle_timeout_labels[i];
+    }
+    return "Custom";
+}
+
+static const char *blank_timeout_short_label(uint32_t timeout_ms) {
+    for (size_t i = 0; i < BLANK_TIMEOUT_OPTION_COUNT; i++) {
+        if (blank_timeout_options_ms[i] == timeout_ms) return blank_timeout_labels[i];
     }
     return "Custom";
 }
@@ -191,11 +275,23 @@ static void refresh_idle_timeout_labels(void) {
     idle_timeout_menu.needs_redraw = true;
 }
 
+static void refresh_blank_timeout_labels(void) {
+    uint32_t current = display_manager_get_off_timeout(&display);
+    for (size_t i = 0; i < BLANK_TIMEOUT_OPTION_COUNT; i++) {
+        snprintf(blank_timeout_menu_items[i].text, MENU_ITEM_MAX_LENGTH,
+                 "%s %s", (blank_timeout_options_ms[i] == current) ? "*" : " ",
+                 blank_timeout_labels[i]);
+    }
+    blank_timeout_menu.needs_redraw = true;
+}
+
 static void refresh_display_settings_labels(void) {
     snprintf(display_settings_menu_items[0].text, MENU_ITEM_MAX_LENGTH,
              "Idle Mode: %s", idle_mode_names[display_manager_get_idle_mode(&display)]);
     snprintf(display_settings_menu_items[1].text, MENU_ITEM_MAX_LENGTH,
              "Timeout: %s", idle_timeout_short_label(display_manager_get_idle_timeout(&display)));
+    snprintf(display_settings_menu_items[2].text, MENU_ITEM_MAX_LENGTH,
+             "Blank: %s", blank_timeout_short_label(display_manager_get_off_timeout(&display)));
     display_settings_menu.needs_redraw = true;
 }
 
@@ -525,6 +621,9 @@ static void handle_button_event(button_event_t *event) {
                         } else if (selected == 1) {
                             refresh_idle_timeout_labels();
                             current_screen = SCREEN_IDLE_TIMEOUT;
+                        } else if (selected == 2) {
+                            refresh_blank_timeout_labels();
+                            current_screen = SCREEN_BLANK_TIMEOUT;
                         }
                     }
                     break;
@@ -583,6 +682,37 @@ static void handle_button_event(button_event_t *event) {
                             display_manager_set_idle_timeout(&display,
                                                              idle_timeout_options_ms[selected]);
                             refresh_idle_timeout_labels();
+                        }
+                    }
+                    break;
+                case 3:
+                    if (event->type == BUTTON_EVENT_CLICK) {
+                        refresh_display_settings_labels();
+                        current_screen = SCREEN_DISPLAY_SETTINGS;
+                    }
+                    break;
+            }
+            break;
+
+        case SCREEN_BLANK_TIMEOUT:
+            switch (event->button_id) {
+                case 0:
+                    if (event->type == BUTTON_EVENT_CLICK || event->type == BUTTON_EVENT_REPEAT) {
+                        menu_navigate_up(&blank_timeout_menu);
+                    }
+                    break;
+                case 2:
+                    if (event->type == BUTTON_EVENT_CLICK || event->type == BUTTON_EVENT_REPEAT) {
+                        menu_navigate_down(&blank_timeout_menu);
+                    }
+                    break;
+                case 1:
+                    if (event->type == BUTTON_EVENT_CLICK) {
+                        uint32_t selected = menu_get_selected_index(&blank_timeout_menu);
+                        if (selected < BLANK_TIMEOUT_OPTION_COUNT) {
+                            display_manager_set_off_timeout(&display,
+                                                            blank_timeout_options_ms[selected]);
+                            refresh_blank_timeout_labels();
                         }
                     }
                     break;
@@ -667,6 +797,7 @@ static void redraw_current_screen(void) {
         case SCREEN_DISPLAY_SETTINGS:
         case SCREEN_IDLE_MODE:
         case SCREEN_IDLE_TIMEOUT:
+        case SCREEN_BLANK_TIMEOUT:
             if (active_menu) active_menu->needs_redraw = true;
             break;
         case SCREEN_INFO:
@@ -764,13 +895,34 @@ static void refresh_playback_status(void) {
         memset(&current_playback_status, 0, sizeof(current_playback_status));
         strncpy(current_disc_name, "No disc loaded", sizeof(current_disc_name) - 1);
         current_disc_name[sizeof(current_disc_name) - 1] = '\0';
-    } else if (!current_playback_status.disc_inserted) {
-        strncpy(current_disc_name, "No disc loaded", sizeof(current_disc_name) - 1);
-        current_disc_name[sizeof(current_disc_name) - 1] = '\0';
+    } else if (current_playback_status.disc_name[0] != '\0') {
+      // Trust whatever string the main board put in disc_name — it carries the
+      // image name when a disc is loaded, and the error text ("No SD card" /
+      // "Wrong-mode card") when in an SD error state
+      strncpy(current_disc_name, current_playback_status.disc_name,
+              sizeof(current_disc_name) - 1);
+      current_disc_name[sizeof(current_disc_name) - 1] = '\0';
     } else {
-        // Copy disc name from playback status
-        strncpy(current_disc_name, current_playback_status.disc_name, sizeof(current_disc_name) - 1);
+        strncpy(current_disc_name, "No image loaded", sizeof(current_disc_name) - 1);
         current_disc_name[sizeof(current_disc_name) - 1] = '\0';
+    }
+
+    // Poll device status for LED color in handle_activity_event so SD error
+    // states get distinct indication
+    uint8_t status_byte;
+    if (host_comm_get_device_status(&host_comm, &status_byte) == ESP_OK) {
+        uint8_t prev = current_device_status;
+        current_device_status = status_byte;
+        // SD recovered from error: any cached directory listing from the old
+        // card is stale — force a refetch on next disc-list entry.
+        bool prev_err = (prev == PANEL_DEVICE_STATUS_NO_CARD ||
+                         prev == PANEL_DEVICE_STATUS_WRONG_MODE);
+        bool now_err  = (status_byte == PANEL_DEVICE_STATUS_NO_CARD ||
+                         status_byte == PANEL_DEVICE_STATUS_WRONG_MODE);
+        if (prev_err && !now_err) {
+            ESP_LOGI(TAG, "SD card recovered; invalidating disc list cache");
+            disc_list_loaded = false;
+        }
     }
 
     // Check if disc name actually changed (for fetching full image status and resetting scroll)
@@ -1258,6 +1410,12 @@ void app_main(void) {
     menu_init(&idle_timeout_menu, MENU_VISIBLE_ITEMS_WITH_TITLE);
     idle_timeout_menu.title = "Idle Timeout";
     menu_set_items(&idle_timeout_menu, idle_timeout_menu_items, IDLE_TIMEOUT_OPTION_COUNT);
+
+    menu_init(&blank_timeout_menu, MENU_VISIBLE_ITEMS_WITH_TITLE);
+    blank_timeout_menu.title = "Blank Timeout";
+    menu_set_items(&blank_timeout_menu, blank_timeout_menu_items, BLANK_TIMEOUT_OPTION_COUNT);
+
+    display_manager_set_off_state_callback(&display, on_display_off_state_change, NULL);
 
     transport_config_t transport_cfg = {
         .device_addr = HOST_DEVICE_ADDR,

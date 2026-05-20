@@ -28,17 +28,18 @@
 
 static const char *TAG = "display_manager";
 
-#define DISPLAY_NVS_NAMESPACE   "display_cfg"
-#define DISPLAY_NVS_KEY_IDLE    "idle_mode"
-#define DISPLAY_NVS_KEY_TIMEOUT "idle_timeout"
+#define DISPLAY_NVS_NAMESPACE       "display_cfg"
+#define DISPLAY_NVS_KEY_IDLE        "idle_mode"
+#define DISPLAY_NVS_KEY_TIMEOUT     "idle_timeout"
+#define DISPLAY_NVS_KEY_OFF_TIMEOUT "off_timeout"
 #define DISPLAY_WIDTH  128
 #define DISPLAY_HEIGHT 64
 #define SPRITE_X_PER_Y (-2)  // Matches PicoPOST's invSlope = -2.0
 #define DVD_LOGO_TICK_MS 33  // ~30 fps; matches the display task's iteration rate
-// Clamp the configured idle timeout so it stays meaningfully below the off
-// timeout (and above 5s for sanity).
+// Clamp the configured idle timeout so it stays meaningfully below the
+// smallest allowed off timeout (and above 5s for sanity).
 #define DISPLAY_IDLE_TIMEOUT_MIN_MS (5 * 1000)
-#define DISPLAY_IDLE_TIMEOUT_MAX_MS (DISPLAY_OFF_TIMEOUT_MS - 30 * 1000)
+#define DISPLAY_IDLE_TIMEOUT_MAX_MS (DISPLAY_OFF_TIMEOUT_MIN_MS - 30 * 1000)
 
 static void dim_timer_callback(void *arg);
 static void off_timer_callback(void *arg);
@@ -49,6 +50,7 @@ static void schedule_idle_timer(display_manager_t *display);
 static void load_idle_config_from_nvs(display_manager_t *display);
 static void save_idle_mode_to_nvs(display_idle_mode_t mode);
 static void save_idle_timeout_to_nvs(uint32_t timeout_ms);
+static void save_off_timeout_to_nvs(uint32_t timeout_ms);
 static void respawn_sprite(sprite_state_t *sprite);
 static bool spawn_zone_busy(sprite_state_t *sprites, int self_idx);
 static void step_sprite(sprite_state_t *sprites, int idx, uint32_t now_ms);
@@ -90,6 +92,8 @@ esp_err_t display_manager_init(display_manager_t *display) {
     display->min_update_interval_ms = MIN_UPDATE_INTERVAL_MS;
     display->last_activity_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
     display->state = DISPLAY_STATE_FULL_BRIGHTNESS;
+    display->off_state_cb = NULL;
+    display->off_state_cb_ctx = NULL;
     memset(&display->saver, 0, sizeof(display->saver));
     for (int i = 0; i < SCREENSAVER_MAX_SPRITES; i++) {
         display->saver.sprites[i].fully_hidden = true;
@@ -246,8 +250,10 @@ static void enter_dimmed(display_manager_t *display) {
         u8g2_SetContrast(&display->u8g2, 25);
         xSemaphoreGive(display->spi_mutex);
     }
-    esp_timer_start_once(display->off_timer,
-                         (uint64_t)(DISPLAY_OFF_TIMEOUT_MS - display->idle_timeout_ms) * 1000);
+    if (display->off_timeout_ms != DISPLAY_OFF_TIMEOUT_NEVER) {
+        esp_timer_start_once(display->off_timer,
+                             (uint64_t)(display->off_timeout_ms - display->idle_timeout_ms) * 1000);
+    }
 }
 
 static void enter_screensaver(display_manager_t *display) {
@@ -285,12 +291,19 @@ static void enter_off(display_manager_t *display) {
     if (was_screensaver) {
         display->needs_full_redraw = true;
     }
+    if (display->off_state_cb) {
+        display->off_state_cb(true, display->off_state_cb_ctx);
+    }
 }
 
 static void schedule_idle_timer(display_manager_t *display) {
-    if (display->idle_mode == DISPLAY_IDLE_MODE_NONE) {
-        // Skip the intermediate stage: jump straight to OFF after the full timeout
-        esp_timer_start_once(display->off_timer, (uint64_t)DISPLAY_OFF_TIMEOUT_MS * 1000);
+    if (display->idle_timeout_ms == DISPLAY_IDLE_TIMEOUT_NEVER) {
+        // No intermediate stage: jump straight to OFF after the full off
+        // timeout (unless blanking is also disabled, in which case nothing
+        // ever happens and the display stays at full brightness).
+        if (display->off_timeout_ms != DISPLAY_OFF_TIMEOUT_NEVER) {
+            esp_timer_start_once(display->off_timer, (uint64_t)display->off_timeout_ms * 1000);
+        }
     } else {
         esp_timer_start_once(display->dim_timer, (uint64_t)display->idle_timeout_ms * 1000);
     }
@@ -308,12 +321,10 @@ static void dim_timer_callback(void *arg) {
         case DISPLAY_IDLE_MODE_TOASTERS:
         case DISPLAY_IDLE_MODE_DVD_LOGO:
             enter_screensaver(display);
-            esp_timer_start_once(display->off_timer,
-                                 (uint64_t)(DISPLAY_OFF_TIMEOUT_MS - display->idle_timeout_ms) * 1000);
-            break;
-        case DISPLAY_IDLE_MODE_NONE:
-            // Should not have armed dim_timer in NONE mode, but be safe
-            enter_off(display);
+            if (display->off_timeout_ms != DISPLAY_OFF_TIMEOUT_NEVER) {
+                esp_timer_start_once(display->off_timer,
+                                     (uint64_t)(display->off_timeout_ms - display->idle_timeout_ms) * 1000);
+            }
             break;
     }
 }
@@ -332,6 +343,7 @@ esp_err_t display_manager_wake(display_manager_t *display) {
 
     bool was_idle = (display->state != DISPLAY_STATE_FULL_BRIGHTNESS);
     bool was_screensaver = (display->state == DISPLAY_STATE_SCREENSAVER);
+    bool was_off = (display->state == DISPLAY_STATE_OFF);
 
     esp_timer_stop(display->dim_timer);
     esp_timer_stop(display->off_timer);
@@ -339,6 +351,9 @@ esp_err_t display_manager_wake(display_manager_t *display) {
     if (was_idle) {
         ESP_LOGI(TAG, "Waking display to full brightness");
         display->state = DISPLAY_STATE_FULL_BRIGHTNESS;
+        if (was_off && display->off_state_cb) {
+            display->off_state_cb(false, display->off_state_cb_ctx);
+        }
 
         if (xSemaphoreTake(display->spi_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
             u8g2_SetPowerSave(&display->u8g2, 0);
@@ -367,8 +382,7 @@ esp_err_t display_manager_set_idle_mode(display_manager_t *display, display_idle
     if (!display) return ESP_ERR_INVALID_ARG;
     if (mode != DISPLAY_IDLE_MODE_DIM &&
         mode != DISPLAY_IDLE_MODE_TOASTERS &&
-        mode != DISPLAY_IDLE_MODE_DVD_LOGO &&
-        mode != DISPLAY_IDLE_MODE_NONE) {
+        mode != DISPLAY_IDLE_MODE_DVD_LOGO) {
         return ESP_ERR_INVALID_ARG;
     }
     if (display->idle_mode == mode) return ESP_OK;
@@ -392,8 +406,10 @@ display_idle_mode_t display_manager_get_idle_mode(display_manager_t *display) {
 
 esp_err_t display_manager_set_idle_timeout(display_manager_t *display, uint32_t timeout_ms) {
     if (!display) return ESP_ERR_INVALID_ARG;
-    if (timeout_ms < DISPLAY_IDLE_TIMEOUT_MIN_MS) timeout_ms = DISPLAY_IDLE_TIMEOUT_MIN_MS;
-    if (timeout_ms > DISPLAY_IDLE_TIMEOUT_MAX_MS) timeout_ms = DISPLAY_IDLE_TIMEOUT_MAX_MS;
+    if (timeout_ms != DISPLAY_IDLE_TIMEOUT_NEVER) {
+        if (timeout_ms < DISPLAY_IDLE_TIMEOUT_MIN_MS) timeout_ms = DISPLAY_IDLE_TIMEOUT_MIN_MS;
+        if (timeout_ms > DISPLAY_IDLE_TIMEOUT_MAX_MS) timeout_ms = DISPLAY_IDLE_TIMEOUT_MAX_MS;
+    }
     if (display->idle_timeout_ms == timeout_ms) return ESP_OK;
 
     display->idle_timeout_ms = timeout_ms;
@@ -410,6 +426,37 @@ esp_err_t display_manager_set_idle_timeout(display_manager_t *display, uint32_t 
 uint32_t display_manager_get_idle_timeout(display_manager_t *display) {
     if (!display) return DISPLAY_IDLE_TIMEOUT_DEFAULT_MS;
     return display->idle_timeout_ms;
+}
+
+esp_err_t display_manager_set_off_timeout(display_manager_t *display, uint32_t timeout_ms) {
+    if (!display) return ESP_ERR_INVALID_ARG;
+    if (timeout_ms != DISPLAY_OFF_TIMEOUT_NEVER) {
+        if (timeout_ms < DISPLAY_OFF_TIMEOUT_MIN_MS) timeout_ms = DISPLAY_OFF_TIMEOUT_MIN_MS;
+        if (timeout_ms > DISPLAY_OFF_TIMEOUT_MAX_MS) timeout_ms = DISPLAY_OFF_TIMEOUT_MAX_MS;
+    }
+    if (display->off_timeout_ms == timeout_ms) return ESP_OK;
+
+    display->off_timeout_ms = timeout_ms;
+    save_off_timeout_to_nvs(timeout_ms);
+
+    if (display->initialized && display->state == DISPLAY_STATE_FULL_BRIGHTNESS) {
+        esp_timer_stop(display->dim_timer);
+        esp_timer_stop(display->off_timer);
+        schedule_idle_timer(display);
+    }
+    return ESP_OK;
+}
+
+uint32_t display_manager_get_off_timeout(display_manager_t *display) {
+    if (!display) return DISPLAY_OFF_TIMEOUT_DEFAULT_MS;
+    return display->off_timeout_ms;
+}
+
+void display_manager_set_off_state_callback(display_manager_t *display,
+                                            display_off_state_cb_t cb, void *user_ctx) {
+    if (!display) return;
+    display->off_state_cb = cb;
+    display->off_state_cb_ctx = user_ctx;
 }
 
 bool display_manager_screensaver_active(display_manager_t *display) {
@@ -525,6 +572,7 @@ void display_manager_screensaver_tick(display_manager_t *display) {
 static void load_idle_config_from_nvs(display_manager_t *display) {
     display->idle_mode = DISPLAY_IDLE_MODE_DIM;
     display->idle_timeout_ms = DISPLAY_IDLE_TIMEOUT_DEFAULT_MS;
+    display->off_timeout_ms = DISPLAY_OFF_TIMEOUT_DEFAULT_MS;
 
     nvs_handle_t handle;
     esp_err_t ret = nvs_open(DISPLAY_NVS_NAMESPACE, NVS_READONLY, &handle);
@@ -535,23 +583,40 @@ static void load_idle_config_from_nvs(display_manager_t *display) {
 
     uint8_t mode_stored = 0;
     if (nvs_get_u8(handle, DISPLAY_NVS_KEY_IDLE, &mode_stored) == ESP_OK &&
-        mode_stored <= (uint8_t)DISPLAY_IDLE_MODE_NONE) {
+        mode_stored <= (uint8_t)DISPLAY_IDLE_MODE_DVD_LOGO) {
         display->idle_mode = (display_idle_mode_t)mode_stored;
     }
+    // Older firmwares stored a fourth "None" mode (value 3); just fall back
+    // to the default (DIM) — that value is no longer accepted.
 
     uint32_t timeout_stored = 0;
     if (nvs_get_u32(handle, DISPLAY_NVS_KEY_TIMEOUT, &timeout_stored) == ESP_OK) {
-        if (timeout_stored < DISPLAY_IDLE_TIMEOUT_MIN_MS) {
-            timeout_stored = DISPLAY_IDLE_TIMEOUT_MIN_MS;
-        } else if (timeout_stored > DISPLAY_IDLE_TIMEOUT_MAX_MS) {
-            timeout_stored = DISPLAY_IDLE_TIMEOUT_MAX_MS;
+        if (timeout_stored != DISPLAY_IDLE_TIMEOUT_NEVER) {
+            if (timeout_stored < DISPLAY_IDLE_TIMEOUT_MIN_MS) {
+                timeout_stored = DISPLAY_IDLE_TIMEOUT_MIN_MS;
+            } else if (timeout_stored > DISPLAY_IDLE_TIMEOUT_MAX_MS) {
+                timeout_stored = DISPLAY_IDLE_TIMEOUT_MAX_MS;
+            }
         }
         display->idle_timeout_ms = timeout_stored;
     }
 
+    uint32_t off_stored = 0;
+    if (nvs_get_u32(handle, DISPLAY_NVS_KEY_OFF_TIMEOUT, &off_stored) == ESP_OK) {
+        if (off_stored != DISPLAY_OFF_TIMEOUT_NEVER) {
+            if (off_stored < DISPLAY_OFF_TIMEOUT_MIN_MS) {
+                off_stored = DISPLAY_OFF_TIMEOUT_MIN_MS;
+            } else if (off_stored > DISPLAY_OFF_TIMEOUT_MAX_MS) {
+                off_stored = DISPLAY_OFF_TIMEOUT_MAX_MS;
+            }
+        }
+        display->off_timeout_ms = off_stored;
+    }
+
     nvs_close(handle);
-    ESP_LOGI(TAG, "Loaded display cfg: idle_mode=%u timeout_ms=%lu",
-             display->idle_mode, (unsigned long)display->idle_timeout_ms);
+    ESP_LOGI(TAG, "Loaded display cfg: idle_mode=%u timeout_ms=%lu off_timeout_ms=%lu",
+             display->idle_mode, (unsigned long)display->idle_timeout_ms,
+             (unsigned long)display->off_timeout_ms);
 }
 
 static void save_idle_mode_to_nvs(display_idle_mode_t mode) {
@@ -578,4 +643,17 @@ static void save_idle_timeout_to_nvs(uint32_t timeout_ms) {
     nvs_commit(handle);
     nvs_close(handle);
     ESP_LOGI(TAG, "Saved idle_timeout_ms=%lu", (unsigned long)timeout_ms);
+}
+
+static void save_off_timeout_to_nvs(uint32_t timeout_ms) {
+    nvs_handle_t handle;
+    esp_err_t ret = nvs_open(DISPLAY_NVS_NAMESPACE, NVS_READWRITE, &handle);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to open NVS for display config: %s", esp_err_to_name(ret));
+        return;
+    }
+    nvs_set_u32(handle, DISPLAY_NVS_KEY_OFF_TIMEOUT, timeout_ms);
+    nvs_commit(handle);
+    nvs_close(handle);
+    ESP_LOGI(TAG, "Saved off_timeout_ms=%lu", (unsigned long)timeout_ms);
 }

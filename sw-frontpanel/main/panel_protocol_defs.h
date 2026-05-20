@@ -67,10 +67,12 @@
 #define PANEL_STATUS_NO_OPERATION      0x03  // No operation pending
 
 // Device status codes for GET_DEVICE_STATUS
-#define PANEL_DEVICE_STATUS_NO_IMAGE   0x00  // No image loaded
-#define PANEL_DEVICE_STATUS_LOADED     0x01  // Image loaded and ready
-#define PANEL_DEVICE_STATUS_LOADING    0x02  // Image loading in progress
-#define PANEL_DEVICE_STATUS_ERROR      0x03  // Image error
+#define PANEL_DEVICE_STATUS_NO_IMAGE    0x00  // No image loaded
+#define PANEL_DEVICE_STATUS_LOADED      0x01  // Image loaded and ready
+#define PANEL_DEVICE_STATUS_LOADING     0x02  // Image loading in progress
+#define PANEL_DEVICE_STATUS_ERROR       0x03  // Image error
+#define PANEL_DEVICE_STATUS_NO_CARD     0x04  // SD card not present
+#define PANEL_DEVICE_STATUS_WRONG_MODE  0x05  // SD card configured for the other device type
 
 // Special argument values
 #define PANEL_ARG_EXTENDED             0xFFFF  // Use payload for extended data

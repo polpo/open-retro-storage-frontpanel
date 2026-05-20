@@ -36,7 +36,6 @@ typedef enum {
     DISPLAY_IDLE_MODE_DIM = 0,
     DISPLAY_IDLE_MODE_TOASTERS = 1,
     DISPLAY_IDLE_MODE_DVD_LOGO = 2,
-    DISPLAY_IDLE_MODE_NONE = 3,
 } display_idle_mode_t;
 
 #define SCREENSAVER_MAX_SPRITES 5
@@ -67,6 +66,10 @@ typedef struct {
     uint32_t last_step_ms;
 } screensaver_state_t;
 
+// Called whenever the display transitions into or out of DISPLAY_STATE_OFF
+// (the fully blanked state). Used by main.c to drive the LED breathing effect.
+typedef void (*display_off_state_cb_t)(bool now_off, void *user_ctx);
+
 typedef struct {
     u8g2_t u8g2;
     bool needs_update;
@@ -78,10 +81,13 @@ typedef struct {
     display_state_t state;
     display_idle_mode_t idle_mode;
     uint32_t idle_timeout_ms;  // Time until intermediate (dim/screensaver) state engages
+    uint32_t off_timeout_ms;   // Total time of inactivity before blanking the display
     screensaver_state_t saver;
     esp_timer_handle_t dim_timer;
     esp_timer_handle_t off_timer;
     SemaphoreHandle_t spi_mutex;
+    display_off_state_cb_t off_state_cb;
+    void *off_state_cb_ctx;
 } display_manager_t;
 
 esp_err_t display_manager_init(display_manager_t *display);
@@ -101,10 +107,19 @@ esp_err_t display_manager_set_idle_mode(display_manager_t *display, display_idle
 display_idle_mode_t display_manager_get_idle_mode(display_manager_t *display);
 esp_err_t display_manager_set_idle_timeout(display_manager_t *display, uint32_t timeout_ms);
 uint32_t display_manager_get_idle_timeout(display_manager_t *display);
+esp_err_t display_manager_set_off_timeout(display_manager_t *display, uint32_t timeout_ms);
+uint32_t display_manager_get_off_timeout(display_manager_t *display);
+void display_manager_set_off_state_callback(display_manager_t *display,
+                                            display_off_state_cb_t cb, void *user_ctx);
 bool display_manager_screensaver_active(display_manager_t *display);
 void display_manager_screensaver_tick(display_manager_t *display);
 
-#define DISPLAY_IDLE_TIMEOUT_DEFAULT_MS (120 * 1000)  // 2 minutes
-#define DISPLAY_OFF_TIMEOUT_MS          (600 * 1000)  // 10 minutes (fixed)
+#define DISPLAY_IDLE_TIMEOUT_DEFAULT_MS (120 * 1000)         // 2 minutes
+#define DISPLAY_OFF_TIMEOUT_DEFAULT_MS  (10 * 60 * 1000)     // 10 minutes
+#define DISPLAY_OFF_TIMEOUT_MIN_MS      (10 * 60 * 1000)     // 10 minutes
+#define DISPLAY_OFF_TIMEOUT_MAX_MS      (60 * 60 * 1000)     // 1 hour
+// timeout == 0 means "never"
+#define DISPLAY_OFF_TIMEOUT_NEVER       (0)
+#define DISPLAY_IDLE_TIMEOUT_NEVER      (0)
 
 #endif

@@ -58,6 +58,14 @@ esp_err_t led_flash_color(rgb_color_t color, uint32_t duration_ms);
 esp_err_t led_start_pulse(rgb_color_t color);
 esp_err_t led_stop_pulse(void);
 
+// Slow breathing effect on the currently-set color. The breathe task reads the
+// latest color set via led_set_color/led_set_rgb on every tick, so changing the
+// color while breathing is fine. On stop, the strip is refreshed with the
+// cached color at full brightness.
+esp_err_t led_start_breathe(void);
+esp_err_t led_stop_breathe(void);
+bool led_breathe_active(void);
+
 // Activity indication functions (for future use)
 esp_err_t led_activity_read(void);
 esp_err_t led_activity_write(void);
