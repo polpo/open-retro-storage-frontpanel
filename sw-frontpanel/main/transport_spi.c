@@ -308,6 +308,13 @@ esp_err_t transport_spi_poll_async_status(transport_handle_t *handle,
     if (ret != ESP_OK) {
         return ret;
     }
+    if (status.ready_flag == PANEL_ASYNC_NO_RESPONSE ||
+        status.ready_flag > PANEL_ASYNC_ERROR) {
+      // A dead SPI bus reads back 0 and a live board never sends an
+      // out-of-range state, so this implies the main board isn't answering.
+      // Fail now instead of polling until the timeout
+      return ESP_ERR_INVALID_RESPONSE;
+    }
     if (status.ready_flag == PANEL_ASYNC_ERROR) {
         return ESP_FAIL;
     }
