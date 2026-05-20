@@ -35,6 +35,7 @@
 #include "interface_common.h"
 #include "esp_netif_ip_addr.h"
 #include "ota_manager.h"
+#include "fw_version.h"
 #include "driver/gpio.h"
 #include "freertos/queue.h"
 #include "nvs_flash.h"
@@ -465,7 +466,7 @@ static void handle_button_event(button_event_t *event) {
                             if (host_comm.initialized) {
                                 rp2350_fw_status_t fw_status;
                                 if (host_comm_get_rp2350_fw_status(&host_comm, &fw_status) == ESP_OK) {
-                                    ota_manager_format_version_string(main_ver_str, fw_status.current_version);
+                                    fw_version_format_mainboard(main_ver_str, sizeof(main_ver_str), fw_status.current_version);
                                 }
                             }
                             char info_text[160];
@@ -1073,7 +1074,7 @@ static void refresh_playback_status(void) {
     // Poll device status for LED color in handle_activity_event so SD error
     // states get distinct indication
     uint8_t status_byte;
-    if (host_comm_get_device_status(&host_comm, &status_byte) == ESP_OK) {
+    if (host_comm_get_device_status(&host_comm, 0, &status_byte) == ESP_OK) {
         uint8_t prev = current_device_status;
         current_device_status = status_byte;
         // SD recovered from error: any cached directory listing from the old
@@ -1468,7 +1469,7 @@ static void unified_firmware_update_task(void *pvParameters) {
             ret = host_comm_get_rp2350_fw_status(&host_comm, &fw_status);
             if (ret == ESP_OK) {
                 char version_str[20];
-                ota_manager_format_version_string(version_str, fw_status.current_version);
+                fw_version_format_mainboard(version_str, sizeof(version_str), fw_status.current_version);
                 ESP_LOGI(TAG, "Main board back online: v%s", version_str);
                 main_board_back = true;
                 break;
@@ -1609,7 +1610,7 @@ static void trigger_panel_update(void) {
     current_screen = SCREEN_FIRMWARE_UPDATE;
 
     char version_str[14];
-    ota_manager_format_version_string(version_str, panel_fw_info.version);
+    fw_version_format_panel(version_str, sizeof(version_str), panel_fw_info.version);
     char status_msg[64];
     snprintf(status_msg, sizeof(status_msg), "Updating panel: v%s", version_str);
     ui_draw_firmware_update(&display, status_msg, 0);
@@ -1657,17 +1658,7 @@ static void trigger_mainboard_update(void) {
         if (ret == ESP_OK) {
             // Board is back! Show new version
             char version_str[16];
-#ifdef CONFIG_PRODUCT_BLUESCSI
-            snprintf(version_str, sizeof(version_str), "%lu.%02lu.%02lu",
-                     2000 + ((fw_status.current_version >> 16) & 0xFF),
-                     (fw_status.current_version >> 8) & 0xFF,
-                     fw_status.current_version & 0xFF);
-#else
-            snprintf(version_str, sizeof(version_str), "%lu.%lu.%lu",
-                     (fw_status.current_version >> 16) & 0xFF,
-                     (fw_status.current_version >> 8) & 0xFF,
-                     fw_status.current_version & 0xFF);
-#endif
+            fw_version_format_mainboard(version_str, sizeof(version_str), fw_status.current_version);
 
             char msg[48];
             snprintf(msg, sizeof(msg), "Update complete!\nNow running v%s", version_str);
@@ -1771,8 +1762,6 @@ void app_main(void) {
     xTaskCreate(status_refresh_task, "status_refresh", 2048, NULL, 4, NULL);
 
     ui_show_splash_screen(&display);
-    const esp_app_desc_t* app_desc = esp_app_get_description();
-    ui_update_splash_versions(&display, app_desc->version, NULL);
     ui_update_splash_progress(&display, "Init display...", 10);
 
     ui_update_splash_progress(&display, "Init LED...", 20);
@@ -1943,8 +1932,8 @@ void app_main(void) {
             rp2350_fw_status_t fw_status;
             if (host_comm_get_rp2350_fw_status(&host_comm, &fw_status) == ESP_OK) {
                 char main_version[20];
-                ota_manager_format_version_string(main_version, fw_status.current_version);
-                ui_update_splash_versions(&display, app_desc->version, main_version);
+                fw_version_format_mainboard(main_version, sizeof(main_version), fw_status.current_version);
+                ui_update_splash_version(&display, main_version);
                 ESP_LOGI(TAG, "Main board firmware version: %s", main_version);
             }
 

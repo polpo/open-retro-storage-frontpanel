@@ -43,7 +43,7 @@ typedef enum {
 
 esp_err_t ui_show_splash_screen(display_manager_t *display);
 esp_err_t ui_update_splash_progress(display_manager_t *display, const char *step_text, uint8_t progress);
-esp_err_t ui_update_splash_versions(display_manager_t *display, const char *panel_version, const char *main_version);
+esp_err_t ui_update_splash_version(display_manager_t *display, const char *version);
 esp_err_t ui_draw_menu(display_manager_t *display, menu_t *menu);
 esp_err_t ui_draw_disc_list(display_manager_t *display, menu_t *menu);
 esp_err_t ui_draw_status_bar(display_manager_t *display, const char *status);

@@ -15,6 +15,8 @@
 //  with this program; if not, see <https://www.gnu.org/licenses/>.
 
 #include "interface_common.h"
+#include "ota_manager.h"
+#include "fw_version.h"
 #include <string.h>
 #include <stdio.h>
 #include "esp_log.h"
@@ -250,10 +252,22 @@ esp_err_t interface_get_system_info(interface_context_t *ctx, system_info_t *inf
     memset(info, 0, sizeof(system_info_t));
 
     // Static system information
-    info->firmware_version = "v0.1.0";
-    info->hardware_name = "ESP32-C3";
     info->free_memory = esp_get_free_heap_size();
     info->uptime_seconds = esp_log_timestamp() / 1000;
+
+    // Firmware versions: the front panel runs its own image and the user-facing
+    // "main" version is reported by the main board (empty if unreachable)
+    fw_version_format_panel(info->panel_firmware_version,
+                            sizeof(info->panel_firmware_version),
+                            ota_manager_get_current_version());
+    if (ctx->host_comm && ctx->host_comm->initialized) {
+        rp2350_fw_status_t fw_status;
+        if (host_comm_get_rp2350_fw_status(ctx->host_comm, &fw_status) == ESP_OK) {
+            fw_version_format_mainboard(info->main_firmware_version,
+                                        sizeof(info->main_firmware_version),
+                                        fw_status.current_version);
+        }
+    }
 
     // Host communication info
     if (ctx->host_comm) {

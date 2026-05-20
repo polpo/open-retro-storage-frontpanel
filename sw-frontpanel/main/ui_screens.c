@@ -15,10 +15,9 @@
 //  with this program; if not, see <https://www.gnu.org/licenses/>.
 
 #include "ui_screens.h"
-#include "ota_manager.h"
+#include "fw_version.h"
 #include "sdkconfig.h"
 #include "esp_log.h"
-#include "esp_app_desc.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <string.h>
@@ -219,13 +218,6 @@ esp_err_t ui_show_splash_screen(display_manager_t *display) {
     display_manager_clear(display);
     display_manager_draw_bitmap(display, 0, 0, LOGO_WIDTH, LOGO_HEIGHT, product_logo);
 
-    display_manager_set_font(display, u8g2_font_amstrad_cpc_extended_8f);
-
-    const esp_app_desc_t* app_desc = esp_app_get_description();
-    char version_text[64];
-    snprintf(version_text, sizeof(version_text), "FW v%s", app_desc->version);
-    display_manager_draw_text(display, 30, 32, version_text);
-
     display_manager_draw_frame(display, 20, 40, 88, 8);
 
     display_manager_request_update(display);
@@ -254,8 +246,8 @@ esp_err_t ui_update_splash_progress(display_manager_t *display, const char *step
     return ESP_OK;
 }
 
-esp_err_t ui_update_splash_versions(display_manager_t *display, const char *panel_version, const char *main_version) {
-    if (!display) {
+esp_err_t ui_update_splash_version(display_manager_t *display, const char *version) {
+    if (!display || !version) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -267,11 +259,13 @@ esp_err_t ui_update_splash_versions(display_manager_t *display, const char *pane
     display_manager_set_font(display, u8g2_font_6x10_tf);
 
     char version_text[32];
-    snprintf(version_text, sizeof(version_text), "Panel: v%s", panel_version);
-    display_manager_draw_text(display, 22, 26, version_text);
+    snprintf(version_text, sizeof(version_text), "FW v%s", version);
 
-    snprintf(version_text, sizeof(version_text), "Main:  %s%s", main_version ? "v" : "", main_version ? main_version : "...");
-    display_manager_draw_text(display, 22, 36, version_text);
+    // Center horizontally from the rendered width so a longer "-preN"
+    // prerelease suffix stays centered instead of running off the edge
+    uint16_t text_width = u8g2_GetStrWidth(&display->u8g2, version_text);
+    uint8_t x = text_width < 128 ? (128 - text_width) / 2 : 0;
+    display_manager_draw_text(display, x, 32, version_text);
 
     display_manager_request_update(display);
 
@@ -527,15 +521,6 @@ esp_err_t ui_draw_firmware_update(display_manager_t *display, const char *status
 }
 
 #ifdef CONFIG_PRODUCT_BLUESCSI
-// Main board firmware uses date-based versioning (YYYY.MM.DD); the panel
-// version is semver (formatted via ota_manager_format_version_string).
-static void format_mainboard_version(char *buf, size_t buf_size, uint32_t version) {
-    uint8_t year_offset = (version >> 16) & 0xFF;
-    uint8_t month = (version >> 8) & 0xFF;
-    uint8_t day = version & 0xFF;
-    snprintf(buf, buf_size, "%d.%02d.%02d", 2000 + year_offset, month, day);
-}
-
 esp_err_t ui_draw_firmware_status(display_manager_t *display,
                                   uint32_t panel_current_ver, uint32_t panel_avail_ver, bool panel_update_avail,
                                   uint32_t main_current_ver, uint32_t main_avail_ver, bool main_update_avail,
@@ -570,11 +555,11 @@ esp_err_t ui_draw_firmware_status(display_manager_t *display,
         display_manager_set_draw_color(display, 0);
     }
     display_manager_draw_text(display, 2, y, "Panel:");
-    ota_manager_format_version_string(version_str, panel_current_ver);
+    fw_version_format_panel(version_str, sizeof(version_str), panel_current_ver);
     display_manager_draw_text(display, 44, y, version_str);
     if (panel_update_avail) {
         display_manager_draw_text(display, 79, y, "->");
-        ota_manager_format_version_string(version_str, panel_avail_ver);
+        fw_version_format_panel(version_str, sizeof(version_str), panel_avail_ver);
         display_manager_draw_text(display, 94, y, version_str);
     }
     if (selection == 0) {
@@ -589,11 +574,11 @@ esp_err_t ui_draw_firmware_status(display_manager_t *display,
         display_manager_set_draw_color(display, 0);
     }
     display_manager_draw_text(display, 2, y, "Main:");
-    format_mainboard_version(version_str, sizeof(version_str), main_current_ver);
+    fw_version_format_mainboard(version_str, sizeof(version_str), main_current_ver);
     display_manager_draw_text(display, 44, y, version_str);
     if (main_update_avail) {
         display_manager_draw_text(display, 79, y, "->");
-        format_mainboard_version(version_str, sizeof(version_str), main_avail_ver);
+        fw_version_format_mainboard(version_str, sizeof(version_str), main_avail_ver);
         display_manager_draw_text(display, 94, y, version_str);
     }
     if (selection == 1) {
@@ -612,13 +597,13 @@ esp_err_t ui_draw_firmware_status(display_manager_t *display,
 #else
     // System version (main board version is user-facing)
     display_manager_draw_text(display, 2, 26, "Version:");
-    ota_manager_format_version_string(version_str, current_ver);
+    fw_version_format_mainboard(version_str, sizeof(version_str), current_ver);
     display_manager_draw_text(display, 56, 26, version_str);
 
     // Available version
     if (update_avail) {
         display_manager_draw_text(display, 2, 40, "Available:");
-        ota_manager_format_version_string(version_str, avail_ver);
+        fw_version_format_mainboard(version_str, sizeof(version_str), avail_ver);
         display_manager_draw_text(display, 68, 40, version_str);
     } else {
         display_manager_draw_text(display, 2, 40, "Up to date");

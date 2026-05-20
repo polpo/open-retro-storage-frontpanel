@@ -36,8 +36,8 @@ typedef struct {
 
 // System information structure
 typedef struct {
-    const char *firmware_version;
-    const char *hardware_name;
+    char main_firmware_version[20];
+    char panel_firmware_version[20];
     const char *transport_name;
     bool host_connected;
     uint32_t free_memory;
