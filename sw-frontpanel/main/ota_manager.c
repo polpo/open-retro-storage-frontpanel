@@ -103,19 +103,21 @@ static uint32_t parse_version_string(const char* version_str) {
         return 0x00000000; // Default v0.0.0
     }
 
-    // pre stays 0xFF (final release) unless a -preN suffix overwrites it
-    uint8_t major, minor, patch, pre = 0xFF;
+    // pre stays 0xFF (final release) unless a -preN suffix overwrites it.
+    // Use %u, not %hhu: ESP-IDF's nano newlib sscanf doesn't support the C99
+    // "hh" length modifier, so %hhu silently fails to match.
+    unsigned int major = 0, minor = 0, patch = 0, pre = 0xFF;
 
     // sscanf stops at the first field it can't match and returns the count it
     // filled: "0.3.99" yields 3 (a final release), "0.4.0-pre2" yields 4.
-    int parsed = sscanf(version_str, "%hhu.%hhu.%hhu-pre%hhu", &major, &minor, &patch, &pre);
+    int parsed = sscanf(version_str, "%u.%u.%u-pre%u", &major, &minor, &patch, &pre);
     if (parsed < 3) {
         ESP_LOGW(TAG, "Failed to parse version string '%s', using default", version_str);
         return 0x00000000;
     }
 
-    return ((uint32_t)major << 24) | ((uint32_t)minor << 16) |
-           ((uint32_t)patch << 8) | (uint32_t)pre;
+    return ((uint32_t)(major & 0xFF) << 24) | ((uint32_t)(minor & 0xFF) << 16) |
+           ((uint32_t)(patch & 0xFF) << 8) | (uint32_t)(pre & 0xFF);
 }
 
 

@@ -1301,8 +1301,6 @@ void app_main(void) {
     xTaskCreate(status_refresh_task, "status_refresh", 2048, NULL, 4, NULL);
 
     ui_show_splash_screen(&display);
-    const esp_app_desc_t* app_desc = esp_app_get_description();
-    ui_update_splash_versions(&display, app_desc->version, NULL);
     ui_update_splash_progress(&display, "Init display...", 10);
 
     ui_update_splash_progress(&display, "Init LED...", 20);
@@ -1470,7 +1468,7 @@ void app_main(void) {
             if (host_comm_get_rp2350_fw_status(&host_comm, &fw_status) == ESP_OK) {
                 char main_version[20];
                 ota_manager_format_version_string(main_version, fw_status.current_version);
-                ui_update_splash_versions(&display, app_desc->version, main_version);
+                ui_update_splash_version(&display, main_version);
                 ESP_LOGI(TAG, "Main board firmware version: %s", main_version);
             }
 

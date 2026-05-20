@@ -16,7 +16,6 @@
 
 #include "ui_screens.h"
 #include "esp_log.h"
-#include "esp_app_desc.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <string.h>
@@ -174,13 +173,6 @@ esp_err_t ui_show_splash_screen(display_manager_t *display) {
     display_manager_clear(display);
     display_manager_draw_bitmap(display, 0, 0, 128, 15, picoide_logo);
 
-    display_manager_set_font(display, u8g2_font_amstrad_cpc_extended_8f);
-
-    const esp_app_desc_t* app_desc = esp_app_get_description();
-    char version_text[64];
-    snprintf(version_text, sizeof(version_text), "FW v%s", app_desc->version);
-    display_manager_draw_text(display, 30, 32, version_text);
-
     display_manager_draw_frame(display, 20, 40, 88, 8);
 
     display_manager_request_update(display);
@@ -209,8 +201,8 @@ esp_err_t ui_update_splash_progress(display_manager_t *display, const char *step
     return ESP_OK;
 }
 
-esp_err_t ui_update_splash_versions(display_manager_t *display, const char *panel_version, const char *main_version) {
-    if (!display) {
+esp_err_t ui_update_splash_version(display_manager_t *display, const char *version) {
+    if (!display || !version) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -222,11 +214,13 @@ esp_err_t ui_update_splash_versions(display_manager_t *display, const char *pane
     display_manager_set_font(display, u8g2_font_6x10_tf);
 
     char version_text[32];
-    snprintf(version_text, sizeof(version_text), "Panel: v%s", panel_version);
-    display_manager_draw_text(display, 22, 26, version_text);
+    snprintf(version_text, sizeof(version_text), "FW v%s", version);
 
-    snprintf(version_text, sizeof(version_text), "Main:  %s%s", main_version ? "v" : "", main_version ? main_version : "...");
-    display_manager_draw_text(display, 22, 36, version_text);
+    // Center horizontally from the rendered width so a longer "-preN"
+    // prerelease suffix stays centered instead of running off the edge
+    uint16_t text_width = u8g2_GetStrWidth(&display->u8g2, version_text);
+    uint8_t x = text_width < 128 ? (128 - text_width) / 2 : 0;
+    display_manager_draw_text(display, x, 32, version_text);
 
     display_manager_request_update(display);
 
