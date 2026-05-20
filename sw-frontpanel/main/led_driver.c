@@ -28,6 +28,17 @@ static TaskHandle_t pulse_task_handle = NULL;
 static bool pulse_running = false;
 static rgb_color_t pulse_color;
 
+// Last color set via led_set_color/led_set_rgb. The breathe task reads this
+// every tick so the breathe color follows live state updates (e.g. the LED's
+// "logical" color changing from cyan to orange while the screen is blanked).
+static rgb_color_t cached_color = {0, 0, 0};
+static TaskHandle_t breathe_task_handle = NULL;
+static bool breathe_running = false;
+
+#define BREATHE_CYCLE_MS 8000 // Full fade-down-and-back-up cycle
+#define BREATHE_STEP_MS  20 // 50 fps
+#define BREATHE_MIN 0.2f // Minimum brightness floor as a fraction of peak
+
 // Predefined colors
 const rgb_color_t COLOR_OFF =     {0,   0,  0};
 const rgb_color_t COLOR_RED =     {32,  0,  0};
@@ -110,6 +121,15 @@ esp_err_t led_set_rgb(uint8_t r, uint8_t g, uint8_t b) {
     if (led_strip == NULL) {
         ESP_LOGE(TAG, "LED driver not initialized");
         return ESP_ERR_INVALID_STATE;
+    }
+
+    cached_color.r = r;
+    cached_color.g = g;
+    cached_color.b = b;
+
+    // While breathing, the breathe task drives the strip
+    if (breathe_running) {
+        return ESP_OK;
     }
 
     esp_err_t ret = led_strip_set_pixel(led_strip, 0, r, g, b);
@@ -294,4 +314,71 @@ esp_err_t led_stop_pulse(void) {
         vTaskDelay(pdMS_TO_TICKS(50));
     }
     return ESP_OK;
+}
+
+static void breathe_task(void *pvParameters) {
+    const uint32_t steps = BREATHE_CYCLE_MS / BREATHE_STEP_MS;
+    uint32_t i = 0;
+
+    while (breathe_running) {
+      // (1 - cos)/2 gives a smooth 0 -> 1 -> 0 ramp over one cycle, scaled so
+      // the trough sits at BREATHE_MIN
+      float phase = (float)i / steps * 2.0f * (float)M_PI;
+      float ramp = (1.0f - cosf(phase)) * 0.5f;
+      float brightness = BREATHE_MIN + (1.0f - BREATHE_MIN) * ramp;
+
+      // Round to nearest so small fractional changes don't all truncate down
+      uint8_t r = (uint8_t)(cached_color.r * brightness + 0.5f);
+      uint8_t g = (uint8_t)(cached_color.g * brightness + 0.5f);
+      uint8_t b = (uint8_t)(cached_color.b * brightness + 0.5f);
+
+      if (led_strip) {
+        led_strip_set_pixel(led_strip, 0, r, g, b);
+        led_strip_refresh(led_strip);
+      }
+
+        i = (i + 1) % steps;
+        vTaskDelay(pdMS_TO_TICKS(BREATHE_STEP_MS));
+    }
+
+    // Restore the cached color at full brightness on the way out.
+    if (led_strip) {
+        led_strip_set_pixel(led_strip, 0, cached_color.r, cached_color.g, cached_color.b);
+        led_strip_refresh(led_strip);
+    }
+    breathe_task_handle = NULL;
+    vTaskDelete(NULL);
+}
+
+esp_err_t led_start_breathe(void) {
+    if (led_strip == NULL) {
+        ESP_LOGE(TAG, "LED driver not initialized");
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (breathe_running) {
+        return ESP_OK;
+    }
+
+    breathe_running = true;
+    BaseType_t ret = xTaskCreate(breathe_task, "led_breathe", 2048, NULL, 3, &breathe_task_handle);
+    if (ret != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create breathe task");
+        breathe_running = false;
+        return ESP_FAIL;
+    }
+    return ESP_OK;
+}
+
+esp_err_t led_stop_breathe(void) {
+    if (breathe_task_handle != NULL) {
+        breathe_running = false;
+        // One full step is enough for the task to notice and exit cleanly;
+        // give it a small margin.
+        vTaskDelay(pdMS_TO_TICKS(BREATHE_STEP_MS + 20));
+    }
+    return ESP_OK;
+}
+
+bool led_breathe_active(void) {
+    return breathe_running;
 }

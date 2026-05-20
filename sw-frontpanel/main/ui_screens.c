@@ -746,7 +746,14 @@ esp_err_t ui_draw_status_screen(display_manager_t *display, const char *disc_nam
     display_manager_set_draw_color(display, 1);
 
     // === CENTER: Large image name with scrolling (regular text) ===
-    const char *title = has_disc ? disc_name : "No Disc Loaded";
+#ifdef CONFIG_PRODUCT_BLUESCSI
+    const char *title = has_disc ? disc_name : "No Image Loaded";
+#else
+    // Prefer any supplied disc_name even when disc_inserted is false: the main
+    // board uses this field to surface SD error strings like "No SD card" or
+    // "Wrong-mode card" when no image is mountable
+    const char *title = (disc_name && disc_name[0]) ? disc_name : "No Image Loaded";
+#endif
 
     display_manager_set_font(display, u8g2_font_helvR12_tf);
 
