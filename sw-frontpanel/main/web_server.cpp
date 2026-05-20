@@ -115,9 +115,9 @@ static esp_err_t api_status_handler(httpd_req_t *req) {
         system_info_t sys_info;
         esp_err_t info_ret = interface_get_system_info(g_server->interface_ctx, &sys_info);
         if (info_ret == ESP_OK) {
-            ret = json.write("firmware", sys_info.firmware_version);
+            ret = json.write("main_firmware", sys_info.main_firmware_version);
             if (ret != ESP_OK) return ret;
-            ret = json.write("hardware", sys_info.hardware_name);
+            ret = json.write("panel_firmware", sys_info.panel_firmware_version);
             if (ret != ESP_OK) return ret;
             ret = json.write("transport", sys_info.transport_name);
             if (ret != ESP_OK) return ret;
@@ -128,9 +128,9 @@ static esp_err_t api_status_handler(httpd_req_t *req) {
             ret = json.write("uptime", sys_info.uptime_seconds);
             if (ret != ESP_OK) return ret;
         } else {
-            ret = json.write("firmware", "v0.1.0");
+            ret = json.write("main_firmware", "");
             if (ret != ESP_OK) return ret;
-            ret = json.write("hardware", "ESP32-C3");
+            ret = json.write("panel_firmware", "");
             if (ret != ESP_OK) return ret;
             ret = json.write("transport", "None");
             if (ret != ESP_OK) return ret;
@@ -142,9 +142,9 @@ static esp_err_t api_status_handler(httpd_req_t *req) {
             if (ret != ESP_OK) return ret;
         }
     } else {
-        ret = json.write("firmware", "v0.1.0");
+        ret = json.write("main_firmware", "");
         if (ret != ESP_OK) return ret;
-        ret = json.write("hardware", "ESP32-C3");
+        ret = json.write("panel_firmware", "");
         if (ret != ESP_OK) return ret;
         ret = json.write("transport", "None");
         if (ret != ESP_OK) return ret;

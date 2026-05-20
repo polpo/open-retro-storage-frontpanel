@@ -67,8 +67,8 @@ async function loadSystemInfo() {
     const data = await apiCall('/status');
     if (data) {
         document.getElementById('system-info').innerHTML = `
-            <strong>Firmware:</strong> ${data.firmware || 'v0.1.0'}<br>
-            <strong>Hardware:</strong> ${data.hardware || 'ESP32-C3'}<br>
+            <strong>Main firmware:</strong> ${data.main_firmware ? 'v' + data.main_firmware : 'Unknown'}<br>
+            <strong>Front panel firmware:</strong> ${data.panel_firmware ? 'v' + data.panel_firmware : 'Unknown'}<br>
             <strong>Host Communication:</strong> ${data.transport || 'Unknown'} - ${data.host_connected ? 'Connected' : 'Disconnected'}<br>
             <strong>Free Memory:</strong> ${data.free_memory || 'Unknown'} bytes<br>
             <strong>Uptime:</strong> ${data.uptime || 'Unknown'} seconds
