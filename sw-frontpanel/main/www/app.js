@@ -103,8 +103,8 @@ async function loadSystemInfo() {
         const uptimeStr = uptimeSec ? `${uptimeMin}:${String(uptimeRemSec).padStart(2, '0')}` : 'Unknown';
         document.getElementById('system-info').innerHTML = `
             <strong>Product:</strong> ${data.product_full || data.product_name || 'PicoIDE'}<br>
-            <strong>Firmware:</strong> ${data.firmware || 'v0.1.0'}<br>
-            <strong>Hardware:</strong> ${data.hardware || 'ESP32-C3'}<br>
+            <strong>Main firmware:</strong> ${data.main_firmware ? 'v' + data.main_firmware : 'Unknown'}<br>
+            <strong>Front panel firmware:</strong> ${data.panel_firmware ? 'v' + data.panel_firmware : 'Unknown'}<br>
             <strong>Host Communication:</strong> ${data.transport || 'Unknown'} - ${data.host_connected ? 'Connected' : 'Disconnected'}<br>
             <strong>Free Memory:</strong> ${freeMemKB}<br>
             <strong>Uptime:</strong> ${uptimeStr}

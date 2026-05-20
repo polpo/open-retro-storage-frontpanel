@@ -1,7 +1,8 @@
 # v0.4.0
 
-- Add screensavers
+- Add screensavers and configurable idle/blank timeouts
 - Combine main board & front panel firmware updates into one operation
+- Better reporting of SD card state from main board
 - Create releases
 
 # v0.3.0
