@@ -320,9 +320,9 @@ static void refresh_display_settings_labels(void) {
     snprintf(display_settings_menu_items[0].text, MENU_ITEM_MAX_LENGTH,
              "Idle Mode: %s", idle_mode_names[display_manager_get_idle_mode(&display)]);
     snprintf(display_settings_menu_items[1].text, MENU_ITEM_MAX_LENGTH,
-             "Timeout: %s", idle_timeout_short_label(display_manager_get_idle_timeout(&display)));
+             "Idle time: %s", idle_timeout_short_label(display_manager_get_idle_timeout(&display)));
     snprintf(display_settings_menu_items[2].text, MENU_ITEM_MAX_LENGTH,
-             "Blank: %s", blank_timeout_short_label(display_manager_get_off_timeout(&display)));
+             "Blank time: %s", blank_timeout_short_label(display_manager_get_off_timeout(&display)));
     display_settings_menu.needs_redraw = true;
 }
 
