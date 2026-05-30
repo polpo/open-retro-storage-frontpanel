@@ -42,6 +42,12 @@
 
 static const char *TAG = "main";
 
+// Main board may be held in reset for several seconds after power-on. Wait
+// this long for it at startup before booting in degraded mode; a background
+// probe keeps trying afterward so the panel recovers whenever it appears.
+#define HOST_COMM_STARTUP_TIMEOUT_MS  20000
+#define HOST_COMM_RETRY_INTERVAL_MS   500
+
 // Global instances
 static display_manager_t display;
 static menu_t main_menu;
@@ -69,6 +75,7 @@ static menu_t* screen_menus[SCREEN_COUNT] = {
     [SCREEN_BLANK_TIMEOUT] = &blank_timeout_menu,
 };
 static host_comm_t host_comm;
+static bool host_comm_ready = false;  // True once the transport layer is up (host_comm_init succeeded)
 static wifi_manager_t wifi_manager;
 static web_server_t web_server;
 static interface_context_t interface_ctx;
@@ -994,7 +1001,8 @@ static void display_update_task(void *pvParameters) {
     }
 }
 
-// Status screen refresh task - updates playback data from host
+// Status screen refresh task - updates playback data from host, and
+// reconnects to the main board if it was unreachable at startup
 static void status_refresh_task(void *pvParameters) {
     while (1) {
         uint32_t poll_interval_ms = 1000;
@@ -1015,6 +1023,16 @@ static void status_refresh_task(void *pvParameters) {
                 poll_interval_ms = 1000;
             }
             refresh_playback_status();
+        } else if (host_comm_ready) {
+            // Main board was unreachable at startup (e.g. held in reset).
+            // Keep probing so the panel recovers once it comes online.
+            uint8_t device_status;
+            if (host_comm_get_device_status(&host_comm, 0, &device_status) == ESP_OK) {
+                ESP_LOGI(TAG, "Main board is now responding, connection restored");
+                host_comm.initialized = true;
+                disc_list_loaded = false;   // Force directory reload when next opened
+                status_needs_redraw = true; // Refresh the status screen
+            }
         }
 
         vTaskDelay(pdMS_TO_TICKS(poll_interval_ms ? poll_interval_ms : 10000));
@@ -1030,7 +1048,7 @@ static void refresh_playback_status(void) {
     // The playback status poll doubles as the liveness probe by checking for
     // PANEL_ALIVE_MAGIC
     esp_err_t ret = host_comm.initialized
-        ? host_comm_get_playback_status(&host_comm, &current_playback_status)
+        ? host_comm_get_playback_status(&host_comm, 0, &current_playback_status)
         : ESP_FAIL;
 #ifdef CONFIG_PRODUCT_BLUESCSI
     if (ret != ESP_OK) {
@@ -1902,6 +1920,7 @@ void app_main(void) {
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "Failed to initialize host comm: %s", esp_err_to_name(ret));
     } else {
+        host_comm_ready = true;
         ESP_LOGI(TAG, "Host comm initialized successfully using %s",
                  host_comm_get_transport_name(&host_comm));
 
@@ -1911,13 +1930,24 @@ void app_main(void) {
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "Failed to communicate with main board: %s", esp_err_to_name(ret));
 #else
-        // Probe the main board with a playback-status read and check the
-        // alive_magic
-        playback_status_t probe_status;
-        ret = host_comm_get_playback_status(&host_comm, 0, &probe_status);
-        if (ret != ESP_OK || probe_status.alive_magic != PANEL_ALIVE_MAGIC) {
-            ESP_LOGE(TAG, "Failed to communicate with main board: %s",
-                     ret == ESP_OK ? "no heartbeat" : esp_err_to_name(ret));
+        // Probe for the main board. Some systems hold it in reset for several
+        // seconds after power-on, so keep retrying for a bounded window
+        // instead of giving up on the first failure.
+        uint8_t test_status;
+        esp_err_t comm_ret = host_comm_get_device_status(&host_comm, 0, &test_status);
+        if (comm_ret != ESP_OK) {
+            ESP_LOGW(TAG, "Main board not responding, waiting for it to leave reset...");
+            uint32_t start_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
+            while (comm_ret != ESP_OK &&
+                   (xTaskGetTickCount() * portTICK_PERIOD_MS - start_ms) < HOST_COMM_STARTUP_TIMEOUT_MS) {
+                ui_update_splash_progress(&display, "Wait for main board", 60);
+                vTaskDelay(pdMS_TO_TICKS(HOST_COMM_RETRY_INTERVAL_MS));
+                comm_ret = host_comm_get_device_status(&host_comm, 0, &test_status);
+            }
+        }
+
+        if (comm_ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to communicate with main board: %s", esp_err_to_name(comm_ret));
 #endif
             led_stop_pulse();
 
@@ -1928,18 +1958,6 @@ void app_main(void) {
                 vTaskDelay(pdMS_TO_TICKS(200));
             }
 
-            display_manager_clear(&display);
-            display_manager_set_font(&display, u8g2_font_amstrad_cpc_extended_8f);
-            display_manager_draw_text(&display, 10, 16, "Communication");
-            display_manager_draw_text(&display, 30, 32, "Error!");
-            display_manager_set_font(&display, u8g2_font_6x10_tf);
-            display_manager_draw_text(&display, 8, 48, "Cannot reach");
-            display_manager_draw_text(&display, 8, 58, "main board");
-            display_manager_request_update(&display);
-            display_manager_update(&display);
-
-            vTaskDelay(pdMS_TO_TICKS(3000));
-            led_start_pulse(COLOR_CYAN);
             host_comm.initialized = false;
         } else {
             ESP_LOGI(TAG, "Communication with main board verified");
