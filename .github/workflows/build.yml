@@ -20,18 +20,18 @@ jobs:
       - name: Build Front Panel Firmware (${{ matrix.product.name }})
         uses: espressif/esp-idf-ci-action@v1
         with:
-          esp_idf_version: v5.5.1
+          esp_idf_version: v5.5.4
           target: esp32c3
           path: 'sw-frontpanel'
-          command: 'idf.py -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;${{ matrix.product.sdkconfig_extra }}" build'
+          command: 'idf.py -B build-${{ matrix.product.name }} -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;${{ matrix.product.sdkconfig_extra }}" build'
       - name: Upload Front Panel Firmware
         uses: actions/upload-artifact@v7
         with:
           name: frontpanel-firmware-${{ matrix.product.name }}
           path: |
-            sw-frontpanel/build/${{ matrix.product.name }}-frontpanel.bin
-            sw-frontpanel/build/bootloader/bootloader.bin
-            sw-frontpanel/build/partition_table/partition-table.bin
+            sw-frontpanel/build-${{ matrix.product.name }}/${{ matrix.product.name }}-frontpanel.bin
+            sw-frontpanel/build-${{ matrix.product.name }}/bootloader/bootloader.bin
+            sw-frontpanel/build-${{ matrix.product.name }}/partition_table/partition-table.bin
 
   create-release:
     if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
@@ -70,7 +70,7 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           path: ${{env.STAGING_DIR}}
-          pattern: *-frontpanel.bin
+          pattern: frontpanel-firmware-*
           merge-multiple: true
       - name: Release
         uses: softprops/action-gh-release@v1
