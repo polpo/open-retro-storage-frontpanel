@@ -144,21 +144,29 @@
         <!-- #ifdef PRODUCT_BLUESCSI -->
         <div class="section">
             <h3>🔄 Firmware Update</h3>
-            <button onclick="checkAllFirmware()" class="refresh-btn">🔍 Check for Updates</button>
+            <button onclick="checkAllFirmware()" class="refresh-btn" style="display: none;">🔍 Check for Updates</button>
 
             <div style="margin-top: 15px;">
                 <h4>Front Panel (ESP32)</h4>
                 <div id="panel-firmware-status" class="status">
                     <div class="version-info">
                         <strong>Current:</strong> <span id="panel-current-version">Loading...</span>
-                        <strong style="margin-left: 15px;">Available:</strong> <span id="panel-available-version">Checking...</span>
+                        <span id="panel-available-section" style="display: none;"><strong style="margin-left: 15px;">Available:</strong> <span id="panel-available-version">Checking...</span></span>
                     </div>
                 </div>
-                <button onclick="startPanelFirmwareUpdate()" class="update-btn" id="panel-update-btn" disabled>📥 Update Panel</button>
+                <button onclick="startPanelFirmwareUpdate()" class="update-btn" id="panel-update-btn" style="display: none;" disabled>📥 Update Panel</button>
                 <div id="panel-update-progress" class="progress-bar" style="display: none;">
                     <div id="panel-update-progress-fill" class="progress-fill" style="width: 0%;"></div>
                 </div>
                 <div id="panel-update-status" class="status" style="display: none;"></div>
+                <div style="margin-top: 10px;">
+                    <input type="file" id="panel-firmware-file" accept=".bin" style="margin: 5px 0;" />
+                    <button onclick="uploadPanelFirmware()" id="panel-upload-btn">Upload Firmware</button>
+                    <div id="panel-upload-progress" class="progress-bar" style="display: none;">
+                        <div id="panel-upload-progress-fill" class="progress-fill" style="width: 0%;"></div>
+                    </div>
+                    <div id="panel-upload-status" class="status" style="display: none;"></div>
+                </div>
             </div>
 
             <div style="margin-top: 15px;">

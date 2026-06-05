@@ -1149,6 +1149,87 @@ async function uploadMainboardFirmware() {
     xhr.open('POST', '/api/firmware/mainboard/upload');
     xhr.send(formData);
 }
+
+async function uploadPanelFirmware() {
+    const fileInput = document.getElementById('panel-firmware-file');
+    const file = fileInput.files[0];
+
+    if (!file) {
+        showStatus('error', 'Please select a firmware file');
+        return;
+    }
+
+    // Validate .bin extension
+    if (!file.name.toLowerCase().endsWith('.bin')) {
+        showStatus('error', 'Please select a .bin firmware file');
+        return;
+    }
+
+    if (!confirm('Upload this firmware directly to the front panel? The panel will verify, flash, and restart automatically.')) {
+        return;
+    }
+
+    const uploadBtn = document.getElementById('panel-upload-btn');
+    const progressBar = document.getElementById('panel-upload-progress');
+    const progressFill = document.getElementById('panel-upload-progress-fill');
+    const statusDiv = document.getElementById('panel-upload-status');
+
+    uploadBtn.disabled = true;
+    progressBar.style.display = 'block';
+    statusDiv.style.display = 'block';
+    statusDiv.textContent = 'Uploading firmware...';
+    progressFill.style.width = '0%';
+
+    const formData = new FormData();
+    formData.append('fileSize', file.size.toString());
+    formData.append('fileData', file, file.name);
+
+    const xhr = new XMLHttpRequest();
+
+    xhr.upload.addEventListener('progress', (e) => {
+        if (e.lengthComputable) {
+            const percent = (e.loaded / e.total) * 100;
+            progressFill.style.width = `${percent}%`;
+            statusDiv.textContent = `Uploading firmware... ${Math.round(percent)}%`;
+        }
+    });
+
+    xhr.addEventListener('load', () => {
+        if (xhr.status === 200) {
+            try {
+                const response = JSON.parse(xhr.responseText);
+                if (response.success) {
+                    statusDiv.textContent = 'Firmware uploaded. The panel is rebooting to apply the update...';
+                    showStatus('success', 'Panel firmware uploaded - rebooting');
+                    // The panel reboots into the new image; give it time to come
+                    // back up on WiFi, then reload to reconnect to the new firmware.
+                    setTimeout(() => { window.location.reload(); }, 10000);
+                } else {
+                    statusDiv.textContent = `Upload failed: ${response.error || 'Unknown error'}`;
+                    showStatus('error', `Upload failed: ${response.error || 'Unknown error'}`);
+                    uploadBtn.disabled = false;
+                }
+            } catch (e) {
+                statusDiv.textContent = 'Upload failed: Invalid response';
+                showStatus('error', 'Upload failed: Invalid response');
+                uploadBtn.disabled = false;
+            }
+        } else {
+            statusDiv.textContent = `Upload failed: ${xhr.responseText || 'Server returned ' + xhr.status}`;
+            showStatus('error', `Upload failed: Server returned ${xhr.status}`);
+            uploadBtn.disabled = false;
+        }
+    });
+
+    xhr.addEventListener('error', () => {
+        statusDiv.textContent = 'Upload failed: Network error';
+        showStatus('error', 'Upload failed: Network error');
+        uploadBtn.disabled = false;
+    });
+
+    xhr.open('POST', '/api/firmware/panel/upload');
+    xhr.send(formData);
+}
 // #endif
 
 // Initialize the page (serialize requests to avoid overwhelming ESP32)
