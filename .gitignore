@@ -1,6 +1,7 @@
 sw-frontpanel/.direnv/
 sw-frontpanel/.envrc
 sw-frontpanel/build/
+sw-frontpanel/build-*/
 sw-frontpanel/managed_components/
 sw-frontpanel/sdkconfig
 
