@@ -14,7 +14,7 @@ jobs:
       OUTPUT_DIR: ${{github.workspace}}/binaries
     steps:
       - name: Checkout repo with submodules
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           submodules: recursive
       - name: Build Front Panel Firmware (${{ matrix.product.name }})
@@ -43,7 +43,7 @@ jobs:
       STAGING_DIR: ${{github.workspace}}/release-staging-dir
     steps:
       - name: Checkout repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
       - name: Classify release
         id: relinfo
         shell: bash
@@ -73,7 +73,7 @@ jobs:
           pattern: frontpanel-firmware-*
           merge-multiple: true
       - name: Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v3
         with:
           body_path: release-body.md
           files: |
