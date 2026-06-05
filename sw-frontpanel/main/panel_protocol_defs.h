@@ -80,6 +80,7 @@
 #define PANEL_DEVICE_STATUS_ERROR       0x03  // Image error
 #define PANEL_DEVICE_STATUS_NO_CARD     0x04  // SD card not present
 #define PANEL_DEVICE_STATUS_WRONG_MODE  0x05  // SD card configured for the other device type
+#define PANEL_DEVICE_STATUS_TRAY_OPEN   0x06  // Optical tray open (disc ejected), awaiting load/close
 
 // Special argument values
 #define PANEL_ARG_EXTENDED             0xFFFF  // Use payload for extended data
@@ -195,7 +196,8 @@ typedef struct __attribute__((packed)) {
     char disc_name[64];       // Current disc name (null-terminated)
     uint8_t device_status;    // PANEL_DEVICE_STATUS_*
     uint8_t alive_magic;      // PANEL_ALIVE_MAGIC when written by a live main board
-    uint8_t reserved[2];      // Reserved for future use
+    uint8_t tray_open;        // 1 if optical tray open (disc ejected), awaiting load/close
+    uint8_t reserved[1];      // Reserved for future use
 } panel_playback_status_t;
 
 // Entry type for directory listings

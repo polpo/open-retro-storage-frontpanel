@@ -132,6 +132,7 @@ async function refreshDevices() {
 
 // S2S device types that support eject
 const EJECTABLE_TYPES = [1, 2, 3, 4, 7]; // removable, optical, floppy, MO, ZIP
+const DEVICE_STATUS_TRAY_OPEN = 6; // PANEL_DEVICE_STATUS_TRAY_OPEN
 
 function renderDeviceSelector() {
     const container = document.getElementById('device-selector');
@@ -145,10 +146,14 @@ function renderDeviceSelector() {
     container.innerHTML = '<div class="device-tabs">' +
         devices.map(dev => {
             const isActive = dev.index === activeDeviceIndex;
-            const imageLine = dev.image ? dev.image : '[empty]';
-            const canEject = dev.image && EJECTABLE_TYPES.includes(dev.type);
+            const trayOpen = dev.status === DEVICE_STATUS_TRAY_OPEN;
+            const imageLine = trayOpen
+                ? `⏏ Tray open${dev.image ? ' — ' + dev.image : ''} — load a disc or close`
+                : (dev.image ? dev.image : '[empty]');
+            const canEject = (dev.image || trayOpen) && EJECTABLE_TYPES.includes(dev.type);
+            // When the tray is open, the same eject command closes it (re-inserts).
             const ejectBtn = canEject
-                ? ` <button onclick="event.stopPropagation(); ejectDevice(${dev.index})" style="padding: 2px 8px; font-size: 11px; margin: 0;">Eject</button>`
+                ? ` <button onclick="event.stopPropagation(); ejectDevice(${dev.index})" style="padding: 2px 8px; font-size: 11px; margin: 0;">${trayOpen ? 'Close' : 'Eject'}</button>`
                 : '';
             return `<div class="device-tab${isActive ? ' active' : ''}" onclick="selectDevice(${dev.index})">` +
                 `<strong>${dev.label}</strong>` +

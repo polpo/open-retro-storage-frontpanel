@@ -752,6 +752,20 @@ esp_err_t ui_draw_status_screen(display_manager_t *display, const char *disc_nam
     // Draw image name
     draw_text_scrolling(display, 2, 32, status_title_text, 124, &status_title_scroll_state);
 
+    // Optical tray open (disc ejected): show a clear banner instead of the normal
+    // playback area. The title above still shows the disc queued for next insert,
+    // so the user knows to load another disc or press eject again to close.
+    if (playback_status && playback_status->tray_open) {
+        display_manager_set_font(display, u8g2_font_6x10_tf);
+        display_manager_draw_box(display, 0, 42, 128, 22);
+        display_manager_set_draw_color(display, 0);
+        display_manager_draw_text(display, 2, 52, "TRAY OPEN");
+        display_manager_draw_text(display, 2, 62, "Load CD or close");
+        display_manager_set_draw_color(display, 1);
+        display_manager_request_update(display);
+        return ESP_OK;
+    }
+
     // If no disc inserted, we're done
     if (!has_disc) {
         display_manager_request_update(display);
