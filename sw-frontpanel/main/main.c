@@ -1151,6 +1151,48 @@ static void refresh_device_list(void) {
     }
 }
 
+// SCSI peripheral types (the device_summary_t.device_type values reported by
+// the main board) whose media is removable. These are the devices a user is
+// most likely to want selected on the panel. Mirrors EJECTABLE_TYPES in
+// www/app.js — keep the two in sync.
+static bool device_type_is_removable(uint8_t device_type) {
+    switch (device_type) {
+        case 1:  // removable
+        case 2:  // optical (CD-ROM)
+        case 3:  // floppy
+        case 4:  // MO
+        case 7:  // ZIP
+            return true;
+        default:
+            return false;
+    }
+}
+
+// Choose the device shown on the panel by default. Prefer the first removable
+// device (e.g. a CD-ROM) over device 0, which is commonly a fixed HDD or a
+// non-removable device such as a network adapter. Falls back to the first
+// listed device when none are removable. Call once after the initial device
+// list load so it does not override a later manual selection.
+static void select_default_device(void) {
+    if (!device_list_valid || device_list->device_count == 0) {
+        return;
+    }
+
+    for (uint8_t i = 0; i < device_list->device_count; i++) {
+        if (device_type_is_removable(device_list->devices[i].device_type)) {
+            active_device_index = device_list->devices[i].device_index;
+            interface_ctx.active_device_index = active_device_index;
+            ESP_LOGI(TAG, "Default device -> removable %u (%s)",
+                     active_device_index, device_list->devices[i].device_label);
+            return;
+        }
+    }
+
+    // No removable device present: default to the first listed device.
+    active_device_index = device_list->devices[0].device_index;
+    interface_ctx.active_device_index = active_device_index;
+}
+
 // Populate the device select menu from cached device list
 static void populate_device_menu(void) {
     menu_clear_items(&device_menu);
@@ -1948,6 +1990,11 @@ void app_main(void) {
 
             // Get device list for multi-device support
             refresh_device_list();
+
+            // Default the panel to the first removable device (e.g. CD-ROM)
+            // rather than device 0, which is often a fixed HDD or a
+            // non-removable device like a network adapter.
+            select_default_device();
 
             // Switch to multi-device main menu if multiple devices found
             if (device_count > 1) {
