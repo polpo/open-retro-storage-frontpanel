@@ -603,13 +603,8 @@ esp_err_t host_comm_start_file_upload(host_comm_t *comm, const char *filename, u
         return ret;
     }
 
-    // Poll for async result
-#ifdef CONFIG_PRODUCT_BLUESCSI
-    // Might not be required, was having issues, leaving for now
-    ret = host_comm_poll_async_result(comm, 10000, 10, 0, NULL, NULL);
-#else
-    ret = host_comm_poll_async_result(comm, 2000, 1, 0, NULL, NULL);
-#endif
+    // Poll for async result (mirrors START_FILE_DOWNLOAD's timeout)
+    ret = host_comm_poll_async_result(comm, 5000, 10, 0, NULL, NULL);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed async result after start upload: %s", esp_err_to_name(ret));
         HOST_COMM_UNLOCK(comm);
@@ -654,13 +649,7 @@ esp_err_t host_comm_write_file_chunk(host_comm_t *comm, const uint8_t *data, siz
     }
 
     // Poll for async result
-#ifdef CONFIG_PRODUCT_BLUESCSI
-    // BlueSCSI processes panel SPI commands between SCSI bus operations,
-    // which can block for 10+ seconds during large transfers
-    ret = host_comm_poll_async_result(comm, 30000, 10, 0, NULL, NULL);
-#else
-    ret = host_comm_poll_async_result(comm, 1000, 1, 0, NULL, NULL);
-#endif
+    ret = host_comm_poll_async_result(comm, 5000, 10, 0, NULL, NULL);
 
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed async result after write: %s", esp_err_to_name(ret));
@@ -694,14 +683,11 @@ esp_err_t host_comm_finish_file_upload(host_comm_t *comm, uint8_t *result_code, 
         return ret;
     }
 
-    // Poll for async result (33 bytes: 1 byte result code + 32 byte SHA256)
+    // Poll for async result (33 bytes: 1 byte result code + 32 byte SHA256).
+    // Generous timeout: finish flushes/closes the file and finalizes the SHA.
     uint8_t *result_data;
     size_t result_size;
-#ifdef CONFIG_PRODUCT_BLUESCSI
     ret = host_comm_poll_async_result(comm, 30000, 10, 33, &result_data, &result_size);
-#else
-    ret = host_comm_poll_async_result(comm, 30000, 1, 33, &result_data, &result_size);
-#endif
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to get file upload result: %s", esp_err_to_name(ret));
         HOST_COMM_UNLOCK(comm);
