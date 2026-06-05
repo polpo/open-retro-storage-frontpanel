@@ -23,7 +23,7 @@ jobs:
           esp_idf_version: v5.5.4
           target: esp32c3
           path: 'sw-frontpanel'
-          command: 'idf.py -B build-${{ matrix.product.name }} -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;${{ matrix.product.sdkconfig_extra }}" build'
+          command: 'idf.py -B build-${{ matrix.product.name }} -DSDKCONFIG=build-${{ matrix.product.name }}/sdkconfig -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;${{ matrix.product.sdkconfig_extra }}" build'
       - name: Upload Front Panel Firmware
         uses: actions/upload-artifact@v7
         with:

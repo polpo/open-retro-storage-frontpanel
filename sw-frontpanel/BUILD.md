@@ -30,13 +30,15 @@ common `sdkconfig.defaults`:
 | PicoIDE  | `sdkconfig.defaults.picoide` | `picoide-frontpanel.bin`   |
 | BlueSCSI | `sdkconfig.defaults.bluescsi`| `bluescsi-frontpanel.bin`  |
 
-Build each variant into its **own build directory** (`-B build-<product>`) so
-their `sdkconfig`s never mix. This matches what CI does.
+Build each variant into its **own build directory** (`-B build-<product>`) with
+its **own `sdkconfig`** (`-DSDKCONFIG=build-<product>/sdkconfig`). Both flags are
+required to keep the products isolated — see the warning below.
 
 ### BlueSCSI
 
 ```bash
 idf.py -B build-bluescsi \
+  -DSDKCONFIG=build-bluescsi/sdkconfig \
   -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.bluescsi" \
   build
 ```
@@ -47,16 +49,12 @@ Output: `build-bluescsi/bluescsi-frontpanel.bin`
 
 ```bash
 idf.py -B build-picoide \
+  -DSDKCONFIG=build-picoide/sdkconfig \
   -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.picoide" \
   build
 ```
 
 Output: `build-picoide/picoide-frontpanel.bin`
-
-> The `-DSDKCONFIG_DEFAULTS=...` argument only needs to be passed on the first
-> configure of a build directory; it is cached for subsequent `idf.py` runs in
-> that directory. Mixing products in a single `build/` directory leaves a stale
-> `sdkconfig` and mismatched output names — use the per-product `-B` dirs above.
 
 ## Flashing and monitoring
 
