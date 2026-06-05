@@ -875,6 +875,8 @@ async function uploadFile() {
 
     // Create FormData (use current browse path as upload destination)
     const uploadPath = currentPath.endsWith('/') ? currentPath + file.name : currentPath + '/' + file.name;
+    const uploadDir = currentPath;
+    const uploadDevice = activeDeviceIndex;
     const formData = new FormData();
     formData.append('fileSize', file.size.toString());
     formData.append('fileData', file, uploadPath);
@@ -927,6 +929,10 @@ async function uploadFile() {
                     } catch (hashError) {
                         console.error('SHA256 calculation failed:', hashError);
                         showStatus('error', 'Hash calculation failed');
+                    }
+
+                    if (currentPath === uploadDir && activeDeviceIndex === uploadDevice) {
+                        await refreshImages();
                     }
                 } else {
                     throw new Error(response.error || 'Upload failed');
