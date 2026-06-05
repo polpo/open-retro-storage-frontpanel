@@ -94,8 +94,10 @@
             <h3>Devices</h3>
             <div id="device-selector"></div>
             <div class="nav-buttons">
+                <!-- #ifdef PRODUCT_PICOIDE -->
                 <button onclick="prevImage()" id="prev-image-btn" disabled>Prev</button>
                 <button onclick="nextImage()" id="next-image-btn" disabled>Next</button>
+                <!-- #endif -->
                 <button onclick="refreshDevices()" class="refresh-btn">Refresh</button>
             </div>
             <h4 style="margin-bottom: 5px;">Image Browser</h4>
