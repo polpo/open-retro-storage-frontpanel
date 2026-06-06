@@ -38,6 +38,14 @@
         .nav-buttons { margin: 6px 0; }
         .nav-buttons button { margin-right: 5px; padding: 5px 12px; font-size: 13px; }
         .entry-item button { padding: 2px 8px; font-size: 11px; line-height: 1; margin: 0; }
+        .entry-actions { display: flex; gap: 4px; align-items: center; flex-shrink: 0; }
+        .entry-item a.entry-btn { background-color: #007bff; color: white; padding: 2px 8px; font-size: 11px; line-height: 1; border-radius: 4px; text-decoration: none; display: inline-block; }
+        .entry-item a.entry-btn:hover { background-color: #0069d9; }
+        .entry-item .icon-btn { display: inline-flex; align-items: center; justify-content: center; padding: 3px; background-color: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; }
+        .entry-item .icon-btn:hover { background-color: #0069d9; }
+        .entry-item .icon-btn.delete-btn { background-color: #dc3545; }
+        .entry-item .icon-btn.delete-btn:hover { background-color: #c82333; }
+        .entry-item .icon-btn:disabled { background-color: #adb5bd; cursor: not-allowed; opacity: 0.65; }
         .status { padding: 10px; background-color: #e9ecef; border-radius: 4px; margin: 10px 0; }
         .error { background-color: #f8d7da; color: #721c24; }
         .success { background-color: #d4edda; color: #155724; }
@@ -102,6 +110,12 @@
             </div>
             <h4 style="margin-bottom: 5px;">Image Browser</h4>
             <div class="path-display">Path: <span id="current-path">/</span></div>
+            <!-- #ifdef PRODUCT_BLUESCSI -->
+            <div class="nav-buttons">
+                <button onclick="createFile()" class="refresh-btn">+ New File</button>
+                <button onclick="createDir()" class="refresh-btn">+ New Folder</button>
+            </div>
+            <!-- #endif -->
             <div id="entry-list" class="entry-list">
                 <div>Loading...</div>
             </div>

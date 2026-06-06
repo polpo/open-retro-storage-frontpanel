@@ -57,6 +57,11 @@
 #define PANEL_CMD_START_RP2350_UPDATE  0x56  // Start RP2350 firmware update from SD card (async, reboots on success)
 #define PANEL_CMD_START_FILE_DOWNLOAD  0x57  // Start file download (async, payload: null-terminated filename)
 #define PANEL_CMD_READ_FILE_CHUNK      0x58  // Read file chunk (async, arg: chunk index, returns chunk data)
+// 0x59 reserved for PANEL_CMD_GET_INITIATOR_STATUS on the main board (not used by this panel build)
+#define PANEL_CMD_DELETE_FILE          0x5A  // Delete file (async, payload: null-terminated path)
+#define PANEL_CMD_RENAME_FILE          0x5B  // Rename file (async, payload: oldpath\0newpath\0)
+#define PANEL_CMD_TOUCH_FILE           0x5C  // Create empty file (async, payload: null-terminated path)
+#define PANEL_CMD_MKDIR                0x5D  // Create directory (async, payload: null-terminated path)
 #define PANEL_CMD_RESET                0x7F  // Reset system
 
 // Read commands (bit 7 = 1)
@@ -167,6 +172,33 @@ typedef struct __attribute__((packed)) {
 #define PANEL_DOWNLOAD_OK              0x00
 #define PANEL_DOWNLOAD_ERROR_NOT_FOUND 0x01
 #define PANEL_DOWNLOAD_ERROR_READ      0x02
+
+// File delete result codes (DELETE_FILE returns a single result_code byte)
+#define PANEL_DELETE_OK                0x00
+#define PANEL_DELETE_ERROR_NOT_FOUND   0x01
+#define PANEL_DELETE_ERROR_IN_USE      0x02  // target is a currently-loaded image
+#define PANEL_DELETE_ERROR_IO          0x03
+#define PANEL_DELETE_ERROR_PATH        0x04  // empty path or ".." traversal
+
+// File rename result codes (RENAME_FILE returns a single result_code byte)
+#define PANEL_RENAME_OK                0x00
+#define PANEL_RENAME_ERROR_NOT_FOUND   0x01
+#define PANEL_RENAME_ERROR_EXISTS      0x02  // destination already exists
+#define PANEL_RENAME_ERROR_IN_USE      0x03  // source is a currently-loaded image
+#define PANEL_RENAME_ERROR_IO          0x04
+#define PANEL_RENAME_ERROR_PATH        0x05  // empty/invalid path or ".." traversal
+
+// File touch (create empty file) result codes (single result_code byte)
+#define PANEL_TOUCH_OK                 0x00
+#define PANEL_TOUCH_ERROR_EXISTS       0x01  // a file/dir with that name already exists
+#define PANEL_TOUCH_ERROR_PATH         0x02  // empty/invalid path or ".." traversal
+#define PANEL_TOUCH_ERROR_IO           0x03
+
+// Make-directory result codes (single result_code byte)
+#define PANEL_MKDIR_OK                 0x00
+#define PANEL_MKDIR_ERROR_EXISTS       0x01  // a file/dir with that name already exists
+#define PANEL_MKDIR_ERROR_PATH         0x02  // empty/invalid path or ".." traversal
+#define PANEL_MKDIR_ERROR_IO           0x03
 
 // Disc type codes for playback status
 #define PANEL_DISC_TYPE_NO_DISC    0x00

@@ -169,6 +169,36 @@ async function selectDevice(index) {
     await refreshImages();
 }
 
+// Filename portion of a path (after the last slash).
+function basename(p) {
+    if (!p) return p;
+    const i = p.lastIndexOf('/');
+    return i >= 0 ? p.slice(i + 1) : p;
+}
+
+// #ifdef PRODUCT_BLUESCSI
+// Build the Rename + Delete icon buttons for a file entry. When the file is the
+// currently-loaded image, both are rendered disabled (the main board also
+// refuses these operations on a mounted image).
+function renderFileModButtons(entry, filePath) {
+    const renameSvg = `<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false"><path fill="currentColor" d="M12.146.146a.5.5 0 0 1 .708 0l3 3a.5.5 0 0 1 0 .708l-10 10a.5.5 0 0 1-.168.11l-5 2a.5.5 0 0 1-.65-.65l2-5a.5.5 0 0 1 .11-.168l10-10Zm.708 1.414L11.5 2.914 13.086 4.5l1.354-1.354-1.586-1.586ZM12.379 5.207 10.793 3.621 3.5 10.914V11.5h.5a.5.5 0 0 1 .5.5v.5h.5a.5.5 0 0 1 .5.5v.293l6.379-6.379Z"/></svg>`;
+    const trashSvg = `<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false"><path fill="currentColor" d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5Zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5Zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6Z"/><path fill="currentColor" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1ZM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118Z"/></svg>`;
+
+    const loaded = currentImage && basename(currentImage) === entry.name;
+    if (loaded) {
+        const t = "Can't modify the loaded image — eject it first";
+        return `<button class="icon-btn" disabled title="${t}" aria-label="Rename (disabled: image loaded)">${renameSvg}</button>` +
+               `<button class="icon-btn delete-btn" disabled title="${t}" aria-label="Delete (disabled: image loaded)">${trashSvg}</button>`;
+    }
+
+    // Escape for embedding in single-quoted onclick string args.
+    const p = filePath.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+    const n = entry.name.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+    return `<button class="icon-btn" onclick="renameEntry('${p}','${n}')" title="Rename ${entry.name}" aria-label="Rename ${entry.name}">${renameSvg}</button>` +
+           `<button class="icon-btn delete-btn" onclick="deleteEntry('${p}','${n}')" title="Delete ${entry.name}" aria-label="Delete ${entry.name}">${trashSvg}</button>`;
+}
+// #endif
+
 async function refreshImages() {
     const endpoint = devices.length > 1 ? `/images?device=${activeDeviceIndex}` : '/images';
     const data = await apiCall(endpoint);
@@ -210,9 +240,25 @@ async function refreshImages() {
                         <button onclick="selectEntry(${entry.index})">Open</button>
                     </div>`;
                 } else {
+                    const filePath = currentPath.endsWith('/')
+                        ? currentPath + entry.name
+                        : currentPath + '/' + entry.name;
+                    const dlUrl = '/api/download?path=' + encodeURIComponent(filePath);
+                    let modBtns = '';
+                    // #ifdef PRODUCT_BLUESCSI
+                    modBtns = renderFileModButtons(entry, filePath);
+                    // #endif
                     return `<div class="entry-item file-item">
                         <span><strong>${entry.name}</strong></span>
-                        <button onclick="selectEntry(${entry.index})">Load</button>
+                        <span class="entry-actions">
+                            <button onclick="selectEntry(${entry.index})">Load</button>
+                            <a class="entry-btn icon-btn" href="${dlUrl}" download="${entry.name}" title="Download ${entry.name}" aria-label="Download ${entry.name}">
+                                <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false">
+                                    <path fill="currentColor" d="M8 1a1 1 0 0 1 1 1v6.59l1.3-1.3a1 1 0 0 1 1.4 1.42l-3 3a1 1 0 0 1-1.4 0l-3-3a1 1 0 0 1 1.4-1.42L7 8.59V2a1 1 0 0 1 1-1ZM3 12a1 1 0 0 1 1 1v1h8v-1a1 1 0 1 1 2 0v2a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1v-2a1 1 0 0 1 1-1Z"/>
+                                </svg>
+                            </a>
+                            ${modBtns}
+                        </span>
                     </div>`;
                 }
             }).join('');
@@ -269,6 +315,81 @@ async function ejectImage() {
         showStatus('success', 'Image ejected');
     }
 }
+
+// #ifdef PRODUCT_BLUESCSI
+async function deleteEntry(path, name) {
+    if (!confirm('Delete "' + name + '"?\n\nThis permanently removes the file from the SD card and cannot be undone.')) {
+        return;
+    }
+    const data = await apiCall('/delete', {
+        method: 'POST',
+        body: JSON.stringify({ path: path })
+    });
+    if (data && data.success) {
+        showStatus('success', 'Deleted ' + name);
+        await refreshImages();
+    } else if (data && data.error) {
+        showStatus('error', 'Delete failed: ' + data.error);
+    }
+}
+
+async function renameEntry(path, name) {
+    const newName = prompt('New name for "' + name + '":', name);
+    if (newName === null) return;               // user cancelled
+    const trimmed = newName.trim();
+    if (!trimmed || trimmed === name) return;   // empty or unchanged
+    if (trimmed.includes('/') || trimmed.includes('\\')) {
+        showStatus('error', 'Name cannot contain slashes');
+        return;
+    }
+    const dir = path.slice(0, path.lastIndexOf('/') + 1) || '/';
+    const newPath = dir + trimmed;
+    const data = await apiCall('/rename', {
+        method: 'POST',
+        body: JSON.stringify({ old_path: path, new_path: newPath })
+    });
+    if (data && data.success) {
+        showStatus('success', 'Renamed to ' + trimmed);
+        await refreshImages();
+    } else if (data && data.error) {
+        showStatus('error', 'Rename failed: ' + data.error);
+    }
+}
+
+// Create an empty file or a directory in the current directory. `endpoint` is
+// '/touch' or '/mkdir'; `label` is used in status messages.
+async function createEntry(name, endpoint, label) {
+    if (name === null) return;                  // user cancelled
+    const trimmed = (name || '').trim();
+    if (!trimmed) return;
+    if (trimmed.includes('/') || trimmed.includes('\\')) {
+        showStatus('error', 'Name cannot contain slashes');
+        return;
+    }
+    const dir = currentPath.endsWith('/') ? currentPath : currentPath + '/';
+    const path = dir + trimmed;
+    const data = await apiCall(endpoint, {
+        method: 'POST',
+        body: JSON.stringify({ path: path })
+    });
+    if (data && data.success) {
+        showStatus('success', label + ' created: ' + trimmed);
+        await refreshImages();
+    } else if (data && data.error) {
+        showStatus('error', label + ' failed: ' + data.error);
+    }
+}
+
+async function createFile() {
+    const name = prompt('New file name (e.g. NE4.hda to create a network device):', '');
+    await createEntry(name, '/touch', 'File');
+}
+
+async function createDir() {
+    const name = prompt('New folder name (e.g. CD3 for a CD-ROM image folder):', '');
+    await createEntry(name, '/mkdir', 'Folder');
+}
+// #endif
 
 async function prevImage() {
     const body = {};

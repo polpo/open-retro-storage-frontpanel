@@ -17,6 +17,7 @@
 #include "web_server.h"
 #include <string.h>
 #include <stdlib.h>
+#include <ctype.h>
 #include <inttypes.h>
 #include <sys/param.h>  // MIN()
 #include "esp_log.h"
@@ -50,6 +51,10 @@ static esp_err_t api_mainboard_firmware_update_handler(httpd_req_t *req);
 static esp_err_t api_mainboard_firmware_status_handler(httpd_req_t *req);
 static esp_err_t api_mainboard_firmware_upload_handler(httpd_req_t *req);
 static esp_err_t api_panel_firmware_upload_handler(httpd_req_t *req);
+static esp_err_t api_delete_handler(httpd_req_t *req);
+static esp_err_t api_rename_handler(httpd_req_t *req);
+static esp_err_t api_touch_handler(httpd_req_t *req);
+static esp_err_t api_mkdir_handler(httpd_req_t *req);
 #endif
 static esp_err_t api_devices_handler(httpd_req_t *req);
 static esp_err_t api_upload_handler(httpd_req_t *req);
@@ -166,10 +171,17 @@ static const httpd_uri_t uri_handlers[] = {
     { .uri = "/api/firmware/mainboard/status", .method = HTTP_GET, .handler = api_mainboard_firmware_status_handler, .user_ctx = NULL },
     { .uri = "/api/firmware/mainboard/upload", .method = HTTP_POST, .handler = api_mainboard_firmware_upload_handler, .user_ctx = NULL },
     { .uri = "/api/firmware/panel/upload", .method = HTTP_POST, .handler = api_panel_firmware_upload_handler, .user_ctx = NULL },
+    { .uri = "/api/delete", .method = HTTP_POST, .handler = api_delete_handler, .user_ctx = NULL },
+    { .uri = "/api/rename", .method = HTTP_POST, .handler = api_rename_handler, .user_ctx = NULL },
+    { .uri = "/api/touch", .method = HTTP_POST, .handler = api_touch_handler, .user_ctx = NULL },
+    { .uri = "/api/mkdir", .method = HTTP_POST, .handler = api_mkdir_handler, .user_ctx = NULL },
 #endif
     { .uri = "/api/upload", .method = HTTP_POST, .handler = api_upload_handler, .user_ctx = NULL },
     { .uri = "/api/download", .method = HTTP_GET, .handler = api_download_handler, .user_ctx = NULL }
 };
+
+static_assert(sizeof(uri_handlers) / sizeof(uri_handlers[0]) <= WEB_SERVER_MAX_HANDLERS,
+              "uri_handlers[] exceeds WEB_SERVER_MAX_HANDLERS; bump it in web_server.h");
 
 static esp_err_t static_file_handler(httpd_req_t *req) {
     const static_file_t *file = (const static_file_t *)req->user_ctx;
@@ -2077,6 +2089,256 @@ static esp_err_t api_panel_firmware_upload_handler(httpd_req_t *req) {
 }
 #endif
 
+// Decode percent-encoding (and '+' as space) in place. httpd_query_key_value()
+// returns the raw query value without decoding, so callers that send
+// encodeURIComponent()'d values (e.g. paths with '/' as %2F) must decode here.
+static void url_decode_inplace(char *s) {
+    char *src = s, *dst = s;
+    while (*src) {
+        if (*src == '%' && isxdigit((unsigned char)src[1]) && isxdigit((unsigned char)src[2])) {
+            char hex[3] = { src[1], src[2], '\0' };
+            *dst++ = (char)strtol(hex, NULL, 16);
+            src += 3;
+        } else if (*src == '+') {
+            *dst++ = ' ';
+            src++;
+        } else {
+            *dst++ = *src++;
+        }
+    }
+    *dst = '\0';
+}
+
+#ifdef CONFIG_PRODUCT_BLUESCSI
+// Map a PANEL_DELETE_* result code to a user-facing message (NULL means success).
+static const char *delete_error_string(uint8_t code) {
+    switch (code) {
+        case PANEL_DELETE_OK:              return NULL;
+        case PANEL_DELETE_ERROR_NOT_FOUND: return "File not found";
+        case PANEL_DELETE_ERROR_IN_USE:    return "File is currently loaded — eject it first";
+        case PANEL_DELETE_ERROR_PATH:      return "Invalid path";
+        case PANEL_DELETE_ERROR_IO:        return "Failed to delete file";
+        default:                           return "Delete failed";
+    }
+}
+
+// Map a PANEL_RENAME_* result code to a user-facing message (NULL means success).
+static const char *rename_error_string(uint8_t code) {
+    switch (code) {
+        case PANEL_RENAME_OK:              return NULL;
+        case PANEL_RENAME_ERROR_NOT_FOUND: return "File not found";
+        case PANEL_RENAME_ERROR_EXISTS:    return "A file with that name already exists";
+        case PANEL_RENAME_ERROR_IN_USE:    return "File is currently loaded — eject it first";
+        case PANEL_RENAME_ERROR_PATH:      return "Invalid path";
+        case PANEL_RENAME_ERROR_IO:        return "Failed to rename file";
+        default:                           return "Rename failed";
+    }
+}
+
+// Delete handler - removes a file from the main board SD card.
+// Usage: POST /api/delete  body: { "path": "/dir/image.iso" }
+static esp_err_t api_delete_handler(httpd_req_t *req) {
+    if (!g_server || !g_server->interface_ctx || !g_server->interface_ctx->host_comm) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Host communication not available");
+        return ESP_FAIL;
+    }
+
+    char content[512];
+    size_t recv_size = MIN(req->content_len, sizeof(content) - 1);
+    int ret = httpd_req_recv(req, content, recv_size);
+    if (ret <= 0) {
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+    content[ret] = '\0';
+
+    cJSON *json = cJSON_Parse(content);
+    if (!json) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+        return ESP_FAIL;
+    }
+
+    cJSON *path_json = cJSON_GetObjectItem(json, "path");
+    if (!cJSON_IsString(path_json) || path_json->valuestring[0] == '\0') {
+        cJSON_Delete(json);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing or invalid path");
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "Delete request for: %s", path_json->valuestring);
+
+    uint8_t result_code = 0xFF;
+    esp_err_t del_ret = host_comm_delete_file(g_server->interface_ctx->host_comm,
+                                              path_json->valuestring, &result_code);
+    cJSON_Delete(json);
+
+    httpd_resp_set_type(req, "application/json");
+    JsonStreamWriter jw(req);
+    esp_err_t jret = jw.beginObject();
+    if (jret != ESP_OK) return jret;
+
+    bool success = (del_ret == ESP_OK && result_code == PANEL_DELETE_OK);
+    if (!success) {
+        const char *msg = (del_ret != ESP_OK) ? "Communication error with main board"
+                                              : delete_error_string(result_code);
+        jret = jw.write("error", msg ? msg : "Delete failed");
+        if (jret != ESP_OK) return jret;
+    }
+    jret = jw.write("success", success ? 1 : 0);
+    if (jret != ESP_OK) return jret;
+    jret = jw.endObject();
+    if (jret != ESP_OK) return jret;
+    return jw.finalize();
+}
+
+// Rename handler - renames a file on the main board SD card.
+// Usage: POST /api/rename  body: { "old_path": "/a.iso", "new_path": "/b.iso" }
+static esp_err_t api_rename_handler(httpd_req_t *req) {
+    if (!g_server || !g_server->interface_ctx || !g_server->interface_ctx->host_comm) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Host communication not available");
+        return ESP_FAIL;
+    }
+
+    char content[768];
+    size_t recv_size = MIN(req->content_len, sizeof(content) - 1);
+    int ret = httpd_req_recv(req, content, recv_size);
+    if (ret <= 0) {
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+    content[ret] = '\0';
+
+    cJSON *json = cJSON_Parse(content);
+    if (!json) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+        return ESP_FAIL;
+    }
+
+    cJSON *old_json = cJSON_GetObjectItem(json, "old_path");
+    cJSON *new_json = cJSON_GetObjectItem(json, "new_path");
+    if (!cJSON_IsString(old_json) || old_json->valuestring[0] == '\0' ||
+        !cJSON_IsString(new_json) || new_json->valuestring[0] == '\0') {
+        cJSON_Delete(json);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing or invalid old_path/new_path");
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "Rename request: %s -> %s", old_json->valuestring, new_json->valuestring);
+
+    uint8_t result_code = 0xFF;
+    esp_err_t rn_ret = host_comm_rename_file(g_server->interface_ctx->host_comm,
+                                             old_json->valuestring, new_json->valuestring,
+                                             &result_code);
+    cJSON_Delete(json);
+
+    httpd_resp_set_type(req, "application/json");
+    JsonStreamWriter jw(req);
+    esp_err_t jret = jw.beginObject();
+    if (jret != ESP_OK) return jret;
+
+    bool success = (rn_ret == ESP_OK && result_code == PANEL_RENAME_OK);
+    if (!success) {
+        const char *msg = (rn_ret != ESP_OK) ? "Communication error with main board"
+                                             : rename_error_string(result_code);
+        jret = jw.write("error", msg ? msg : "Rename failed");
+        if (jret != ESP_OK) return jret;
+    }
+    jret = jw.write("success", success ? 1 : 0);
+    if (jret != ESP_OK) return jret;
+    jret = jw.endObject();
+    if (jret != ESP_OK) return jret;
+    return jw.finalize();
+}
+
+static const char *touch_error_string(uint8_t code) {
+    switch (code) {
+        case PANEL_TOUCH_OK:           return NULL;
+        case PANEL_TOUCH_ERROR_EXISTS: return "A file or folder with that name already exists";
+        case PANEL_TOUCH_ERROR_PATH:   return "Invalid name";
+        case PANEL_TOUCH_ERROR_IO:     return "Failed to create file";
+        default:                       return "Create failed";
+    }
+}
+
+static const char *mkdir_error_string(uint8_t code) {
+    switch (code) {
+        case PANEL_MKDIR_OK:           return NULL;
+        case PANEL_MKDIR_ERROR_EXISTS: return "A file or folder with that name already exists";
+        case PANEL_MKDIR_ERROR_PATH:   return "Invalid name";
+        case PANEL_MKDIR_ERROR_IO:     return "Failed to create folder";
+        default:                       return "Create failed";
+    }
+}
+
+// Shared body for the single-path create endpoints (touch / mkdir). Parses
+// { "path": "..." }, calls op_fn, and writes a JSON success/error response.
+static esp_err_t api_create_path_op(httpd_req_t *req,
+                                    esp_err_t (*op_fn)(host_comm_t *, const char *, uint8_t *),
+                                    const char *(*err_fn)(uint8_t)) {
+    if (!g_server || !g_server->interface_ctx || !g_server->interface_ctx->host_comm) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Host communication not available");
+        return ESP_FAIL;
+    }
+
+    char content[512];
+    size_t recv_size = MIN(req->content_len, sizeof(content) - 1);
+    int ret = httpd_req_recv(req, content, recv_size);
+    if (ret <= 0) {
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+    content[ret] = '\0';
+
+    cJSON *json = cJSON_Parse(content);
+    if (!json) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+        return ESP_FAIL;
+    }
+
+    cJSON *path_json = cJSON_GetObjectItem(json, "path");
+    if (!cJSON_IsString(path_json) || path_json->valuestring[0] == '\0') {
+        cJSON_Delete(json);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing or invalid path");
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "Create-path request for: %s", path_json->valuestring);
+
+    uint8_t result_code = 0xFF;
+    esp_err_t op_ret = op_fn(g_server->interface_ctx->host_comm,
+                             path_json->valuestring, &result_code);
+    cJSON_Delete(json);
+
+    httpd_resp_set_type(req, "application/json");
+    JsonStreamWriter jw(req);
+    esp_err_t jret = jw.beginObject();
+    if (jret != ESP_OK) return jret;
+
+    bool success = (op_ret == ESP_OK && result_code == 0);
+    if (!success) {
+        const char *msg = (op_ret != ESP_OK) ? "Communication error with main board"
+                                             : err_fn(result_code);
+        jret = jw.write("error", msg ? msg : "Create failed");
+        if (jret != ESP_OK) return jret;
+    }
+    jret = jw.write("success", success ? 1 : 0);
+    if (jret != ESP_OK) return jret;
+    jret = jw.endObject();
+    if (jret != ESP_OK) return jret;
+    return jw.finalize();
+}
+
+// Create an empty file. Usage: POST /api/touch  body: { "path": "/NE4.hda" }
+static esp_err_t api_touch_handler(httpd_req_t *req) {
+    return api_create_path_op(req, host_comm_touch_file, touch_error_string);
+}
+
+// Create a directory. Usage: POST /api/mkdir  body: { "path": "/CD3" }
+static esp_err_t api_mkdir_handler(httpd_req_t *req) {
+    return api_create_path_op(req, host_comm_mkdir, mkdir_error_string);
+}
+#endif // CONFIG_PRODUCT_BLUESCSI
+
 // File download handler - downloads a file from the main board SD card
 // Usage: GET /api/download?path=/picoide.ini
 static esp_err_t api_download_handler(httpd_req_t *req) {
@@ -2114,6 +2376,10 @@ static esp_err_t api_download_handler(httpd_req_t *req) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing or invalid path parameter");
         return ESP_FAIL;
     }
+
+    // httpd_query_key_value() does not decode percent-encoding; the client sends
+    // the path via encodeURIComponent(), so '/' arrives as %2F, etc.
+    url_decode_inplace(path);
 
     ESP_LOGI(TAG, "Download request for: %s", path);
 
