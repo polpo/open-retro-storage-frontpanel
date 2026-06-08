@@ -5,9 +5,16 @@ cmake_minimum_required(VERSION 3.16)
 set(PROJECT_VER "0.4.0-pre3")
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 
-# Name the firmware per product (picoide-frontpanel / bluescsi-frontpanel)
+# Name the firmware per product/transport
+# (picoide-frontpanel / bluescsi-frontpanel / bluescsi-v2-frontpanel).
+# BlueSCSI ships two transport flavors from the same product: SPI for
+# Ultra/Ultra Wide and I2C (the ".i2c" defaults layer) for v2.
 if(SDKCONFIG_DEFAULTS MATCHES "bluescsi")
-  set(FRONTPANEL_PRODUCT "bluescsi")
+  if(SDKCONFIG_DEFAULTS MATCHES "i2c")
+    set(FRONTPANEL_PRODUCT "bluescsi-v2")
+  else()
+    set(FRONTPANEL_PRODUCT "bluescsi")
+  endif()
 else()
   set(FRONTPANEL_PRODUCT "picoide")
 endif()

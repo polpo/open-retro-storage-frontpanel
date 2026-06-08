@@ -17,19 +17,19 @@
 #ifndef TRANSPORT_CONFIG_H
 #define TRANSPORT_CONFIG_H
 
-// Transport selection - comment/uncomment to select transport type
-// If neither is defined, I2C will be used as default
-#define TRANSPORT_USE_SPI    // Use SPI transport for host communication
-// #define TRANSPORT_USE_I2C    // Use I2C transport for host communication (default)
-
-// If no transport is explicitly selected, default to I2C
-#if !defined(TRANSPORT_USE_SPI) && !defined(TRANSPORT_USE_I2C)
+// Transport selection is driven by the Kconfig choice HOST_TRANSPORT, set
+// per-build via the sdkconfig.defaults.<variant> files. The internal
+// TRANSPORT_USE_* macros below fan out from it so the rest of the transport
+// layer (transport.c / transport_spi.c / transport_i2c.c) is unchanged.
+//   BlueSCSI v2              -> I2C  (sdkconfig.defaults.i2c)
+//   BlueSCSI Ultra / PicoIDE -> SPI  (default)
+#if defined(CONFIG_HOST_TRANSPORT_I2C)
 #define TRANSPORT_USE_I2C
-#endif
-
-// Ensure only one transport is selected
-#if defined(TRANSPORT_USE_SPI) && defined(TRANSPORT_USE_I2C)
-#error "Only one transport type can be selected. Please define either TRANSPORT_USE_SPI or TRANSPORT_USE_I2C, not both."
+#elif defined(CONFIG_HOST_TRANSPORT_SPI)
+#define TRANSPORT_USE_SPI
+#else
+// Host-native unit tests compile without sdkconfig.h; default to SPI.
+#define TRANSPORT_USE_SPI
 #endif
 
 // Host communication settings

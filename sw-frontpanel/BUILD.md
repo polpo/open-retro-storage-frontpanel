@@ -5,6 +5,10 @@ The front-panel firmware targets the ESP32-C3 and is built with ESP-IDF
 selected at configure time via ESP-IDF `sdkconfig` defaults. There is no
 interactive `menuconfig` step required to pick the product.
 
+The **host transport** (SPI vs I2C) is a separate, orthogonal `sdkconfig`
+dimension layered on top of the product. BlueSCSI ships two transport flavors:
+SPI for **Ultra / Ultra Wide** and I2C for **v2**. PicoIDE is always SPI.
+
 ## Development environment
 
 On NixOS / with Nix, a dev shell pins ESP-IDF and the web-asset build
@@ -25,10 +29,11 @@ and run the same `idf.py` commands.
 The product is chosen by layering a per-product defaults file on top of the
 common `sdkconfig.defaults`:
 
-| Product  | Defaults file                | Firmware output            |
-| -------- | ---------------------------- | -------------------------- |
-| PicoIDE  | `sdkconfig.defaults.picoide` | `picoide-frontpanel.bin`   |
-| BlueSCSI | `sdkconfig.defaults.bluescsi`| `bluescsi-frontpanel.bin`  |
+| Product / transport     | Defaults files                                         | Firmware output               |
+| ----------------------- | ------------------------------------------------------ | ----------------------------- |
+| PicoIDE                 | `sdkconfig.defaults.picoide`                           | `picoide-frontpanel.bin`      |
+| BlueSCSI Ultra (SPI)    | `sdkconfig.defaults.bluescsi`                          | `bluescsi-frontpanel.bin`     |
+| BlueSCSI v2 (I2C)       | `sdkconfig.defaults.bluescsi` + `sdkconfig.defaults.i2c` | `bluescsi-v2-frontpanel.bin`  |
 
 Build each variant into its **own build directory** (`-B build-<product>`) with
 its **own `sdkconfig`** (`-DSDKCONFIG=build-<product>/sdkconfig`). Both flags are
@@ -44,6 +49,19 @@ idf.py -B build-bluescsi \
 ```
 
 Output: `build-bluescsi/bluescsi-frontpanel.bin`
+
+### BlueSCSI v2 (I2C)
+
+Same product as Ultra, with the I2C transport overlay added:
+
+```bash
+idf.py -B build-bluescsi-v2 \
+  -DSDKCONFIG=build-bluescsi-v2/sdkconfig \
+  -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.bluescsi;sdkconfig.defaults.i2c" \
+  build
+```
+
+Output: `build-bluescsi-v2/bluescsi-v2-frontpanel.bin`
 
 ### PicoIDE
 

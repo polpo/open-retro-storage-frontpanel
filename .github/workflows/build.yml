@@ -10,6 +10,8 @@ jobs:
             sdkconfig_extra: sdkconfig.defaults.picoide
           - name: bluescsi
             sdkconfig_extra: sdkconfig.defaults.bluescsi
+          - name: bluescsi-v2
+            sdkconfig_extra: sdkconfig.defaults.bluescsi;sdkconfig.defaults.i2c
     env:
       OUTPUT_DIR: ${{github.workspace}}/binaries
     steps:
