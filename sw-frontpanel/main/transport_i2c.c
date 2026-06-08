@@ -15,6 +15,7 @@
 //  with this program; if not, see <https://www.gnu.org/licenses/>.
 
 #include "transport.h"
+#include "transport_config.h"
 #include "panel_protocol_defs.h"
 #include "driver/i2c.h"
 #include "esp_log.h"
@@ -99,6 +100,40 @@ static const char* transport_i2c_get_name(void) {
     return "I2C";
 }
 
+// Read `len` bytes from the slave in a single I2C read transaction
+// (START, address+R, ACKed reads, final NACK, STOP).
+static esp_err_t transport_i2c_read_payload(transport_handle_t *handle,
+                                            uint8_t *data, size_t len) {
+    if (!handle || !handle->priv || !data || len == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    transport_i2c_priv_t *priv = (transport_i2c_priv_t *)handle->priv;
+
+    i2c_cmd_handle_t cmd = i2c_cmd_link_create();
+    if (!cmd) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    i2c_master_start(cmd);
+    i2c_master_write_byte(cmd, (handle->config.device_addr << 1) | I2C_MASTER_READ, true);
+    if (len > 1) {
+        i2c_master_read(cmd, data, len - 1, I2C_MASTER_ACK);
+    }
+    i2c_master_read_byte(cmd, data + len - 1, I2C_MASTER_NACK);
+    i2c_master_stop(cmd);
+
+    esp_err_t ret = i2c_master_cmd_begin(priv->port, cmd, pdMS_TO_TICKS(handle->config.timeout_ms));
+    i2c_cmd_link_delete(cmd);
+
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "I2C payload read failed: %s", esp_err_to_name(ret));
+    } else {
+        ESP_LOG_BUFFER_HEX_LEVEL(TAG, data, (len > 32) ? 32 : len, ESP_LOG_DEBUG);
+    }
+    return ret;
+}
+
 // High-level two-phase transaction function (matching SPI interface)
 esp_err_t transport_i2c_two_phase_transaction(transport_handle_t *handle,
                                               uint8_t command, uint16_t argument,
@@ -110,7 +145,7 @@ esp_err_t transport_i2c_two_phase_transaction(transport_handle_t *handle,
 
     transport_i2c_priv_t *priv = (transport_i2c_priv_t *)handle->priv;
 
-    ESP_LOGI(TAG, "Two-phase transaction: cmd=0x%02x, arg=0x%02x", command, argument);
+    ESP_LOGD(TAG, "Two-phase transaction: cmd=0x%02x, arg=0x%04x", command, argument);
 
     // Build header
     panel_protocol_header_t header = {
@@ -128,7 +163,7 @@ esp_err_t transport_i2c_two_phase_transaction(transport_handle_t *handle,
     }
 
     // Phase 1: Send header (write transaction)
-    ESP_LOGI(TAG, "Phase 1: Sending header (4 bytes)");
+    ESP_LOGD(TAG, "Phase 1: Sending header (%u bytes)", (unsigned)sizeof(header));
 
     i2c_cmd_handle_t cmd = i2c_cmd_link_create();
     if (!cmd) {
@@ -141,7 +176,7 @@ esp_err_t transport_i2c_two_phase_transaction(transport_handle_t *handle,
 
     // If write command with payload, append it to the same transaction
     if (!is_read && write_data && write_len > 0) {
-        ESP_LOGI(TAG, "Appending write payload (%u bytes)", write_len);
+        ESP_LOGD(TAG, "Appending write payload (%u bytes)", (unsigned)write_len);
         i2c_master_write(cmd, write_data, write_len, true);
     }
 
@@ -154,88 +189,57 @@ esp_err_t transport_i2c_two_phase_transaction(transport_handle_t *handle,
         ESP_LOGE(TAG, "Phase 1 failed: %s", esp_err_to_name(ret));
         return ret;
     }
-    ESP_LOGI(TAG, "Phase 1 complete");
+    ESP_LOGD(TAG, "Phase 1 complete");
 
     // Phase 2: Read response (if read command)
     if (is_read && read_len > 0) {
+#if I2C_INTER_PHASE_DELAY_US > 0
         // Small delay to let slave prepare response
-        vTaskDelay(pdMS_TO_TICKS(1));
-
-        ESP_LOGI(TAG, "Phase 2: Reading response (%u bytes)", read_len);
-
-        cmd = i2c_cmd_link_create();
-        if (!cmd) {
-            return ESP_ERR_NO_MEM;
-        }
-
-        i2c_master_start(cmd);
-        i2c_master_write_byte(cmd, (handle->config.device_addr << 1) | I2C_MASTER_READ, true);
-
-        if (read_len > 1) {
-            i2c_master_read(cmd, read_data, read_len - 1, I2C_MASTER_ACK);
-        }
-        i2c_master_read_byte(cmd, read_data + read_len - 1, I2C_MASTER_NACK);
-        i2c_master_stop(cmd);
-
-        ret = i2c_master_cmd_begin(priv->port, cmd, pdMS_TO_TICKS(handle->config.timeout_ms));
-        i2c_cmd_link_delete(cmd);
-
+        vTaskDelay(pdMS_TO_TICKS(I2C_INTER_PHASE_DELAY_US / 1000));
+#endif
+        ESP_LOGD(TAG, "Phase 2: Reading response (%u bytes)", (unsigned)read_len);
+        ret = transport_i2c_read_payload(handle, read_data, read_len);
         if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Phase 2 failed: %s", esp_err_to_name(ret));
             return ret;
         }
+    }
 
-        ESP_LOGI(TAG, "Phase 2 complete");
-        ESP_LOG_BUFFER_HEX_LEVEL(TAG, read_data, (read_len > 32) ? 32 : read_len, ESP_LOG_INFO);
+    return ret;
+}
 
-        // Special handling for POLL_OP_READY: check if ready and do additional read
-        if (command == PANEL_CMD_POLL_OP_READY && read_len >= 3) {
-            uint8_t ready_flag = read_data[0];
-            uint16_t result_size = read_data[1] | (read_data[2] << 8);
+// Poll an async operation's status, mirroring transport_spi_poll_async_status().
+// Issues POLL_OP_READY, reads the 3-byte status, and when the result is ready
+// reads the result payload in a separate transaction.
+esp_err_t transport_i2c_poll_async_status(transport_handle_t *handle,
+                                          bool *ready, uint16_t *response_size,
+                                          uint8_t *result_data, size_t max_result_size) {
+    if (!handle || !ready || !response_size) {
+        return ESP_ERR_INVALID_ARG;
+    }
 
-            ESP_LOGI(TAG, "POLL_OP_READY response: ready=%u, size=%u", ready_flag, result_size);
+    panel_status_response_t status;
+    esp_err_t ret = transport_i2c_two_phase_transaction(handle,
+                                                        PANEL_CMD_POLL_OP_READY, PANEL_ARG_IGNORED,
+                                                        NULL, 0,
+                                                        (uint8_t*)&status, sizeof(status));
+    if (ret != ESP_OK) {
+        return ret;
+    }
+    if (status.ready_flag == PANEL_ASYNC_ERROR) {
+        return ESP_FAIL;
+    }
 
-            if (ready_flag == 1 && result_size > 0) {
-                // Result is ready - do immediate additional read for result data
-                ESP_LOGI(TAG, "Phase 3: Additional read for result data (%u bytes)", result_size);
+    *ready = (status.ready_flag == PANEL_ASYNC_READY);
+    *response_size = status.response_size;
 
-                // Check if caller provided enough buffer space
-                uint8_t *result_buffer = read_data + 3; // Append after status response
-                size_t max_result_size = read_len - 3;
-
-                if (result_size <= max_result_size) {
-                    // Small delay before next read
-                    vTaskDelay(pdMS_TO_TICKS(1));
-
-                    cmd = i2c_cmd_link_create();
-                    if (!cmd) {
-                        return ESP_ERR_NO_MEM;
-                    }
-
-                    i2c_master_start(cmd);
-                    i2c_master_write_byte(cmd, (handle->config.device_addr << 1) | I2C_MASTER_READ, true);
-
-                    if (result_size > 1) {
-                        i2c_master_read(cmd, result_buffer, result_size - 1, I2C_MASTER_ACK);
-                    }
-                    i2c_master_read_byte(cmd, result_buffer + result_size - 1, I2C_MASTER_NACK);
-                    i2c_master_stop(cmd);
-
-                    ret = i2c_master_cmd_begin(priv->port, cmd, pdMS_TO_TICKS(handle->config.timeout_ms));
-                    i2c_cmd_link_delete(cmd);
-
-                    if (ret == ESP_OK) {
-                        ESP_LOGI(TAG, "Additional read complete, result data:");
-                        ESP_LOG_BUFFER_HEX_LEVEL(TAG, result_buffer, (result_size > 32) ? 32 : result_size, ESP_LOG_INFO);
-                    } else {
-                        ESP_LOGE(TAG, "Additional read failed: %s", esp_err_to_name(ret));
-                    }
-                } else {
-                    ESP_LOGW(TAG, "Result size %u exceeds available buffer space %u", result_size, max_result_size);
-                    ret = ESP_ERR_INVALID_SIZE;
-                }
-            }
-        }
+    // If ready and the caller wants the result, read it in a separate transaction
+    if (*ready && *response_size > 0 && result_data && max_result_size > 0) {
+#if I2C_INTER_PHASE_DELAY_US > 0
+        // Delay to allow the main board to prepare the result data
+        vTaskDelay(pdMS_TO_TICKS(I2C_INTER_PHASE_DELAY_US / 1000));
+#endif
+        size_t read_size = (*response_size <= max_result_size) ? *response_size : max_result_size;
+        ret = transport_i2c_read_payload(handle, result_data, read_size);
     }
 
     return ret;
@@ -246,6 +250,6 @@ const transport_ops_t transport_i2c_ops = {
     .init = transport_i2c_init,
     .deinit = transport_i2c_deinit,
     .two_phase_transaction = transport_i2c_two_phase_transaction,
-    .poll_async_status = NULL, // FIXME implement
+    .poll_async_status = transport_i2c_poll_async_status,
     .get_name = transport_i2c_get_name,
 };

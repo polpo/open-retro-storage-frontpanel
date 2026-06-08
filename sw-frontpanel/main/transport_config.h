@@ -39,6 +39,9 @@
 #ifdef TRANSPORT_USE_I2C
 #define HOST_DEVICE_ADDR    0x50       // I2C address or SPI device ID
 #define HOST_CLOCK_SPEED    400000     // 400 kHz for I2C
+#define I2C_MAX_TRANSFER    4096       // Maximum transfer size in bytes
+// Delay between header/write and read phases (lets the slave prepare its response)
+#define I2C_INTER_PHASE_DELAY_US  1000
 #endif
 
 // SPI-specific settings
