@@ -1,6 +1,14 @@
 name: Build
 on: [push, pull_request]
 jobs:
+  host-tests:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v5
+      - name: Run host-native protocol/comm tests
+        run: make -C sw-frontpanel/test
+
   build-frontpanel-firmware:
     runs-on: ubuntu-22.04
     strategy:

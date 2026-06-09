@@ -4,4 +4,6 @@ sw-frontpanel/build/
 sw-frontpanel/build-*/
 sw-frontpanel/managed_components/
 sw-frontpanel/sdkconfig
-
+sw-frontpanel/test/obj/
+sw-frontpanel/test/runtests
+sw-frontpanel/.cache/
