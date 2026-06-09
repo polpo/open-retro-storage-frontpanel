@@ -19,6 +19,7 @@
 #include "panel_protocol_defs.h"
 #include "driver/i2c.h"
 #include "esp_log.h"
+#include "esp_rom_sys.h"   // esp_rom_delay_us (microsecond inter-phase delay)
 #include <string.h>
 
 static const char *TAG = "transport_i2c";
@@ -195,7 +196,7 @@ esp_err_t transport_i2c_two_phase_transaction(transport_handle_t *handle,
     if (is_read && read_len > 0) {
 #if I2C_INTER_PHASE_DELAY_US > 0
         // Small delay to let slave prepare response
-        vTaskDelay(pdMS_TO_TICKS(I2C_INTER_PHASE_DELAY_US / 1000));
+        esp_rom_delay_us(I2C_INTER_PHASE_DELAY_US);
 #endif
         ESP_LOGD(TAG, "Phase 2: Reading response (%u bytes)", (unsigned)read_len);
         ret = transport_i2c_read_payload(handle, read_data, read_len);
@@ -236,7 +237,7 @@ esp_err_t transport_i2c_poll_async_status(transport_handle_t *handle,
     if (*ready && *response_size > 0 && result_data && max_result_size > 0) {
 #if I2C_INTER_PHASE_DELAY_US > 0
         // Delay to allow the main board to prepare the result data
-        vTaskDelay(pdMS_TO_TICKS(I2C_INTER_PHASE_DELAY_US / 1000));
+        esp_rom_delay_us(I2C_INTER_PHASE_DELAY_US);
 #endif
         size_t read_size = (*response_size <= max_result_size) ? *response_size : max_result_size;
         ret = transport_i2c_read_payload(handle, result_data, read_size);

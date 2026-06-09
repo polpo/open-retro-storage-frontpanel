@@ -38,10 +38,12 @@
 // I2C-specific settings
 #ifdef TRANSPORT_USE_I2C
 #define HOST_DEVICE_ADDR    0x50       // I2C address or SPI device ID
-#define HOST_CLOCK_SPEED    400000     // 400 kHz for I2C
+#define HOST_CLOCK_SPEED    1000000    // 1 MHz (fast-mode-plus); needs good pull-ups
 #define I2C_MAX_TRANSFER    4096       // Maximum transfer size in bytes
-// Delay between header/write and read phases (lets the slave prepare its response)
-#define I2C_INTER_PHASE_DELAY_US  1000
+// Delay between header/write and read phases (lets the slave prepare its response).
+// Busy-wait in microseconds; the slave prepares reads in its FINISH ISR, so this
+// can be small. Too small -> master reads before the slave is ready.
+#define I2C_INTER_PHASE_DELAY_US  200
 #endif
 
 // SPI-specific settings
