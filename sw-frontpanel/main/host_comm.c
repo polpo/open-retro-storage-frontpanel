@@ -876,7 +876,7 @@ esp_err_t host_comm_delete_file(host_comm_t *comm, const char *path, uint8_t *re
     }
 
     *result_code = result_data[0];
-    ESP_LOGI(TAG, "Delete result code: 0x%02X", *result_code);
+    ESP_LOGD(TAG, "Delete result code: 0x%02X", *result_code);
     HOST_COMM_UNLOCK(comm);
     return ESP_OK;
 }
@@ -934,7 +934,7 @@ esp_err_t host_comm_rename_file(host_comm_t *comm, const char *old_path,
     }
 
     *result_code = result_data[0];
-    ESP_LOGI(TAG, "Rename result code: 0x%02X", *result_code);
+    ESP_LOGD(TAG, "Rename result code: 0x%02X", *result_code);
     HOST_COMM_UNLOCK(comm);
     return ESP_OK;
 }
@@ -984,7 +984,7 @@ static esp_err_t host_comm_path_op(host_comm_t *comm, uint8_t command,
     }
 
     *result_code = result_data[0];
-    ESP_LOGI(TAG, "Path op 0x%02X result code: 0x%02X", command, *result_code);
+    ESP_LOGD(TAG, "Path op 0x%02X result code: 0x%02X", command, *result_code);
     HOST_COMM_UNLOCK(comm);
     return ESP_OK;
 }

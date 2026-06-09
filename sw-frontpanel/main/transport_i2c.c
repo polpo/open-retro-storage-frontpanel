@@ -129,8 +129,6 @@ static esp_err_t transport_i2c_read_payload(transport_handle_t *handle,
 
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "I2C payload read failed: %s", esp_err_to_name(ret));
-    } else {
-        ESP_LOG_BUFFER_HEX_LEVEL(TAG, data, (len > 32) ? 32 : len, ESP_LOG_DEBUG);
     }
     return ret;
 }
@@ -145,8 +143,6 @@ esp_err_t transport_i2c_two_phase_transaction(transport_handle_t *handle,
     }
 
     transport_i2c_priv_t *priv = (transport_i2c_priv_t *)handle->priv;
-
-    ESP_LOGD(TAG, "Two-phase transaction: cmd=0x%02x, arg=0x%04x", command, argument);
 
     // Build header
     panel_protocol_header_t header = {
@@ -164,8 +160,6 @@ esp_err_t transport_i2c_two_phase_transaction(transport_handle_t *handle,
     }
 
     // Phase 1: Send header (write transaction)
-    ESP_LOGD(TAG, "Phase 1: Sending header (%u bytes)", (unsigned)sizeof(header));
-
     i2c_cmd_handle_t cmd = i2c_cmd_link_create();
     if (!cmd) {
         return ESP_ERR_NO_MEM;
@@ -177,7 +171,6 @@ esp_err_t transport_i2c_two_phase_transaction(transport_handle_t *handle,
 
     // If write command with payload, append it to the same transaction
     if (!is_read && write_data && write_len > 0) {
-        ESP_LOGD(TAG, "Appending write payload (%u bytes)", (unsigned)write_len);
         i2c_master_write(cmd, write_data, write_len, true);
     }
 
@@ -190,7 +183,6 @@ esp_err_t transport_i2c_two_phase_transaction(transport_handle_t *handle,
         ESP_LOGE(TAG, "Phase 1 failed: %s", esp_err_to_name(ret));
         return ret;
     }
-    ESP_LOGD(TAG, "Phase 1 complete");
 
     // Phase 2: Read response (if read command)
     if (is_read && read_len > 0) {
@@ -198,7 +190,6 @@ esp_err_t transport_i2c_two_phase_transaction(transport_handle_t *handle,
         // Small delay to let slave prepare response
         esp_rom_delay_us(I2C_INTER_PHASE_DELAY_US);
 #endif
-        ESP_LOGD(TAG, "Phase 2: Reading response (%u bytes)", (unsigned)read_len);
         ret = transport_i2c_read_payload(handle, read_data, read_len);
         if (ret != ESP_OK) {
             return ret;
