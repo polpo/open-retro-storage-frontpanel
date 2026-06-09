@@ -39,19 +39,24 @@
 #ifdef TRANSPORT_USE_I2C
 #define HOST_DEVICE_ADDR    0x50       // I2C address or SPI device ID
 #define HOST_CLOCK_SPEED    1000000    // 1 MHz (fast-mode-plus); needs good pull-ups
-#define I2C_MAX_TRANSFER    4096       // Maximum transfer size in bytes
 // Delay between header/write and read phases (lets the slave prepare its response).
 // Busy-wait in microseconds; the slave prepares reads in its FINISH ISR, so this
 // can be small. Too small -> master reads before the slave is ready.
 #define I2C_INTER_PHASE_DELAY_US  200
 #endif
 
+// I2C link retries (outside the guard: transport_i2c.c builds in all variants).
+// A busy slave NACKs its address (the RP2040 slave does not clock-stretch), so a
+// transient busy window surfaces as a NACK/timeout. Retry briefly to match SPI,
+// where the master always clocks and readiness is handled by POLL_OP_READY.
+#define I2C_RETRY_COUNT           3
+#define I2C_RETRY_DELAY_US        200
+
 // SPI-specific settings
 #ifdef TRANSPORT_USE_SPI
 #define HOST_DEVICE_ADDR    -1         // SPI has no device addr
 #define SPI_MODE            0          // SPI mode (0-3)
 #define HOST_CLOCK_SPEED    10000000    // 10MHz for SPI (matches PicoIDE)
-#define SPI_MAX_TRANSFER    4096       // Maximum transfer size in bytes
 // Delay between header and payload phases
 // No longer needed since IRQ handler debug prints are disabled by default on main board
 #define SPI_INTER_PHASE_DELAY_US  0

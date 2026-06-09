@@ -101,6 +101,12 @@ static const char* transport_i2c_get_name(void) {
     return "I2C";
 }
 
+// Retry a NACK (ESP_FAIL) or timeout: a busy slave NACKs its address, so give
+// it a moment and try again. Other errors (driver/argument) are not retryable.
+static bool i2c_should_retry(esp_err_t ret) {
+    return ret == ESP_FAIL || ret == ESP_ERR_TIMEOUT;
+}
+
 // Read `len` bytes from the slave in a single I2C read transaction
 // (START, address+R, ACKed reads, final NACK, STOP).
 static esp_err_t transport_i2c_read_payload(transport_handle_t *handle,
@@ -111,21 +117,32 @@ static esp_err_t transport_i2c_read_payload(transport_handle_t *handle,
 
     transport_i2c_priv_t *priv = (transport_i2c_priv_t *)handle->priv;
 
-    i2c_cmd_handle_t cmd = i2c_cmd_link_create();
-    if (!cmd) {
-        return ESP_ERR_NO_MEM;
-    }
+    esp_err_t ret = ESP_FAIL;
+    for (int attempt = 0; attempt < I2C_RETRY_COUNT; attempt++) {
+        if (attempt > 0) {
+            esp_rom_delay_us(I2C_RETRY_DELAY_US);
+        }
 
-    i2c_master_start(cmd);
-    i2c_master_write_byte(cmd, (handle->config.device_addr << 1) | I2C_MASTER_READ, true);
-    if (len > 1) {
-        i2c_master_read(cmd, data, len - 1, I2C_MASTER_ACK);
-    }
-    i2c_master_read_byte(cmd, data + len - 1, I2C_MASTER_NACK);
-    i2c_master_stop(cmd);
+        i2c_cmd_handle_t cmd = i2c_cmd_link_create();
+        if (!cmd) {
+            return ESP_ERR_NO_MEM;
+        }
 
-    esp_err_t ret = i2c_master_cmd_begin(priv->port, cmd, pdMS_TO_TICKS(handle->config.timeout_ms));
-    i2c_cmd_link_delete(cmd);
+        i2c_master_start(cmd);
+        i2c_master_write_byte(cmd, (handle->config.device_addr << 1) | I2C_MASTER_READ, true);
+        if (len > 1) {
+            i2c_master_read(cmd, data, len - 1, I2C_MASTER_ACK);
+        }
+        i2c_master_read_byte(cmd, data + len - 1, I2C_MASTER_NACK);
+        i2c_master_stop(cmd);
+
+        ret = i2c_master_cmd_begin(priv->port, cmd, pdMS_TO_TICKS(handle->config.timeout_ms));
+        i2c_cmd_link_delete(cmd);
+
+        if (!i2c_should_retry(ret)) {
+            break;
+        }
+    }
 
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "I2C payload read failed: %s", esp_err_to_name(ret));
@@ -160,24 +177,35 @@ esp_err_t transport_i2c_two_phase_transaction(transport_handle_t *handle,
     }
 
     // Phase 1: Send header (write transaction)
-    i2c_cmd_handle_t cmd = i2c_cmd_link_create();
-    if (!cmd) {
-        return ESP_ERR_NO_MEM;
+    esp_err_t ret = ESP_FAIL;
+    for (int attempt = 0; attempt < I2C_RETRY_COUNT; attempt++) {
+        if (attempt > 0) {
+            esp_rom_delay_us(I2C_RETRY_DELAY_US);
+        }
+
+        i2c_cmd_handle_t cmd = i2c_cmd_link_create();
+        if (!cmd) {
+            return ESP_ERR_NO_MEM;
+        }
+
+        i2c_master_start(cmd);
+        i2c_master_write_byte(cmd, (handle->config.device_addr << 1) | I2C_MASTER_WRITE, true);
+        i2c_master_write(cmd, (uint8_t*)&header, sizeof(header), true);
+
+        // If write command with payload, append it to the same transaction
+        if (!is_read && write_data && write_len > 0) {
+            i2c_master_write(cmd, write_data, write_len, true);
+        }
+
+        i2c_master_stop(cmd);
+
+        ret = i2c_master_cmd_begin(priv->port, cmd, pdMS_TO_TICKS(handle->config.timeout_ms));
+        i2c_cmd_link_delete(cmd);
+
+        if (!i2c_should_retry(ret)) {
+            break;
+        }
     }
-
-    i2c_master_start(cmd);
-    i2c_master_write_byte(cmd, (handle->config.device_addr << 1) | I2C_MASTER_WRITE, true);
-    i2c_master_write(cmd, (uint8_t*)&header, sizeof(header), true);
-
-    // If write command with payload, append it to the same transaction
-    if (!is_read && write_data && write_len > 0) {
-        i2c_master_write(cmd, write_data, write_len, true);
-    }
-
-    i2c_master_stop(cmd);
-
-    esp_err_t ret = i2c_master_cmd_begin(priv->port, cmd, pdMS_TO_TICKS(handle->config.timeout_ms));
-    i2c_cmd_link_delete(cmd);
 
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Phase 1 failed: %s", esp_err_to_name(ret));

@@ -829,138 +829,39 @@ esp_err_t host_comm_read_file_chunk(host_comm_t *comm, uint32_t chunk_index, uin
     return ESP_OK;
 }
 
-esp_err_t host_comm_delete_file(host_comm_t *comm, const char *path, uint8_t *result_code) {
-    if (!comm || !comm->initialized || !path || !result_code) {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    size_t path_len = strlen(path);
-    if (path_len == 0 || path_len >= PANEL_PROTOCOL_MAX_PAYLOAD) {
-        ESP_LOGE(TAG, "Delete path length invalid: %d bytes", path_len);
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    HOST_COMM_LOCK(comm);
-
-    ESP_LOGI(TAG, "Deleting file: %s", path);
-
-    // Prepare payload with path (null-terminated)
-    memcpy(tx_buffer, path, path_len);
-    tx_buffer[path_len] = '\0';
-
-    // Send DELETE_FILE command (async operation)
-    esp_err_t ret = transport_two_phase_transaction(&comm->transport,
-                                                   PANEL_CMD_DELETE_FILE, PANEL_ARG_EXTENDED,
-                                                   tx_buffer, path_len + 1,
-                                                   NULL, 0);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to send delete command: %s", esp_err_to_name(ret));
-        HOST_COMM_UNLOCK(comm);
-        return ret;
-    }
-
-    // Poll for async result (1 byte: PANEL_DELETE_* result code)
-    uint8_t *result_data;
-    size_t result_size;
-    ret = host_comm_poll_async_result(comm, 5000, 10, 1, &result_data, &result_size);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to get delete result: %s", esp_err_to_name(ret));
-        HOST_COMM_UNLOCK(comm);
-        return ret;
-    }
-
-    if (result_size < 1) {
-        ESP_LOGE(TAG, "Delete result size mismatch: got %d", result_size);
-        HOST_COMM_UNLOCK(comm);
-        return ESP_ERR_INVALID_SIZE;
-    }
-
-    *result_code = result_data[0];
-    ESP_LOGD(TAG, "Delete result code: 0x%02X", *result_code);
-    HOST_COMM_UNLOCK(comm);
-    return ESP_OK;
-}
-
-esp_err_t host_comm_rename_file(host_comm_t *comm, const char *old_path,
-                                const char *new_path, uint8_t *result_code) {
-    if (!comm || !comm->initialized || !old_path || !new_path || !result_code) {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    size_t old_len = strlen(old_path);
-    size_t new_len = strlen(new_path);
-    if (old_len == 0 || new_len == 0 ||
-        (old_len + 1 + new_len + 1) > PANEL_PROTOCOL_MAX_PAYLOAD) {
-        ESP_LOGE(TAG, "Rename path lengths invalid: %d / %d bytes", old_len, new_len);
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    HOST_COMM_LOCK(comm);
-
-    ESP_LOGI(TAG, "Renaming file: %s -> %s", old_path, new_path);
-
-    // Prepare payload: oldpath\0newpath\0
-    memcpy(tx_buffer, old_path, old_len);
-    tx_buffer[old_len] = '\0';
-    memcpy(tx_buffer + old_len + 1, new_path, new_len);
-    tx_buffer[old_len + 1 + new_len] = '\0';
-    size_t total_payload_size = old_len + 1 + new_len + 1;
-
-    // Send RENAME_FILE command (async operation)
-    esp_err_t ret = transport_two_phase_transaction(&comm->transport,
-                                                   PANEL_CMD_RENAME_FILE, PANEL_ARG_EXTENDED,
-                                                   tx_buffer, total_payload_size,
-                                                   NULL, 0);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to send rename command: %s", esp_err_to_name(ret));
-        HOST_COMM_UNLOCK(comm);
-        return ret;
-    }
-
-    // Poll for async result (1 byte: PANEL_RENAME_* result code)
-    uint8_t *result_data;
-    size_t result_size;
-    ret = host_comm_poll_async_result(comm, 5000, 10, 1, &result_data, &result_size);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to get rename result: %s", esp_err_to_name(ret));
-        HOST_COMM_UNLOCK(comm);
-        return ret;
-    }
-
-    if (result_size < 1) {
-        ESP_LOGE(TAG, "Rename result size mismatch: got %d", result_size);
-        HOST_COMM_UNLOCK(comm);
-        return ESP_ERR_INVALID_SIZE;
-    }
-
-    *result_code = result_data[0];
-    ESP_LOGD(TAG, "Rename result code: 0x%02X", *result_code);
-    HOST_COMM_UNLOCK(comm);
-    return ESP_OK;
-}
-
-// Shared helper: send a single null-terminated path with `command` and read
-// back a 1-byte result code. Used by touch and mkdir.
+// Shared helper: send one (path2 == NULL) or two null-terminated path strings
+// with `command` and read back a 1-byte result code. Used by delete, rename,
+// touch and mkdir.
 static esp_err_t host_comm_path_op(host_comm_t *comm, uint8_t command,
-                                   const char *path, uint8_t *result_code) {
+                                   const char *path, const char *path2,
+                                   uint8_t *result_code) {
     if (!comm || !comm->initialized || !path || !result_code) {
         return ESP_ERR_INVALID_ARG;
     }
 
     size_t path_len = strlen(path);
-    if (path_len == 0 || path_len >= PANEL_PROTOCOL_MAX_PAYLOAD) {
-        ESP_LOGE(TAG, "Path length invalid: %d bytes", path_len);
+    size_t path2_len = path2 ? strlen(path2) : 0;
+    size_t payload_size = path_len + 1 + (path2 ? path2_len + 1 : 0);
+    if (path_len == 0 || (path2 && path2_len == 0) ||
+        payload_size > PANEL_PROTOCOL_MAX_PAYLOAD) {
+        ESP_LOGE(TAG, "Path op 0x%02X path lengths invalid: %d / %d bytes",
+                 command, path_len, path2_len);
         return ESP_ERR_INVALID_ARG;
     }
 
     HOST_COMM_LOCK(comm);
 
+    // Payload: path\0[path2\0]
     memcpy(tx_buffer, path, path_len);
     tx_buffer[path_len] = '\0';
+    if (path2) {
+        memcpy(tx_buffer + path_len + 1, path2, path2_len);
+        tx_buffer[path_len + 1 + path2_len] = '\0';
+    }
 
     esp_err_t ret = transport_two_phase_transaction(&comm->transport,
                                                    command, PANEL_ARG_EXTENDED,
-                                                   tx_buffer, path_len + 1,
+                                                   tx_buffer, payload_size,
                                                    NULL, 0);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to send path op 0x%02X: %s", command, esp_err_to_name(ret));
@@ -989,14 +890,28 @@ static esp_err_t host_comm_path_op(host_comm_t *comm, uint8_t command,
     return ESP_OK;
 }
 
+esp_err_t host_comm_delete_file(host_comm_t *comm, const char *path, uint8_t *result_code) {
+    ESP_LOGI(TAG, "Deleting file: %s", path ? path : "(null)");
+    return host_comm_path_op(comm, PANEL_CMD_DELETE_FILE, path, NULL, result_code);
+}
+
+esp_err_t host_comm_rename_file(host_comm_t *comm, const char *old_path,
+                                const char *new_path, uint8_t *result_code) {
+    if (!new_path) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    ESP_LOGI(TAG, "Renaming file: %s -> %s", old_path ? old_path : "(null)", new_path);
+    return host_comm_path_op(comm, PANEL_CMD_RENAME_FILE, old_path, new_path, result_code);
+}
+
 esp_err_t host_comm_touch_file(host_comm_t *comm, const char *path, uint8_t *result_code) {
     ESP_LOGI(TAG, "Touching file: %s", path ? path : "(null)");
-    return host_comm_path_op(comm, PANEL_CMD_TOUCH_FILE, path, result_code);
+    return host_comm_path_op(comm, PANEL_CMD_TOUCH_FILE, path, NULL, result_code);
 }
 
 esp_err_t host_comm_mkdir(host_comm_t *comm, const char *path, uint8_t *result_code) {
     ESP_LOGI(TAG, "Creating directory: %s", path ? path : "(null)");
-    return host_comm_path_op(comm, PANEL_CMD_MKDIR, path, result_code);
+    return host_comm_path_op(comm, PANEL_CMD_MKDIR, path, NULL, result_code);
 }
 
 esp_err_t host_comm_get_rp2350_fw_status(host_comm_t *comm, rp2350_fw_status_t *status) {
