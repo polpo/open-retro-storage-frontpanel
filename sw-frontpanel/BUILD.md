@@ -32,23 +32,23 @@ common `sdkconfig.defaults`:
 | Product / transport     | Defaults files                                         | Firmware output               |
 | ----------------------- | ------------------------------------------------------ | ----------------------------- |
 | PicoIDE                 | `sdkconfig.defaults.picoide`                           | `picoide-frontpanel.bin`      |
-| BlueSCSI Ultra (SPI)    | `sdkconfig.defaults.bluescsi`                          | `bluescsi-frontpanel.bin`     |
+| BlueSCSI Ultra (SPI)    | `sdkconfig.defaults.bluescsi`                          | `bluescsi-ultra-frontpanel.bin`     |
 | BlueSCSI v2 (I2C)       | `sdkconfig.defaults.bluescsi` + `sdkconfig.defaults.i2c` | `bluescsi-v2-frontpanel.bin`  |
 
 Build each variant into its **own build directory** (`-B build-<product>`) with
 its **own `sdkconfig`** (`-DSDKCONFIG=build-<product>/sdkconfig`). Both flags are
 required to keep the products isolated — see the warning below.
 
-### BlueSCSI
+### BlueSCSI Ultra (SPI)
 
 ```bash
-idf.py -B build-bluescsi \
-  -DSDKCONFIG=build-bluescsi/sdkconfig \
+idf.py -B build-bluescsi-ultra \
+  -DSDKCONFIG=build-bluescsi-ultra/sdkconfig \
   -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.bluescsi" \
   build
 ```
 
-Output: `build-bluescsi/bluescsi-frontpanel.bin`
+Output: `build-bluescsi-ultra/bluescsi-ultra-frontpanel.bin`
 
 ### BlueSCSI v2 (I2C)
 
@@ -79,7 +79,7 @@ Output: `build-picoide/picoide-frontpanel.bin`
 Replace the port to match your board (e.g. `/dev/ttyACM0`, `/dev/ttyUSB0`):
 
 ```bash
-idf.py -B build-bluescsi -p /dev/ttyACM0 flash monitor   # BlueSCSI
+idf.py -B build-bluescsi-ultra -p /dev/ttyACM0 flash monitor   # BlueSCSI Ultra
 idf.py -B build-picoide  -p /dev/ttyACM0 flash monitor   # PicoIDE
 ```
 
@@ -89,8 +89,8 @@ UART. Exit the monitor with `Ctrl-]`.
 ## Cleaning
 
 ```bash
-idf.py -B build-bluescsi fullclean    # clean one product's build dir
-rm -rf build-bluescsi build-picoide   # or just remove the dirs
+idf.py -B build-bluescsi-ultra fullclean    # clean one product's build dir
+rm -rf build-bluescsi-ultra build-picoide   # or just remove the dirs
 ```
 
 Run `fullclean` if you change ESP-IDF versions — a build directory configured
