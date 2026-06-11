@@ -576,7 +576,7 @@ static esp_err_t api_eject_image_handler(httpd_req_t *req) {
         if (ret != ESP_OK) return ret;
     }
 
-    ret = json.write("success", success ? 1 : 0);
+    ret = json.write("success", success);
     if (ret != ESP_OK) return ret;
 
     ret = json.endObject();
@@ -607,7 +607,7 @@ static esp_err_t api_prev_image_handler(httpd_req_t *req) {
         if (ret != ESP_OK) return ret;
     }
 
-    ret = json.write("success", success ? 1 : 0);
+    ret = json.write("success", success);
     if (ret != ESP_OK) return ret;
 
     ret = json.endObject();
@@ -638,7 +638,7 @@ static esp_err_t api_next_image_handler(httpd_req_t *req) {
         if (ret != ESP_OK) return ret;
     }
 
-    ret = json.write("success", success ? 1 : 0);
+    ret = json.write("success", success);
     if (ret != ESP_OK) return ret;
 
     ret = json.endObject();
@@ -1281,7 +1281,7 @@ static esp_err_t api_firmware_update_handler(httpd_req_t *req) {
         if (ret != ESP_OK) return ret;
     }
 
-    ret = json.write("success", success ? 1 : 0);
+    ret = json.write("success", success);
     if (ret != ESP_OK) return ret;
 
     ret = json.endObject();
@@ -1323,7 +1323,7 @@ static esp_err_t api_firmware_update_handler(httpd_req_t *req) {
         if (ret != ESP_OK) return ret;
     }
 
-    ret = json.write("success", success ? 1 : 0);
+    ret = json.write("success", success);
     if (ret != ESP_OK) return ret;
 
     ret = json.endObject();
@@ -1514,7 +1514,7 @@ static esp_err_t api_mainboard_firmware_update_handler(httpd_req_t *req) {
         if (ret != ESP_OK) return ret;
     }
 
-    ret = json.write("success", success ? 1 : 0);
+    ret = json.write("success", success);
     if (ret != ESP_OK) return ret;
 
     ret = json.endObject();
@@ -1707,7 +1707,7 @@ static esp_err_t handle_file_upload(httpd_req_t *req, const char *path_prefix) {
     if (content_length == 0) {
         ESP_LOGE(TAG, "No content in upload request");
         httpd_resp_set_status(req, "400 Bad Request");
-        httpd_resp_send(req, "No content", 10);
+        httpd_resp_send(req, "No content", HTTPD_RESP_USE_STRLEN);
         return ESP_FAIL;
     }
 
@@ -1719,7 +1719,7 @@ static esp_err_t handle_file_upload(httpd_req_t *req, const char *path_prefix) {
     if (!chunk_buffer) {
         ESP_LOGE(TAG, "Failed to allocate upload buffer");
         httpd_resp_set_status(req, "500 Internal Server Error");
-        httpd_resp_send(req, "Memory allocation failed", 23);
+        httpd_resp_send(req, "Memory allocation failed", HTTPD_RESP_USE_STRLEN);
         return ESP_FAIL;
     }
 
@@ -1732,7 +1732,7 @@ static esp_err_t handle_file_upload(httpd_req_t *req, const char *path_prefix) {
         ESP_LOGE(TAG, "Failed to receive upload data");
         free(chunk_buffer);
         httpd_resp_set_status(req, "400 Bad Request");
-        httpd_resp_send(req, "Failed to receive data", 22);
+        httpd_resp_send(req, "Failed to receive data", HTTPD_RESP_USE_STRLEN);
         return ESP_FAIL;
     }
 
@@ -1744,7 +1744,7 @@ static esp_err_t handle_file_upload(httpd_req_t *req, const char *path_prefix) {
         ESP_LOGE(TAG, "%s", parse_err);
         free(chunk_buffer);
         httpd_resp_set_status(req, "400 Bad Request");
-        httpd_resp_send(req, parse_err, strlen(parse_err));
+        httpd_resp_send(req, parse_err, HTTPD_RESP_USE_STRLEN);
         return ESP_FAIL;
     }
     ESP_LOGI(TAG, "Upload: %s (%u bytes), data at offset %u",
@@ -1759,7 +1759,7 @@ static esp_err_t handle_file_upload(httpd_req_t *req, const char *path_prefix) {
         ESP_LOGE(TAG, "Host communication not available");
         free(chunk_buffer);
         httpd_resp_set_status(req, "503 Service Unavailable");
-        httpd_resp_send(req, "Host not connected", 18);
+        httpd_resp_send(req, "Host not connected", HTTPD_RESP_USE_STRLEN);
         return ESP_FAIL;
     }
 
@@ -1771,7 +1771,7 @@ static esp_err_t handle_file_upload(httpd_req_t *req, const char *path_prefix) {
         ESP_LOGE(TAG, "Failed to start file upload: %s", esp_err_to_name(ret));
         free(chunk_buffer);
         httpd_resp_set_status(req, "500 Internal Server Error");
-        httpd_resp_send(req, "Failed to start upload", 21);
+        httpd_resp_send(req, "Failed to start upload", HTTPD_RESP_USE_STRLEN);
         return ESP_FAIL;
     }
 
@@ -1790,7 +1790,7 @@ static esp_err_t handle_file_upload(httpd_req_t *req, const char *path_prefix) {
                      first_chunk_data_size, PANEL_FILE_CHUNK_SIZE);
             free(chunk_buffer);
             httpd_resp_set_status(req, "400 Bad Request");
-            httpd_resp_send(req, "Multipart header too large", 26);
+            httpd_resp_send(req, "Multipart header too large", HTTPD_RESP_USE_STRLEN);
             return ESP_FAIL;
         }
 
@@ -1801,7 +1801,7 @@ static esp_err_t handle_file_upload(httpd_req_t *req, const char *path_prefix) {
             ESP_LOGE(TAG, "Failed to write first chunk: %s", esp_err_to_name(ret));
             free(chunk_buffer);
             httpd_resp_set_status(req, "500 Internal Server Error");
-            httpd_resp_send(req, "Upload failed", 13);
+            httpd_resp_send(req, "Upload failed", HTTPD_RESP_USE_STRLEN);
             return ESP_FAIL;
         }
 
@@ -1819,7 +1819,7 @@ static esp_err_t handle_file_upload(httpd_req_t *req, const char *path_prefix) {
             ESP_LOGE(TAG, "Failed to receive chunk data");
             free(chunk_buffer);
             httpd_resp_set_status(req, "400 Bad Request");
-            httpd_resp_send(req, "Failed to receive data", 22);
+            httpd_resp_send(req, "Failed to receive data", HTTPD_RESP_USE_STRLEN);
             return ESP_FAIL;
         }
 
@@ -1829,7 +1829,7 @@ static esp_err_t handle_file_upload(httpd_req_t *req, const char *path_prefix) {
             ESP_LOGE(TAG, "Failed to write chunk: %s", esp_err_to_name(ret));
             free(chunk_buffer);
             httpd_resp_set_status(req, "500 Internal Server Error");
-            httpd_resp_send(req, "Upload failed", 13);
+            httpd_resp_send(req, "Upload failed", HTTPD_RESP_USE_STRLEN);
             return ESP_FAIL;
         }
 
@@ -1848,7 +1848,7 @@ static esp_err_t handle_file_upload(httpd_req_t *req, const char *path_prefix) {
         ESP_LOGE(TAG, "Failed to finish upload: %s", esp_err_to_name(ret));
         free(chunk_buffer);
         httpd_resp_set_status(req, "500 Internal Server Error");
-        httpd_resp_send(req, "Upload failed", 13);
+        httpd_resp_send(req, "Upload failed", HTTPD_RESP_USE_STRLEN);
         return ESP_FAIL;
     }
 
@@ -1877,7 +1877,7 @@ static esp_err_t handle_file_upload(httpd_req_t *req, const char *path_prefix) {
                 error_msg = "Unknown error";
         }
 
-        httpd_resp_send(req, error_msg, strlen(error_msg));
+        httpd_resp_send(req, error_msg, HTTPD_RESP_USE_STRLEN);
         return ESP_FAIL;
     }
 
@@ -1945,13 +1945,13 @@ static esp_err_t api_panel_firmware_upload_handler(httpd_req_t *req) {
     // Don't collide with the SD-card-based panel OTA background task.
     if (g_ota_task_handle != NULL) {
         httpd_resp_set_status(req, "409 Conflict");
-        httpd_resp_send(req, "Update already in progress", 26);
+        httpd_resp_send(req, "Update already in progress", HTTPD_RESP_USE_STRLEN);
         return ESP_FAIL;
     }
 
     if (req->content_len == 0) {
         httpd_resp_set_status(req, "400 Bad Request");
-        httpd_resp_send(req, "No content", 10);
+        httpd_resp_send(req, "No content", HTTPD_RESP_USE_STRLEN);
         return ESP_FAIL;
     }
 
@@ -1959,7 +1959,7 @@ static esp_err_t api_panel_firmware_upload_handler(httpd_req_t *req) {
     char *chunk_buffer = (char *)malloc(chunk_size);
     if (!chunk_buffer) {
         httpd_resp_set_status(req, "500 Internal Server Error");
-        httpd_resp_send(req, "Memory allocation failed", 23);
+        httpd_resp_send(req, "Memory allocation failed", HTTPD_RESP_USE_STRLEN);
         return ESP_FAIL;
     }
 
@@ -1967,7 +1967,7 @@ static esp_err_t api_panel_firmware_upload_handler(httpd_req_t *req) {
     if (received <= 0) {
         free(chunk_buffer);
         httpd_resp_set_status(req, "400 Bad Request");
-        httpd_resp_send(req, "Failed to receive data", 22);
+        httpd_resp_send(req, "Failed to receive data", HTTPD_RESP_USE_STRLEN);
         return ESP_FAIL;
     }
 
@@ -1980,7 +1980,7 @@ static esp_err_t api_panel_firmware_upload_handler(httpd_req_t *req) {
         ESP_LOGE(TAG, "%s", parse_err);
         free(chunk_buffer);
         httpd_resp_set_status(req, "400 Bad Request");
-        httpd_resp_send(req, parse_err, strlen(parse_err));
+        httpd_resp_send(req, parse_err, HTTPD_RESP_USE_STRLEN);
         return ESP_FAIL;
     }
     ESP_LOGI(TAG, "Panel firmware upload: %s (%u bytes)", filename, firmware_size);
@@ -1989,7 +1989,7 @@ static esp_err_t api_panel_firmware_upload_handler(httpd_req_t *req) {
     if (!update_partition) {
         free(chunk_buffer);
         httpd_resp_set_status(req, "500 Internal Server Error");
-        httpd_resp_send(req, "No OTA partition available", 26);
+        httpd_resp_send(req, "No OTA partition available", HTTPD_RESP_USE_STRLEN);
         return ESP_FAIL;
     }
 
@@ -1999,7 +1999,7 @@ static esp_err_t api_panel_firmware_upload_handler(httpd_req_t *req) {
         ESP_LOGE(TAG, "esp_ota_begin failed: %s", esp_err_to_name(ret));
         free(chunk_buffer);
         httpd_resp_set_status(req, "500 Internal Server Error");
-        httpd_resp_send(req, "Failed to begin OTA", 19);
+        httpd_resp_send(req, "Failed to begin OTA", HTTPD_RESP_USE_STRLEN);
         return ESP_FAIL;
     }
 
@@ -2015,7 +2015,7 @@ static esp_err_t api_panel_firmware_upload_handler(httpd_req_t *req) {
             esp_ota_abort(ota_handle);
             free(chunk_buffer);
             httpd_resp_set_status(req, "500 Internal Server Error");
-            httpd_resp_send(req, "OTA write failed", 16);
+            httpd_resp_send(req, "OTA write failed", HTTPD_RESP_USE_STRLEN);
             return ESP_FAIL;
         }
         bytes_written += first_size;
@@ -2032,7 +2032,7 @@ static esp_err_t api_panel_firmware_upload_handler(httpd_req_t *req) {
             esp_ota_abort(ota_handle);
             free(chunk_buffer);
             httpd_resp_set_status(req, "400 Bad Request");
-            httpd_resp_send(req, "Failed to receive data", 22);
+            httpd_resp_send(req, "Failed to receive data", HTTPD_RESP_USE_STRLEN);
             return ESP_FAIL;
         }
         ret = esp_ota_write(ota_handle, chunk_buffer, n);
@@ -2041,7 +2041,7 @@ static esp_err_t api_panel_firmware_upload_handler(httpd_req_t *req) {
             esp_ota_abort(ota_handle);
             free(chunk_buffer);
             httpd_resp_set_status(req, "500 Internal Server Error");
-            httpd_resp_send(req, "OTA write failed", 16);
+            httpd_resp_send(req, "OTA write failed", HTTPD_RESP_USE_STRLEN);
             return ESP_FAIL;
         }
         bytes_written += n;
@@ -2056,7 +2056,7 @@ static esp_err_t api_panel_firmware_upload_handler(httpd_req_t *req) {
         httpd_resp_set_status(req, "400 Bad Request");
         const char *msg = (ret == ESP_ERR_OTA_VALIDATE_FAILED)
             ? "Firmware image validation failed" : "OTA finalize failed";
-        httpd_resp_send(req, msg, strlen(msg));
+        httpd_resp_send(req, msg, HTTPD_RESP_USE_STRLEN);
         return ESP_FAIL;
     }
 
@@ -2064,7 +2064,7 @@ static esp_err_t api_panel_firmware_upload_handler(httpd_req_t *req) {
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "esp_ota_set_boot_partition failed: %s", esp_err_to_name(ret));
         httpd_resp_set_status(req, "500 Internal Server Error");
-        httpd_resp_send(req, "Failed to set boot partition", 28);
+        httpd_resp_send(req, "Failed to set boot partition", HTTPD_RESP_USE_STRLEN);
         return ESP_FAIL;
     }
 
@@ -2184,7 +2184,7 @@ static esp_err_t api_delete_handler(httpd_req_t *req) {
         jret = jw.write("error", msg ? msg : "Delete failed");
         if (jret != ESP_OK) return jret;
     }
-    jret = jw.write("success", success ? 1 : 0);
+    jret = jw.write("success", success);
     if (jret != ESP_OK) return jret;
     jret = jw.endObject();
     if (jret != ESP_OK) return jret;
@@ -2243,7 +2243,7 @@ static esp_err_t api_rename_handler(httpd_req_t *req) {
         jret = jw.write("error", msg ? msg : "Rename failed");
         if (jret != ESP_OK) return jret;
     }
-    jret = jw.write("success", success ? 1 : 0);
+    jret = jw.write("success", success);
     if (jret != ESP_OK) return jret;
     jret = jw.endObject();
     if (jret != ESP_OK) return jret;
@@ -2321,7 +2321,7 @@ static esp_err_t api_create_path_op(httpd_req_t *req,
         jret = jw.write("error", msg ? msg : "Create failed");
         if (jret != ESP_OK) return jret;
     }
-    jret = jw.write("success", success ? 1 : 0);
+    jret = jw.write("success", success);
     if (jret != ESP_OK) return jret;
     jret = jw.endObject();
     if (jret != ESP_OK) return jret;
