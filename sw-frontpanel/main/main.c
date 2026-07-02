@@ -48,6 +48,15 @@ static const char *TAG = "main";
 #define HOST_COMM_STARTUP_TIMEOUT_MS  20000
 #define HOST_COMM_RETRY_INTERVAL_MS   500
 
+// OLED startup recovery. When the panel is powered only from the host (no USB),
+// the +3V3 rail ramps slowly enough that the display's hardware reset (LM809)
+// can release — and its +9V VPP boost stabilize — after display_manager_init()
+// has already run its one-shot init, leaving the OLED dark. Re-assert the init
+// a few times over the first few seconds; harmless once the panel is up.
+#define DISPLAY_STARTUP_REINIT_FIRST_MS     2000
+#define DISPLAY_STARTUP_REINIT_INTERVAL_MS  500
+#define DISPLAY_STARTUP_REINIT_COUNT        3
+
 // Global instances
 static display_manager_t display;
 static menu_t main_menu;
@@ -952,9 +961,23 @@ static void redraw_current_screen(void) {
 // Display update task
 static void display_update_task(void *pvParameters) {
     static screen_type_t last_screen = SCREEN_COUNT;  // Invalid value forces initial draw
+    static uint8_t startup_reinits = 0;
+    static uint32_t next_reinit_ms = DISPLAY_STARTUP_REINIT_FIRST_MS;
 
     while (1) {
         if (display.initialized) {
+            // Recover the OLED if it missed its power-on init on a slow
+            // (host-only) power rail — re-assert the init a few times over the
+            // first few seconds. Non-blocking; repaints the current buffer.
+            if (startup_reinits < DISPLAY_STARTUP_REINIT_COUNT) {
+                uint32_t now_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
+                if (now_ms >= next_reinit_ms) {
+                    display_manager_reinit(&display);
+                    next_reinit_ms += DISPLAY_STARTUP_REINIT_INTERVAL_MS;
+                    startup_reinits++;
+                }
+            }
+
             // Honor a deferred full-redraw request first (e.g. waking from screensaver).
             if (display.needs_full_redraw) {
                 display.needs_full_redraw = false;

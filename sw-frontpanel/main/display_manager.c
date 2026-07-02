@@ -57,6 +57,16 @@ static void step_sprite(sprite_state_t *sprites, int idx, uint32_t now_ms);
 
 #define MIN_UPDATE_INTERVAL_MS 16  // ~60 FPS max
 
+// Bring the SH1107 controller up and force full brightness. Deliberately does
+// NOT touch the frame buffer — u8g2_ClearDisplay() runs the picture loop, which
+// wipes the RAM buffer, so the recovery path (display_manager_reinit()) keeps
+// the current image and repaints it with u8g2_SendBuffer() instead.
+static void sh1107_power_on(u8g2_t *u8g2) {
+    u8g2_InitDisplay(u8g2);
+    u8g2_SetPowerSave(u8g2, 0);
+    u8g2_SetContrast(u8g2, 255);
+}
+
 esp_err_t display_manager_init(display_manager_t *display) {
     if (!display) {
         return ESP_ERR_INVALID_ARG;
@@ -79,10 +89,8 @@ esp_err_t display_manager_init(display_manager_t *display) {
                                 u8g2_esp32_spi_byte_cb, 
                                 u8g2_esp32_gpio_and_delay_cb);
 
-    u8g2_InitDisplay(&display->u8g2);
-    u8g2_ClearDisplay(&display->u8g2);
-    u8g2_SetPowerSave(&display->u8g2, 0);
-    u8g2_SetContrast(&display->u8g2, 255); // Ensure full brightness at startup
+    sh1107_power_on(&display->u8g2);
+    u8g2_ClearDisplay(&display->u8g2);  // blank power-on garbage before the first draw
     ESP_LOGI(TAG, "Display initialized with full contrast (255)");
 
     display->initialized = true;
@@ -125,6 +133,32 @@ esp_err_t display_manager_init(display_manager_t *display) {
     schedule_idle_timer(display);
 
     ESP_LOGI(TAG, "Display initialized successfully (idle_mode=%d)", display->idle_mode);
+    return ESP_OK;
+}
+
+esp_err_t display_manager_reinit(display_manager_t *display) {
+    if (!display || !display->initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    // Re-bring-up the controller and repaint the current framebuffer. On a cold
+    // boot powered only from the host, the panel's hardware reset (LM809
+    // supervisor) can release the display — and its +9V VPP boost can stabilize
+    // — *after* the one-shot init in display_manager_init() has already run,
+    // leaving the OLED dark while the rest of the panel runs. The reset is not
+    // on a GPIO and the panel has no readback, so the only lever is to re-issue
+    // the init once the rails have settled. sh1107_power_on() leaves the RAM
+    // buffer untouched, so u8g2_SendBuffer() restores whatever was on screen
+    // (e.g. the splash logo, which the incremental progress updates never
+    // redraw). Idempotent: on a USB boot the panel is already up and this just
+    // repaints the same contents.
+    if (xSemaphoreTake(display->spi_mutex, pdMS_TO_TICKS(100)) != pdTRUE) {
+        ESP_LOGW(TAG, "Failed to acquire SPI mutex for reinit");
+        return ESP_ERR_TIMEOUT;
+    }
+    sh1107_power_on(&display->u8g2);
+    u8g2_SendBuffer(&display->u8g2);  // repaint the existing buffer (keeps the logo)
+    xSemaphoreGive(display->spi_mutex);
     return ESP_OK;
 }
 
