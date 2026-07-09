@@ -1,23 +1,94 @@
 name: Build
 on: [push, pull_request]
 jobs:
+  host-tests:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v5
+      - name: Run host-native protocol/comm tests
+        run: make -C sw-frontpanel/test
+
   build-frontpanel-firmware:
     runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        product:
+          - name: picoide
+            sdkconfig_extra: sdkconfig.defaults.picoide
+          - name: bluescsi-ultra
+            sdkconfig_extra: sdkconfig.defaults.bluescsi
+          - name: bluescsi-v2
+            sdkconfig_extra: sdkconfig.defaults.bluescsi;sdkconfig.defaults.i2c
     env:
       OUTPUT_DIR: ${{github.workspace}}/binaries
     steps:
       - name: Checkout repo with submodules
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           submodules: recursive
-      - name: Build Front Panel Firmware
+      - name: Build Front Panel Firmware (${{ matrix.product.name }})
         uses: espressif/esp-idf-ci-action@v1
         with:
-          esp_idf_version: v5.5.1
+          esp_idf_version: v5.5.4
           target: esp32c3
           path: 'sw-frontpanel'
+          command: 'idf.py -B build-${{ matrix.product.name }} -DSDKCONFIG=build-${{ matrix.product.name }}/sdkconfig -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;${{ matrix.product.sdkconfig_extra }}" build'
       - name: Upload Front Panel Firmware
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
-          name: Front Panel Firmware
-          path: 'sw-frontpanel/build/picoide-frontpanel.bin'
+          name: frontpanel-firmware-${{ matrix.product.name }}
+          path: |
+            sw-frontpanel/build-${{ matrix.product.name }}/${{ matrix.product.name }}-frontpanel.bin
+            sw-frontpanel/build-${{ matrix.product.name }}/bootloader/bootloader.bin
+            sw-frontpanel/build-${{ matrix.product.name }}/partition_table/partition-table.bin
+
+  create-release:
+    if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
+    runs-on: ubuntu-24.04
+    needs: [build-frontpanel-firmware]
+    permissions:
+      contents: write
+    env:
+      STAGING_DIR: ${{github.workspace}}/release-staging-dir
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v5
+      - name: Classify release
+        id: relinfo
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          if [[ "$VERSION" == *-* ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+            echo "base_version=${VERSION%%-*}" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+            echo "base_version=$VERSION" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Generate release body
+        shell: bash
+        run: |
+          VERSION="${{ steps.relinfo.outputs.version }}"
+          BASE="${{ steps.relinfo.outputs.base_version }}"
+          awk -v ver="$VERSION" '$0 ~ "^# v" ver "$" {a=1;next} /^# /{a=0} a' sw-frontpanel/CHANGELOG.md > release-body.md
+          if [ ! -s release-body.md ] && [ "$VERSION" != "$BASE" ]; then
+            awk -v ver="$BASE" '$0 ~ "^# v" ver "$" {a=1;next} /^# /{a=0} a' sw-frontpanel/CHANGELOG.md > release-body.md
+          fi
+      - name: Download firmware artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: ${{env.STAGING_DIR}}
+          pattern: frontpanel-firmware-*
+          merge-multiple: true
+      - name: Release
+        uses: softprops/action-gh-release@v3
+        with:
+          body_path: release-body.md
+          files: |
+            */picoide-frontpanel.bin
+            */bluescsi-ultra-frontpanel.bin
+            */bluescsi-v2-frontpanel.bin
+          draft: true
+          prerelease: ${{ steps.relinfo.outputs.prerelease }}

@@ -109,6 +109,12 @@ esp_err_t transport_poll_async_status(transport_handle_t *handle,
         return ESP_ERR_INVALID_STATE;
     }
 
+    // Not every transport implements async polling; guard against a NULL op
+    // so a missing implementation returns an error instead of crashing.
+    if (!handle->ops->poll_async_status) {
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+
     // Route to transport-specific implementation
     return handle->ops->poll_async_status(handle, ready, response_size, result_data, max_result_size);
 }

@@ -93,9 +93,6 @@ esp_err_t ota_manager_mark_valid(void);
 // Get current firmware version
 uint32_t ota_manager_get_current_version(void);
 
-// Utility function to format version string
-void ota_manager_format_version_string(char *version_str, uint32_t version_num);
-
 
 #ifdef __cplusplus
 }

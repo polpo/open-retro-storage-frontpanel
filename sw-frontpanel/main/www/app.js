@@ -16,6 +16,13 @@
 
 let currentImage = null;
 let currentPath = "/";
+let productName = "PicoIDE";
+// #ifdef PRODUCT_BLUESCSI
+let mainboardFirmwarePending = false;
+// #endif
+let devices = [];
+let activeDeviceIndex = 0;
+let deviceIndexInitialized = false;
 
 // API helper function
 async function apiCall(endpoint, options = {}) {
@@ -66,21 +73,135 @@ function showStatus(type, message) {
 async function loadSystemInfo() {
     const data = await apiCall('/status');
     if (data) {
+        if (data.product_name) {
+            productName = data.product_name;
+        }
+        if (data.product_full) {
+            document.title = data.product_full;
+        }
+        // Update header logo/branding
+        const heading = document.getElementById('product-heading');
+        if (heading) {
+            if (data.logo_url && data.logo_url.length > 0) {
+                heading.innerHTML = '<img src="' + data.logo_url + '" alt="' + (data.product_name || 'Front Panel') + '" style="height: 48px;">';
+            } else {
+                heading.textContent = data.product_name || 'Front Panel';
+            }
+            heading.style.visibility = 'visible';
+        }
+        // Update hostname display
+        const hostnameText = document.getElementById('hostname-text');
+        const hostnameUrl = document.getElementById('hostname-url');
+        if (hostnameText && hostnameUrl && data.hostname) {
+            hostnameUrl.textContent = 'http://' + data.hostname + '.local';
+            hostnameText.style.visibility = 'visible';
+        }
+        const freeMemKB = data.free_memory ? (data.free_memory / 1024).toFixed(1) + ' KB' : 'Unknown';
+        const uptimeSec = data.uptime || 0;
+        const uptimeMin = Math.floor(uptimeSec / 60);
+        const uptimeRemSec = uptimeSec % 60;
+        const uptimeStr = uptimeSec ? `${uptimeMin}:${String(uptimeRemSec).padStart(2, '0')}` : 'Unknown';
         document.getElementById('system-info').innerHTML = `
-            <strong>Firmware:</strong> ${data.firmware || 'v0.1.0'}<br>
-            <strong>Hardware:</strong> ${data.hardware || 'ESP32-C3'}<br>
+            <strong>Product:</strong> ${data.product_full || data.product_name || 'PicoIDE'}<br>
+            <strong>Main firmware:</strong> ${data.main_firmware ? 'v' + data.main_firmware : 'Unknown'}<br>
+            <strong>Front panel firmware:</strong> ${data.panel_firmware ? 'v' + data.panel_firmware : 'Unknown'}<br>
             <strong>Host Communication:</strong> ${data.transport || 'Unknown'} - ${data.host_connected ? 'Connected' : 'Disconnected'}<br>
-            <strong>Free Memory:</strong> ${data.free_memory || 'Unknown'} bytes<br>
-            <strong>Uptime:</strong> ${data.uptime || 'Unknown'} seconds
+            <strong>Free Memory:</strong> ${freeMemKB}<br>
+            <strong>Uptime:</strong> ${uptimeStr}
         `;
+        // #ifdef PRODUCT_BLUESCSI
+        setupMainboardFirmwareUI(productName);
+        // #endif
         showStatus('success', 'Connected to front panel');
     } else {
         showStatus('error', 'Failed to connect to front panel');
     }
 }
 
+async function refreshDevices() {
+    const data = await apiCall('/devices');
+    if (data) {
+        devices = data.devices || [];
+        if (!deviceIndexInitialized && data.active_device !== undefined) {
+            activeDeviceIndex = data.active_device;
+            deviceIndexInitialized = true;
+        }
+        renderDeviceSelector();
+    }
+}
+
+// S2S device types that support eject
+const EJECTABLE_TYPES = [1, 2, 3, 4, 7]; // removable, optical, floppy, MO, ZIP
+const DEVICE_STATUS_TRAY_OPEN = 6; // PANEL_DEVICE_STATUS_TRAY_OPEN
+
+function renderDeviceSelector() {
+    const container = document.getElementById('device-selector');
+    if (!container) return;
+
+    if (devices.length === 0) {
+        container.innerHTML = '<div class="status">No devices found</div>';
+        return;
+    }
+
+    container.innerHTML = '<div class="device-tabs">' +
+        devices.map(dev => {
+            const isActive = dev.index === activeDeviceIndex;
+            const trayOpen = dev.status === DEVICE_STATUS_TRAY_OPEN;
+            const imageLine = trayOpen
+                ? `⏏ Tray open${dev.image ? ' — ' + dev.image : ''} — load a disc or close`
+                : (dev.image ? dev.image : '[empty]');
+            const canEject = (dev.image || trayOpen) && EJECTABLE_TYPES.includes(dev.type);
+            // When the tray is open, the same eject command closes it (re-inserts).
+            const ejectBtn = canEject
+                ? ` <button onclick="event.stopPropagation(); ejectDevice(${dev.index})" style="padding: 2px 8px; font-size: 11px; margin: 0;">${trayOpen ? 'Close' : 'Eject'}</button>`
+                : '';
+            return `<div class="device-tab${isActive ? ' active' : ''}" onclick="selectDevice(${dev.index})">` +
+                `<strong>${dev.label}</strong>` +
+                `<span class="device-image">${imageLine}${ejectBtn}</span>` +
+                `</div>`;
+        }).join('') +
+        '</div>';
+}
+
+async function selectDevice(index) {
+    activeDeviceIndex = index;
+    renderDeviceSelector();
+    await refreshImages();
+}
+
+// Filename portion of a path (after the last slash).
+function basename(p) {
+    if (!p) return p;
+    const i = p.lastIndexOf('/');
+    return i >= 0 ? p.slice(i + 1) : p;
+}
+
+// #ifdef PRODUCT_BLUESCSI
+// Build the Rename + Delete icon buttons for a file entry. When the file is the
+// currently-loaded image, both are rendered disabled (the main board also
+// refuses these operations on a mounted image).
+function renderFileModButtons(entry, filePath) {
+    const renameSvg = `<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false"><path fill="currentColor" d="M12.146.146a.5.5 0 0 1 .708 0l3 3a.5.5 0 0 1 0 .708l-10 10a.5.5 0 0 1-.168.11l-5 2a.5.5 0 0 1-.65-.65l2-5a.5.5 0 0 1 .11-.168l10-10Zm.708 1.414L11.5 2.914 13.086 4.5l1.354-1.354-1.586-1.586ZM12.379 5.207 10.793 3.621 3.5 10.914V11.5h.5a.5.5 0 0 1 .5.5v.5h.5a.5.5 0 0 1 .5.5v.293l6.379-6.379Z"/></svg>`;
+    const trashSvg = `<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false"><path fill="currentColor" d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5Zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5Zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6Z"/><path fill="currentColor" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1ZM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118Z"/></svg>`;
+
+    const loaded = currentImage && basename(currentImage) === entry.name;
+    if (loaded) {
+        const t = "Can't modify the loaded image — eject it first";
+        return `<button class="icon-btn" disabled title="${t}" aria-label="Rename (disabled: image loaded)">${renameSvg}</button>` +
+               `<button class="icon-btn delete-btn" disabled title="${t}" aria-label="Delete (disabled: image loaded)">${trashSvg}</button>`;
+    }
+
+    // Escape for embedding in single-quoted onclick string args.
+    const p = filePath.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+    const n = entry.name.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+    return `<button class="icon-btn" onclick="renameEntry('${p}','${n}')" title="Rename ${entry.name}" aria-label="Rename ${entry.name}">${renameSvg}</button>` +
+           `<button class="icon-btn delete-btn" onclick="deleteEntry('${p}','${n}')" title="Delete ${entry.name}" aria-label="Delete ${entry.name}">${trashSvg}</button>`;
+}
+// #endif
+
 async function refreshImages() {
-    const data = await apiCall('/images');
+    const endpoint = devices.length > 1 ? `/images?device=${activeDeviceIndex}` : '/images';
+    const data = await apiCall(endpoint);
     if (data) {
         currentPath = data.current_path || "/";
         currentImage = data.current_image;
@@ -89,16 +210,6 @@ async function refreshImages() {
         const pathDisplay = document.getElementById('current-path');
         if (pathDisplay) {
             pathDisplay.textContent = currentPath;
-        }
-
-        // Update current image status
-        const imageNameEl = document.getElementById('current-image-name');
-        if (imageNameEl) {
-            if (data.current_image) {
-                imageNameEl.textContent = `${data.current_image} (${data.image_index + 1} of ${data.total_images})`;
-            } else {
-                imageNameEl.textContent = 'No image loaded';
-            }
         }
 
         // Update prev/next button states
@@ -120,17 +231,34 @@ async function refreshImages() {
             </div>`;
         }
 
-        if (data.entries && data.entries.length > 0) {
-            entriesHtml += data.entries.map(entry => {
+        const entries = (data.entries || []).filter(e => e.name !== '..' && e.name !== '.');
+        if (entries.length > 0) {
+            entriesHtml += entries.map(entry => {
                 if (entry.is_directory) {
                     return `<div class="entry-item directory-item">
                         <span><strong>${entry.name}/</strong></span>
                         <button onclick="selectEntry(${entry.index})">Open</button>
                     </div>`;
                 } else {
+                    const filePath = currentPath.endsWith('/')
+                        ? currentPath + entry.name
+                        : currentPath + '/' + entry.name;
+                    const dlUrl = '/api/download?path=' + encodeURIComponent(filePath);
+                    let modBtns = '';
+                    // #ifdef PRODUCT_BLUESCSI
+                    modBtns = renderFileModButtons(entry, filePath);
+                    // #endif
                     return `<div class="entry-item file-item">
                         <span><strong>${entry.name}</strong></span>
-                        <button onclick="selectEntry(${entry.index})">Load</button>
+                        <span class="entry-actions">
+                            <button onclick="selectEntry(${entry.index})">Load</button>
+                            <a class="entry-btn icon-btn" href="${dlUrl}" download="${entry.name}" title="Download ${entry.name}" aria-label="Download ${entry.name}">
+                                <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false">
+                                    <path fill="currentColor" d="M8 1a1 1 0 0 1 1 1v6.59l1.3-1.3a1 1 0 0 1 1.4 1.42l-3 3a1 1 0 0 1-1.4 0l-3-3a1 1 0 0 1 1.4-1.42L7 8.59V2a1 1 0 0 1 1-1ZM3 12a1 1 0 0 1 1 1v1h8v-1a1 1 0 1 1 2 0v2a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1v-2a1 1 0 0 1 1-1Z"/>
+                                </svg>
+                            </a>
+                            ${modBtns}
+                        </span>
                     </div>`;
                 }
             }).join('');
@@ -145,12 +273,15 @@ async function refreshImages() {
 }
 
 async function selectEntry(index) {
+    const body = { index: index };
+    if (devices.length > 1) body.device = activeDeviceIndex;
     const data = await apiCall('/select_entry', {
         method: 'POST',
-        body: JSON.stringify({ index: index })
+        body: JSON.stringify(body)
     });
     if (data && data.success) {
         await refreshImages();
+        await refreshDevices();
         if (index === -1) {
             showStatus('success', 'Navigated to parent directory');
         } else {
@@ -159,27 +290,145 @@ async function selectEntry(index) {
     }
 }
 
-async function ejectImage() {
-    const data = await apiCall('/eject_image', { method: 'POST' });
+async function ejectDevice(deviceIndex) {
+    const data = await apiCall('/eject_image', {
+        method: 'POST',
+        body: JSON.stringify({ device: deviceIndex })
+    });
     if (data && data.success) {
         await refreshImages();
+        await refreshDevices();
         showStatus('success', 'Image ejected');
     }
 }
 
-async function prevImage() {
-    const data = await apiCall('/prev_image', { method: 'POST' });
+async function ejectImage() {
+    const body = {};
+    if (devices.length > 1) body.device = activeDeviceIndex;
+    const data = await apiCall('/eject_image', {
+        method: 'POST',
+        body: JSON.stringify(body)
+    });
     if (data && data.success) {
         await refreshImages();
+        await refreshDevices();
+        showStatus('success', 'Image ejected');
+    }
+}
+
+// #ifdef PRODUCT_BLUESCSI
+async function deleteEntry(path, name) {
+    if (!confirm('Delete "' + name + '"?\n\nThis permanently removes the file from the SD card and cannot be undone.')) {
+        return;
+    }
+    const data = await apiCall('/delete', {
+        method: 'POST',
+        body: JSON.stringify({ path: path })
+    });
+    if (data && data.success) {
+        showStatus('success', 'Deleted ' + name);
+        await refreshImages();
+    } else if (data && data.error) {
+        showStatus('error', 'Delete failed: ' + data.error);
+    }
+}
+
+async function renameEntry(path, name) {
+    const newName = prompt('New name for "' + name + '":', name);
+    if (newName === null) return;               // user cancelled
+    const trimmed = newName.trim();
+    if (!trimmed || trimmed === name) return;   // empty or unchanged
+    if (trimmed.includes('/') || trimmed.includes('\\')) {
+        showStatus('error', 'Name cannot contain slashes');
+        return;
+    }
+    const dir = path.slice(0, path.lastIndexOf('/') + 1) || '/';
+    const newPath = dir + trimmed;
+    const data = await apiCall('/rename', {
+        method: 'POST',
+        body: JSON.stringify({ old_path: path, new_path: newPath })
+    });
+    if (data && data.success) {
+        showStatus('success', 'Renamed to ' + trimmed);
+        await refreshImages();
+    } else if (data && data.error) {
+        showStatus('error', 'Rename failed: ' + data.error);
+    }
+}
+
+// Create an empty file or a directory in the current directory. `endpoint` is
+// '/touch' or '/mkdir'; `label` is used in status messages.
+async function createEntry(name, endpoint, label) {
+    if (name === null) return;                  // user cancelled
+    const trimmed = (name || '').trim();
+    if (!trimmed) return;
+    if (trimmed.includes('/') || trimmed.includes('\\')) {
+        showStatus('error', 'Name cannot contain slashes');
+        return;
+    }
+    const dir = currentPath.endsWith('/') ? currentPath : currentPath + '/';
+    const path = dir + trimmed;
+    const data = await apiCall(endpoint, {
+        method: 'POST',
+        body: JSON.stringify({ path: path })
+    });
+    if (data && data.success) {
+        showStatus('success', label + ' created: ' + trimmed);
+        await refreshImages();
+    } else if (data && data.error) {
+        showStatus('error', label + ' failed: ' + data.error);
+    }
+}
+
+async function createFile() {
+    const name = prompt('New file name (e.g. NE4.hda to create a network device):', '');
+    await createEntry(name, '/touch', 'File');
+}
+
+async function createDir() {
+    const name = prompt('New folder name (e.g. CD3 for a CD-ROM image folder):', '');
+    await createEntry(name, '/mkdir', 'Folder');
+}
+// #endif
+
+async function prevImage() {
+    const body = {};
+    if (devices.length > 1) body.device = activeDeviceIndex;
+    const data = await apiCall('/prev_image', {
+        method: 'POST',
+        body: JSON.stringify(body)
+    });
+    if (data && data.success) {
+        await refreshImages();
+        await refreshDevices();
         showStatus('success', 'Loaded previous image');
     }
 }
 
 async function nextImage() {
-    const data = await apiCall('/next_image', { method: 'POST' });
+    const body = {};
+    if (devices.length > 1) body.device = activeDeviceIndex;
+    const data = await apiCall('/next_image', {
+        method: 'POST',
+        body: JSON.stringify(body)
+    });
     if (data && data.success) {
         await refreshImages();
+        await refreshDevices();
         showStatus('success', 'Loaded next image');
+    }
+}
+
+let wifiSectionCollapsed = false;
+
+function toggleWiFiSection() {
+    const body = document.getElementById('wifi-config-body');
+    if (!body) return;
+    wifiSectionCollapsed = !wifiSectionCollapsed;
+    body.style.display = wifiSectionCollapsed ? 'none' : '';
+    const heading = document.getElementById('wifi-heading');
+    if (heading) {
+        heading.textContent = wifiSectionCollapsed ? '📶 WiFi Configuration ▸' : '📶 WiFi Configuration ▾';
     }
 }
 
@@ -187,11 +436,13 @@ async function loadWiFiStatus() {
     const data = await apiCall('/wifi/status');
     if (data) {
         let statusText = data.state || 'Unknown';
+        let wifiConfigured = false;
         if (data.mode === 'Client' && data.ssid) {
             statusText = `Connected to <strong>${data.ssid}</strong>`;
             if (data.ip_address) {
                 statusText += ` (IP: ${data.ip_address})`;
             }
+            wifiConfigured = true;
         } else if (data.mode === 'AP' && data.ssid) {
             statusText = `AP Mode: <strong>${data.ssid}</strong>`;
             if (data.ip_address) {
@@ -200,6 +451,11 @@ async function loadWiFiStatus() {
         }
         document.getElementById('wifi-state').textContent = data.state || 'Unknown';
         document.getElementById('wifi-status').innerHTML = `WiFi Status: ${statusText}`;
+
+        // Collapse WiFi config section if already connected
+        if (wifiConfigured && !wifiSectionCollapsed) {
+            toggleWiFiSection();
+        }
     }
 }
 
@@ -245,17 +501,21 @@ async function connectToWiFi(ssid, password, isOpen = false) {
 }
 
 // Firmware update variables
+// #ifdef PRODUCT_BLUESCSI
 let panelUpdateInProgress = false;
 let panelUpdateCheckTimer = null;
 let mainboardUpdateInProgress = false;
 let mainboardUpdateCheckTimer = null;
 
 // Format version number for display
-function formatVersion(version) {
+function formatVersion(version, isDateBased) {
     if (version === 0) return 'Unknown';
     const major = (version >> 16) & 0xFF;
     const minor = (version >> 8) & 0xFF;
     const patch = version & 0xFF;
+    if (isDateBased) {
+        return `v${2000 + major}.${String(minor).padStart(2, '0')}.${String(patch).padStart(2, '0')}`;
+    }
     return `v${major}.${minor}.${patch}`;
 }
 
@@ -289,15 +549,62 @@ async function checkPanelFirmware() {
     }
 }
 
+async function checkBlueSCSIGitHubRelease(currentVersion) {
+    try {
+        const response = await fetch('https://api.github.com/repos/BlueSCSI/BlueSCSI-v2/releases/latest');
+        if (!response.ok) return;
+        const release = await response.json();
+
+        // Parse tag like "v2025.02.08" or "2025.02.08"
+        const match = release.tag_name.match(/v?(\d{4})\.(\d{1,2})\.(\d{1,2})/);
+        if (!match) return;
+
+        const year = parseInt(match[1]);
+        const month = parseInt(match[2]);
+        const day = parseInt(match[3]);
+        const githubDate = year * 10000 + month * 100 + day;
+
+        // Convert current packed version to comparable integer
+        const curYear = 2000 + ((currentVersion >> 16) & 0xFF);
+        const curMonth = (currentVersion >> 8) & 0xFF;
+        const curDay = currentVersion & 0xFF;
+        const currentDate = curYear * 10000 + curMonth * 100 + curDay;
+
+        const versionStr = `v${year}.${String(month).padStart(2, '0')}.${String(day).padStart(2, '0')}`;
+
+        const availableEl = document.getElementById('mainboard-available-version');
+        const availableSection = document.getElementById('mainboard-available-section');
+        if (availableSection) availableSection.style.display = '';
+
+        if (githubDate > currentDate) {
+            availableEl.textContent = versionStr;
+            availableEl.style.color = '#28a745';
+        } else {
+            availableEl.textContent = versionStr + ' (up to date)';
+            availableEl.style.color = '#666';
+        }
+    } catch (e) {
+        console.log('GitHub release check failed:', e);
+    }
+}
+
 async function checkMainboardFirmware() {
     const data = await apiCall('/firmware/mainboard/check');
     if (data) {
+        const isDateVer = productName === 'BlueSCSI';
         if (data.current_version !== undefined) {
-            document.getElementById('mainboard-current-version').textContent = formatVersion(data.current_version);
+            document.getElementById('mainboard-current-version').textContent = formatVersion(data.current_version, isDateVer);
+        }
+
+        if (productName === 'BlueSCSI') {
+            if (data.current_version !== undefined) {
+                await checkBlueSCSIGitHubRelease(data.current_version);
+            }
+            return;
         }
 
         if (data.update_available) {
-            document.getElementById('mainboard-available-version').textContent = formatVersion(data.available_version);
+            document.getElementById('mainboard-available-version').textContent = formatVersion(data.available_version, isDateVer);
             document.getElementById('mainboard-available-version').style.color = '#28a745';
             document.getElementById('mainboard-update-btn').disabled = false;
         } else {
@@ -363,11 +670,11 @@ async function checkPanelUpdateProgress() {
                 statusText = 'Applying update...';
                 break;
             case 'success':
-                statusText = 'Update successful! Panel restarting...';
                 panelUpdateInProgress = false;
                 clearInterval(panelUpdateCheckTimer);
                 showStatus('success', 'Panel firmware update completed!');
-                break;
+                startRebootCountdown();
+                return;
             case 'error':
                 statusText = `Failed: ${data.error || 'Unknown error'}`;
                 panelUpdateInProgress = false;
@@ -388,13 +695,31 @@ async function checkPanelUpdateProgress() {
     }
 }
 
+function startRebootCountdown() {
+    const statusEl = document.getElementById('panel-update-status');
+    let remaining = 5;
+    statusEl.textContent = `Update successful! Panel restarting... ${remaining}`;
+    const timer = setInterval(() => {
+        remaining--;
+        if (remaining <= 0) {
+            clearInterval(timer);
+            location.reload();
+        } else {
+            statusEl.textContent = `Update successful! Panel restarting... ${remaining}`;
+        }
+    }, 1000);
+}
+
 async function startMainboardFirmwareUpdate() {
     if (mainboardUpdateInProgress) {
         showStatus('error', 'Main board update already in progress');
         return;
     }
 
-    if (!confirm('Are you sure you want to update the main board firmware? The main board will restart.')) {
+    const confirmMsg = productName === 'BlueSCSI'
+        ? 'Are you sure you want to reboot the main board to apply the uploaded firmware?'
+        : 'Are you sure you want to update the main board firmware? The main board will restart.';
+    if (!confirm(confirmMsg)) {
         return;
     }
 
@@ -402,9 +727,13 @@ async function startMainboardFirmwareUpdate() {
     document.getElementById('mainboard-update-btn').disabled = true;
     document.getElementById('mainboard-update-progress').style.display = 'block';
     document.getElementById('mainboard-update-status').style.display = 'block';
-    document.getElementById('mainboard-update-status').textContent = 'Starting main board update...';
 
-    showStatus('', 'Starting main board firmware update...');
+    const statusMsg = productName === 'BlueSCSI'
+        ? 'Rebooting main board to apply firmware...'
+        : 'Starting main board update...';
+    document.getElementById('mainboard-update-status').textContent = statusMsg;
+
+    showStatus('', statusMsg);
 
     const data = await apiCall('/firmware/mainboard/update', { method: 'POST' });
     if (data && data.success) {
@@ -440,9 +769,10 @@ async function runMainboardUpdateAnimation() {
             const data = await apiCall('/firmware/mainboard/check');
             if (data && data.current_version) {
                 // Board is back online!
+                const isDateVer = productName === 'BlueSCSI';
                 document.getElementById('mainboard-update-status').textContent =
-                    `Update complete! Now running ${formatVersion(data.current_version)}`;
-                document.getElementById('mainboard-current-version').textContent = formatVersion(data.current_version);
+                    `Update complete! Now running ${formatVersion(data.current_version, isDateVer)}`;
+                document.getElementById('mainboard-current-version').textContent = formatVersion(data.current_version, isDateVer);
                 showStatus('success', 'Main board firmware update completed!');
                 mainboardUpdateInProgress = false;
                 return;
@@ -458,6 +788,122 @@ async function runMainboardUpdateAnimation() {
     mainboardUpdateInProgress = false;
     document.getElementById('mainboard-update-btn').disabled = false;
 }
+// #else
+let systemUpdateInProgress = false;
+let systemUpdateCheckTimer = null;
+
+// Format version number for display.
+// Encoding is 0xMMmmppPP; the low byte is 0xFF for a final release or 0-254
+// for a "-preN" prerelease. Unsigned shifts (>>>) since major can set bit 31.
+function formatVersion(version) {
+    if (version === 0) return 'Unknown';
+    const major = (version >>> 24) & 0xFF;
+    const minor = (version >>> 16) & 0xFF;
+    const patch = (version >>> 8) & 0xFF;
+    const pre = version & 0xFF;
+    const base = `v${major}.${minor}.${patch}`;
+    return pre === 0xFF ? base : `${base}-pre${pre}`;
+}
+
+async function checkFirmware() {
+    showStatus('', 'Checking for firmware updates...');
+    const data = await apiCall('/firmware/check');
+    if (data) {
+        if (data.current_version !== undefined) {
+            document.getElementById('system-current-version').textContent = formatVersion(data.current_version);
+        }
+
+        if (data.update_available) {
+            document.getElementById('system-available-version').textContent = formatVersion(data.available_version);
+            document.getElementById('system-available-version').style.color = '#28a745';
+            document.getElementById('system-update-btn').disabled = false;
+        } else {
+            document.getElementById('system-available-version').textContent = 'Up to date';
+            document.getElementById('system-available-version').style.color = '#666';
+            document.getElementById('system-update-btn').disabled = true;
+        }
+
+        if (data.error) {
+            document.getElementById('system-available-version').textContent = 'Error';
+            document.getElementById('system-available-version').style.color = '#dc3545';
+        }
+
+        showStatus('success', 'Firmware check complete');
+    }
+}
+
+async function startSystemUpdate() {
+    if (systemUpdateInProgress) {
+        showStatus('error', 'Update already in progress');
+        return;
+    }
+
+    if (!confirm('Are you sure you want to update the system firmware? The device will restart.')) {
+        return;
+    }
+
+    systemUpdateInProgress = true;
+    document.getElementById('system-update-btn').disabled = true;
+    document.getElementById('system-update-progress').style.display = 'block';
+    document.getElementById('system-update-status').style.display = 'block';
+    document.getElementById('system-update-status').textContent = 'Starting update...';
+
+    showStatus('', 'Starting firmware update...');
+
+    const data = await apiCall('/firmware/update', { method: 'POST' });
+    if (data && data.success) {
+        systemUpdateCheckTimer = setInterval(checkSystemUpdateProgress, 2000);
+    } else {
+        systemUpdateInProgress = false;
+        document.getElementById('system-update-btn').disabled = false;
+        document.getElementById('system-update-progress').style.display = 'none';
+        document.getElementById('system-update-status').style.display = 'none';
+        showStatus('error', `Failed to start update: ${data?.error || 'Unknown error'}`);
+    }
+}
+
+async function checkSystemUpdateProgress() {
+    const data = await apiCall('/firmware/status');
+    if (data) {
+        const progress = data.progress || 0;
+        const state = data.state || 'unknown';
+
+        document.getElementById('system-update-progress-fill').style.width = `${progress}%`;
+
+        let statusText = '';
+        switch (state) {
+            case 'updating_panel':
+                statusText = `Updating panel firmware... ${progress}%`;
+                break;
+            case 'updating_mainboard':
+                statusText = 'Updating main board...';
+                break;
+            case 'rebooting':
+                statusText = 'Waiting for reboot...';
+                break;
+            case 'success':
+                statusText = 'Update complete! Device restarting...';
+                systemUpdateInProgress = false;
+                clearInterval(systemUpdateCheckTimer);
+                systemUpdateCheckTimer = null;
+                showStatus('success', 'Firmware update completed!');
+                break;
+            case 'error':
+                statusText = `Failed: ${data.error || 'Unknown error'}`;
+                systemUpdateInProgress = false;
+                clearInterval(systemUpdateCheckTimer);
+                systemUpdateCheckTimer = null;
+                document.getElementById('system-update-btn').disabled = false;
+                showStatus('error', statusText);
+                break;
+            default:
+                statusText = 'Preparing...';
+        }
+
+        document.getElementById('system-update-status').textContent = statusText;
+    }
+}
+// #endif
 
 // File upload variables
 let uploadXHR = null;
@@ -555,6 +1001,8 @@ async function uploadFile() {
 
     // Create FormData (use current browse path as upload destination)
     const uploadPath = currentPath.endsWith('/') ? currentPath + file.name : currentPath + '/' + file.name;
+    const uploadDir = currentPath;
+    const uploadDevice = activeDeviceIndex;
     const formData = new FormData();
     formData.append('fileSize', file.size.toString());
     formData.append('fileData', file, uploadPath);
@@ -608,6 +1056,10 @@ async function uploadFile() {
                         console.error('SHA256 calculation failed:', hashError);
                         showStatus('error', 'Hash calculation failed');
                     }
+
+                    if (currentPath === uploadDir && activeDeviceIndex === uploadDevice) {
+                        await refreshImages();
+                    }
                 } else {
                     throw new Error(response.error || 'Upload failed');
                 }
@@ -653,14 +1105,29 @@ function resetUploadUI() {
     sha256Context = null;
 }
 
+function getConfigFilename() {
+    return productName.toLowerCase() + '.ini';
+}
+
 // Config editor functions
 async function loadConfig() {
     const editor = document.getElementById('config-editor');
+    const configFile = getConfigFilename();
 
     showStatus('', 'Loading configuration...');
 
+    // Update UI to reflect current product config filename
+    const configHeading = document.getElementById('config-heading');
+    if (configHeading) configHeading.textContent = configFile + ' Editor';
+    editor.placeholder = 'Loading ' + configFile + '...';
+
     try {
-        const response = await fetch('/api/download?path=/picoide.ini');
+        const response = await fetch('/api/download?path=/' + configFile);
+        if (response.status === 404) {
+            editor.value = '';
+            editor.placeholder = 'No ' + configFile + ' found — enter configuration below and save to create it.';
+            return;
+        }
         if (!response.ok) {
             throw new Error(`Failed to load config: ${response.status}`);
         }
@@ -691,7 +1158,7 @@ async function saveConfig() {
         // Filename starts with '/' to indicate full path (not relative to /uploads/)
         const formData = new FormData();
         formData.append('fileSize', blob.size.toString());
-        formData.append('fileData', blob, '/picoide.ini');
+        formData.append('fileData', blob, '/' + getConfigFilename());
 
         const response = await fetch('/api/upload', {
             method: 'POST',
@@ -713,12 +1180,195 @@ async function saveConfig() {
     }
 }
 
+// Configure main board firmware UI based on product type
+// #ifdef PRODUCT_BLUESCSI
+function setupMainboardFirmwareUI(product) {
+    const mainboardType = document.getElementById('mainboard-type');
+    const availableSection = document.getElementById('mainboard-available-section');
+    const uploadSection = document.getElementById('mainboard-upload-section');
+    const updateBtn = document.getElementById('mainboard-update-btn');
+
+    if (product === 'BlueSCSI') {
+        if (mainboardType) mainboardType.textContent = 'BlueSCSI';
+        if (availableSection) availableSection.style.display = 'none';
+        if (uploadSection) uploadSection.style.display = 'block';
+        if (updateBtn) updateBtn.textContent = 'Reboot to Apply Update';
+    } else {
+        if (mainboardType) mainboardType.textContent = 'RP2350';
+        if (availableSection) availableSection.style.display = '';
+        if (uploadSection) uploadSection.style.display = 'none';
+        if (updateBtn) updateBtn.textContent = 'Update Main Board';
+    }
+}
+
+// Upload firmware file to main board (BlueSCSI path)
+async function uploadMainboardFirmware() {
+    const fileInput = document.getElementById('mainboard-firmware-file');
+    const file = fileInput.files[0];
+
+    if (!file) {
+        showStatus('error', 'Please select a firmware file');
+        return;
+    }
+
+    // Validate .bin extension
+    if (!file.name.toLowerCase().endsWith('.bin')) {
+        showStatus('error', 'Please select a .bin firmware file');
+        return;
+    }
+
+    const uploadBtn = document.getElementById('mainboard-upload-btn');
+    const progressBar = document.getElementById('mainboard-upload-progress');
+    const progressFill = document.getElementById('mainboard-upload-progress-fill');
+    const statusDiv = document.getElementById('mainboard-upload-status');
+
+    uploadBtn.disabled = true;
+    progressBar.style.display = 'block';
+    statusDiv.style.display = 'block';
+    statusDiv.textContent = 'Uploading firmware...';
+    progressFill.style.width = '0%';
+
+    const formData = new FormData();
+    formData.append('fileSize', file.size.toString());
+    formData.append('fileData', file, file.name);
+
+    const xhr = new XMLHttpRequest();
+
+    xhr.upload.addEventListener('progress', (e) => {
+        if (e.lengthComputable) {
+            const percent = (e.loaded / e.total) * 100;
+            progressFill.style.width = `${percent}%`;
+            statusDiv.textContent = `Uploading firmware... ${Math.round(percent)}%`;
+        }
+    });
+
+    xhr.addEventListener('load', () => {
+        if (xhr.status === 200) {
+            try {
+                const response = JSON.parse(xhr.responseText);
+                if (response.success) {
+                    statusDiv.textContent = 'Firmware uploaded successfully. Click "Reboot to Apply Update" to apply.';
+                    mainboardFirmwarePending = true;
+                    document.getElementById('mainboard-update-btn').disabled = false;
+                    showStatus('success', 'Firmware uploaded successfully');
+                } else {
+                    statusDiv.textContent = `Upload failed: ${response.error || 'Unknown error'}`;
+                    showStatus('error', `Upload failed: ${response.error || 'Unknown error'}`);
+                }
+            } catch (e) {
+                statusDiv.textContent = 'Upload failed: Invalid response';
+                showStatus('error', 'Upload failed: Invalid response');
+            }
+        } else {
+            statusDiv.textContent = `Upload failed: Server returned ${xhr.status}`;
+            showStatus('error', `Upload failed: Server returned ${xhr.status}`);
+        }
+        uploadBtn.disabled = false;
+    });
+
+    xhr.addEventListener('error', () => {
+        statusDiv.textContent = 'Upload failed: Network error';
+        showStatus('error', 'Upload failed: Network error');
+        uploadBtn.disabled = false;
+    });
+
+    xhr.open('POST', '/api/firmware/mainboard/upload');
+    xhr.send(formData);
+}
+
+async function uploadPanelFirmware() {
+    const fileInput = document.getElementById('panel-firmware-file');
+    const file = fileInput.files[0];
+
+    if (!file) {
+        showStatus('error', 'Please select a firmware file');
+        return;
+    }
+
+    // Validate .bin extension
+    if (!file.name.toLowerCase().endsWith('.bin')) {
+        showStatus('error', 'Please select a .bin firmware file');
+        return;
+    }
+
+    if (!confirm('Upload this firmware directly to the front panel? The panel will verify, flash, and restart automatically.')) {
+        return;
+    }
+
+    const uploadBtn = document.getElementById('panel-upload-btn');
+    const progressBar = document.getElementById('panel-upload-progress');
+    const progressFill = document.getElementById('panel-upload-progress-fill');
+    const statusDiv = document.getElementById('panel-upload-status');
+
+    uploadBtn.disabled = true;
+    progressBar.style.display = 'block';
+    statusDiv.style.display = 'block';
+    statusDiv.textContent = 'Uploading firmware...';
+    progressFill.style.width = '0%';
+
+    const formData = new FormData();
+    formData.append('fileSize', file.size.toString());
+    formData.append('fileData', file, file.name);
+
+    const xhr = new XMLHttpRequest();
+
+    xhr.upload.addEventListener('progress', (e) => {
+        if (e.lengthComputable) {
+            const percent = (e.loaded / e.total) * 100;
+            progressFill.style.width = `${percent}%`;
+            statusDiv.textContent = `Uploading firmware... ${Math.round(percent)}%`;
+        }
+    });
+
+    xhr.addEventListener('load', () => {
+        if (xhr.status === 200) {
+            try {
+                const response = JSON.parse(xhr.responseText);
+                if (response.success) {
+                    statusDiv.textContent = 'Firmware uploaded. The panel is rebooting to apply the update...';
+                    showStatus('success', 'Panel firmware uploaded - rebooting');
+                    // The panel reboots into the new image; give it time to come
+                    // back up on WiFi, then reload to reconnect to the new firmware.
+                    setTimeout(() => { window.location.reload(); }, 10000);
+                } else {
+                    statusDiv.textContent = `Upload failed: ${response.error || 'Unknown error'}`;
+                    showStatus('error', `Upload failed: ${response.error || 'Unknown error'}`);
+                    uploadBtn.disabled = false;
+                }
+            } catch (e) {
+                statusDiv.textContent = 'Upload failed: Invalid response';
+                showStatus('error', 'Upload failed: Invalid response');
+                uploadBtn.disabled = false;
+            }
+        } else {
+            statusDiv.textContent = `Upload failed: ${xhr.responseText || 'Server returned ' + xhr.status}`;
+            showStatus('error', `Upload failed: Server returned ${xhr.status}`);
+            uploadBtn.disabled = false;
+        }
+    });
+
+    xhr.addEventListener('error', () => {
+        statusDiv.textContent = 'Upload failed: Network error';
+        showStatus('error', 'Upload failed: Network error');
+        uploadBtn.disabled = false;
+    });
+
+    xhr.open('POST', '/api/firmware/panel/upload');
+    xhr.send(formData);
+}
+// #endif
+
 // Initialize the page (serialize requests to avoid overwhelming ESP32)
 document.addEventListener('DOMContentLoaded', async function() {
     await loadSystemInfo();
+    await refreshDevices();
     await refreshImages();
     await loadWiFiStatus();
+    // #ifdef PRODUCT_BLUESCSI
     await checkAllFirmware();
+    // #else
+    await checkFirmware();
+    // #endif
     await loadConfig();
 
     // Add file input change listener to set file size

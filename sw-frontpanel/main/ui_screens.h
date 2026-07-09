@@ -30,15 +30,20 @@ typedef enum {
     SCREEN_DISC_LIST,
     SCREEN_SETTINGS,
     SCREEN_WIFI_MENU,
+    SCREEN_DISPLAY_SETTINGS,
+    SCREEN_IDLE_MODE,
+    SCREEN_IDLE_TIMEOUT,
+    SCREEN_BLANK_TIMEOUT,
     SCREEN_INFO,
     SCREEN_FIRMWARE_UPDATE,
     SCREEN_FIRMWARE_STATUS,
+    SCREEN_DEVICE_SELECT,
     SCREEN_COUNT  // Sentinel - must be last
 } screen_type_t;
 
 esp_err_t ui_show_splash_screen(display_manager_t *display);
 esp_err_t ui_update_splash_progress(display_manager_t *display, const char *step_text, uint8_t progress);
-esp_err_t ui_update_splash_versions(display_manager_t *display, const char *panel_version, const char *main_version);
+esp_err_t ui_update_splash_version(display_manager_t *display, const char *version);
 esp_err_t ui_draw_menu(display_manager_t *display, menu_t *menu);
 esp_err_t ui_draw_disc_list(display_manager_t *display, menu_t *menu);
 esp_err_t ui_draw_status_bar(display_manager_t *display, const char *status);
@@ -47,13 +52,21 @@ esp_err_t ui_draw_firmware_update(display_manager_t *display, const char *status
 esp_err_t ui_draw_status_screen(display_manager_t *display, const char *disc_name,
                                const loaded_image_status_t *image_status,
                                const playback_status_t *playback_status,
-                               bool title_changed);
+                               bool title_changed,
+                               const char *device_label,
+                               bool eject_in_progress);
 bool ui_animate_status_screen(display_manager_t *display);
 bool ui_menu_needs_animation(menu_t *menu);
 bool ui_animate_menu(display_manager_t *display, menu_t *menu);
+#ifdef CONFIG_PRODUCT_BLUESCSI
 esp_err_t ui_draw_firmware_status(display_manager_t *display,
                                   uint32_t panel_current_ver, uint32_t panel_avail_ver, bool panel_update_avail,
                                   uint32_t main_current_ver, uint32_t main_avail_ver, bool main_update_avail,
                                   uint8_t selection);
+#else
+esp_err_t ui_draw_firmware_status(display_manager_t *display,
+                                  uint32_t current_ver, uint32_t avail_ver,
+                                  bool update_avail);
+#endif
 
 #endif

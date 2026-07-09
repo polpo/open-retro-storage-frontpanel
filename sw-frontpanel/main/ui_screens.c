@@ -15,8 +15,9 @@
 //  with this program; if not, see <https://www.gnu.org/licenses/>.
 
 #include "ui_screens.h"
+#include "fw_version.h"
+#include "sdkconfig.h"
 #include "esp_log.h"
-#include "esp_app_desc.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <string.h>
@@ -140,29 +141,72 @@ static bool draw_text_scrolling(display_manager_t *display, uint8_t x, uint8_t y
     return true;
 }
 
-// Logo bitmap from original code
-static const uint8_t picoide_logo[] = {
-  0xF0, 0xFF, 0x0F, 0x7E, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x3F, 0xFC, 
-  0xFF, 0x80, 0xFF, 0xFF, 0xF0, 0xFF, 0x1F, 0x7E, 0x00, 0x00, 0x00, 0x00, 
-  0x00, 0x80, 0x3F, 0xFE, 0xFF, 0xC3, 0xFF, 0x7F, 0xF0, 0x83, 0x1F, 0x00, 
-  0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x1F, 0x7E, 0xF8, 0xC3, 0x0F, 0x00, 
-  0xF8, 0x81, 0x1F, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x1F, 0x7E, 
-  0xF0, 0xC7, 0x0F, 0x00, 0xF8, 0xC1, 0x1F, 0x3F, 0xFC, 0xFF, 0x87, 0xFF, 
-  0xFF, 0x81, 0x1F, 0x7F, 0xF0, 0xE7, 0x0F, 0x00, 0xF8, 0xC1, 0x8F, 0x3F, 
-  0xFE, 0xFF, 0xC3, 0xFF, 0xFF, 0xC3, 0x1F, 0x3F, 0xF0, 0xE3, 0x07, 0x00, 
-  0xFC, 0xC1, 0x8F, 0x1F, 0x7F, 0x00, 0xE0, 0x07, 0xF0, 0xC7, 0x0F, 0x3F, 
-  0xF0, 0xF3, 0x0F, 0x00, 0xFC, 0xF1, 0x87, 0x1F, 0x3F, 0x00, 0xF0, 0x07, 
-  0xF0, 0xC7, 0x0F, 0x3F, 0xF0, 0xFB, 0xFF, 0x00, 0xFC, 0xFE, 0x83, 0x1F, 
-  0x3F, 0x00, 0xF0, 0x03, 0xF0, 0xC7, 0x8F, 0x3F, 0xF8, 0xF3, 0x7F, 0x00, 
-  0xFC, 0x00, 0xC0, 0x9F, 0x1F, 0x00, 0xF0, 0x03, 0xF0, 0xE3, 0x87, 0x1F, 
-  0xF8, 0xF1, 0x03, 0x00, 0xFE, 0x00, 0xC0, 0x8F, 0x1F, 0x00, 0xF8, 0x03, 
-  0xF0, 0xE3, 0x87, 0x1F, 0xF8, 0xF1, 0x03, 0x00, 0x7E, 0x00, 0xC0, 0x8F, 
-  0x1F, 0x00, 0xF8, 0x03, 0xF0, 0xE3, 0x87, 0x1F, 0xFC, 0xF1, 0x03, 0x00, 
-  0x7E, 0x00, 0xC0, 0x8F, 0x3F, 0x00, 0xF0, 0x07, 0xF8, 0xF1, 0xC7, 0x1F, 
-  0xFE, 0xF8, 0x03, 0x00, 0x7F, 0x00, 0xE0, 0x07, 0xFF, 0xFF, 0xF0, 0xFF, 
-  0xFF, 0xF0, 0xC3, 0xFF, 0x7F, 0xF8, 0xFF, 0x0F, 0x3F, 0x00, 0xE0, 0x07, 
+// Logo bitmaps - conditionally compiled based on product
+#ifdef CONFIG_PRODUCT_BLUESCSI
+// BlueSCSI text logo (128x24)
+#define LOGO_WIDTH 128
+#define LOGO_HEIGHT 24
+static const uint8_t product_logo[] = {
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xC0, 0x01, 0x00, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0xFF, 0xC0,
+  0x01, 0x00, 0x00, 0x00, 0xF8, 0x03, 0xF8, 0x01, 0x7F, 0xE0, 0x00, 0x00,
+  0x00, 0x80, 0xFF, 0xC3, 0x01, 0x00, 0x00, 0x00, 0xFE, 0x07, 0xFE, 0x87,
+  0xFF, 0xE0, 0x00, 0x00, 0x00, 0x80, 0xFF, 0xC3, 0x01, 0x00, 0x00, 0x00,
+  0xFE, 0x07, 0xFF, 0xC7, 0xFF, 0xE0, 0x00, 0x00, 0x00, 0x80, 0xC7, 0xC3,
+  0xE1, 0xF0, 0xE0, 0x07, 0x0F, 0x80, 0x0F, 0xC4, 0x01, 0xE0, 0x00, 0x00,
+  0x00, 0x80, 0xC7, 0xC3, 0xE1, 0xF0, 0xF0, 0x0F, 0x0F, 0x80, 0x07, 0xC0,
+  0x01, 0xE0, 0x00, 0x00, 0x00, 0x80, 0xFF, 0xC3, 0xE1, 0xF0, 0x78, 0x1E,
+  0x3E, 0xC0, 0x03, 0xC0, 0x0F, 0xE0, 0x00, 0x00, 0x00, 0x80, 0xFF, 0xC1,
+  0xE1, 0xF0, 0x38, 0x3C, 0xFE, 0xC3, 0x03, 0x80, 0x7F, 0xE0, 0x00, 0x00,
+  0x00, 0x80, 0xFF, 0xC3, 0xE1, 0xF0, 0xFC, 0x3F, 0xF8, 0xC7, 0x03, 0x00,
+  0xFF, 0xE1, 0x00, 0x00, 0x00, 0x80, 0x87, 0xC7, 0xE1, 0xF0, 0xFC, 0x3F,
+  0x80, 0xCF, 0x03, 0x00, 0xF0, 0xE1, 0x00, 0x00, 0x00, 0x80, 0x87, 0xC7,
+  0xE1, 0xF0, 0x3C, 0x00, 0x00, 0x8F, 0x07, 0x00, 0xC0, 0xE1, 0x00, 0x00,
+  0x00, 0x80, 0x87, 0xC7, 0xE1, 0xF0, 0x38, 0x00, 0x02, 0x8F, 0x0F, 0x44,
+  0xE0, 0xE1, 0x00, 0x00, 0x00, 0x80, 0xFF, 0xC7, 0xE1, 0xFF, 0xF8, 0x1C,
+  0xFF, 0x07, 0xFF, 0xC7, 0xFF, 0xE1, 0x00, 0x00, 0x00, 0x80, 0xFF, 0xC3,
+  0xE1, 0xFF, 0xF0, 0x1F, 0xFF, 0x07, 0xFE, 0xC7, 0xFF, 0xE0, 0x00, 0x00,
+  0x00, 0x80, 0xFF, 0xC0, 0xC1, 0xF7, 0xE0, 0x0F, 0xFC, 0x01, 0xF8, 0x01,
+  0x7F, 0xE0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+};
+#else
+// PicoIDE logo (128x15)
+#define LOGO_WIDTH 128
+#define LOGO_HEIGHT 15
+static const uint8_t product_logo[] = {
+  0xF0, 0xFF, 0x0F, 0x7E, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x3F, 0xFC,
+  0xFF, 0x80, 0xFF, 0xFF, 0xF0, 0xFF, 0x1F, 0x7E, 0x00, 0x00, 0x00, 0x00,
+  0x00, 0x80, 0x3F, 0xFE, 0xFF, 0xC3, 0xFF, 0x7F, 0xF0, 0x83, 0x1F, 0x00,
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x1F, 0x7E, 0xF8, 0xC3, 0x0F, 0x00,
+  0xF8, 0x81, 0x1F, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x1F, 0x7E,
+  0xF0, 0xC7, 0x0F, 0x00, 0xF8, 0xC1, 0x1F, 0x3F, 0xFC, 0xFF, 0x87, 0xFF,
+  0xFF, 0x81, 0x1F, 0x7F, 0xF0, 0xE7, 0x0F, 0x00, 0xF8, 0xC1, 0x8F, 0x3F,
+  0xFE, 0xFF, 0xC3, 0xFF, 0xFF, 0xC3, 0x1F, 0x3F, 0xF0, 0xE3, 0x07, 0x00,
+  0xFC, 0xC1, 0x8F, 0x1F, 0x7F, 0x00, 0xE0, 0x07, 0xF0, 0xC7, 0x0F, 0x3F,
+  0xF0, 0xF3, 0x0F, 0x00, 0xFC, 0xF1, 0x87, 0x1F, 0x3F, 0x00, 0xF0, 0x07,
+  0xF0, 0xC7, 0x0F, 0x3F, 0xF0, 0xFB, 0xFF, 0x00, 0xFC, 0xFE, 0x83, 0x1F,
+  0x3F, 0x00, 0xF0, 0x03, 0xF0, 0xC7, 0x8F, 0x3F, 0xF8, 0xF3, 0x7F, 0x00,
+  0xFC, 0x00, 0xC0, 0x9F, 0x1F, 0x00, 0xF0, 0x03, 0xF0, 0xE3, 0x87, 0x1F,
+  0xF8, 0xF1, 0x03, 0x00, 0xFE, 0x00, 0xC0, 0x8F, 0x1F, 0x00, 0xF8, 0x03,
+  0xF0, 0xE3, 0x87, 0x1F, 0xF8, 0xF1, 0x03, 0x00, 0x7E, 0x00, 0xC0, 0x8F,
+  0x1F, 0x00, 0xF8, 0x03, 0xF0, 0xE3, 0x87, 0x1F, 0xFC, 0xF1, 0x03, 0x00,
+  0x7E, 0x00, 0xC0, 0x8F, 0x3F, 0x00, 0xF0, 0x07, 0xF8, 0xF1, 0xC7, 0x1F,
+  0xFE, 0xF8, 0x03, 0x00, 0x7F, 0x00, 0xE0, 0x07, 0xFF, 0xFF, 0xF0, 0xFF,
+  0xFF, 0xF0, 0xC3, 0xFF, 0x7F, 0xF8, 0xFF, 0x0F, 0x3F, 0x00, 0xE0, 0x07,
   0xFE, 0xFF, 0xC0, 0xFF, 0x7F, 0xF0, 0xC3, 0xFF, 0x3F, 0xF8, 0xFF, 0x0F
 };
+#endif
 
 
 
@@ -172,14 +216,7 @@ esp_err_t ui_show_splash_screen(display_manager_t *display) {
     }
 
     display_manager_clear(display);
-    display_manager_draw_bitmap(display, 0, 0, 128, 15, picoide_logo);
-
-    display_manager_set_font(display, u8g2_font_amstrad_cpc_extended_8f);
-
-    const esp_app_desc_t* app_desc = esp_app_get_description();
-    char version_text[64];
-    snprintf(version_text, sizeof(version_text), "FW v%s", app_desc->version);
-    display_manager_draw_text(display, 30, 32, version_text);
+    display_manager_draw_bitmap(display, 0, 0, LOGO_WIDTH, LOGO_HEIGHT, product_logo);
 
     display_manager_draw_frame(display, 20, 40, 88, 8);
 
@@ -209,8 +246,8 @@ esp_err_t ui_update_splash_progress(display_manager_t *display, const char *step
     return ESP_OK;
 }
 
-esp_err_t ui_update_splash_versions(display_manager_t *display, const char *panel_version, const char *main_version) {
-    if (!display) {
+esp_err_t ui_update_splash_version(display_manager_t *display, const char *version) {
+    if (!display || !version) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -222,11 +259,13 @@ esp_err_t ui_update_splash_versions(display_manager_t *display, const char *pane
     display_manager_set_font(display, u8g2_font_6x10_tf);
 
     char version_text[32];
-    snprintf(version_text, sizeof(version_text), "Panel: v%s", panel_version);
-    display_manager_draw_text(display, 22, 26, version_text);
+    snprintf(version_text, sizeof(version_text), "FW v%s", version);
 
-    snprintf(version_text, sizeof(version_text), "Main:  %s%s", main_version ? "v" : "", main_version ? main_version : "...");
-    display_manager_draw_text(display, 22, 36, version_text);
+    // Center horizontally from the rendered width so a longer "-preN"
+    // prerelease suffix stays centered instead of running off the edge
+    uint16_t text_width = u8g2_GetStrWidth(&display->u8g2, version_text);
+    uint8_t x = text_width < 128 ? (128 - text_width) / 2 : 0;
+    display_manager_draw_text(display, x, 32, version_text);
 
     display_manager_request_update(display);
 
@@ -474,21 +513,23 @@ esp_err_t ui_draw_firmware_update(display_manager_t *display, const char *status
 
     display_manager_request_update(display);
 
+    // FW updates count as activity — keep the display awake so dim/screensaver
+    // don't engage over the progress UI.
+    display_manager_wake(display);
+
     return ESP_OK;
 }
 
-// Helper to format version number to string
-static void format_version_string(char *buf, size_t buf_size, uint32_t version) {
-    uint8_t major = (version >> 16) & 0xFF;
-    uint8_t minor = (version >> 8) & 0xFF;
-    uint8_t patch = version & 0xFF;
-    snprintf(buf, buf_size, "%d.%d.%d", major, minor, patch);
-}
-
+#ifdef CONFIG_PRODUCT_BLUESCSI
 esp_err_t ui_draw_firmware_status(display_manager_t *display,
                                   uint32_t panel_current_ver, uint32_t panel_avail_ver, bool panel_update_avail,
                                   uint32_t main_current_ver, uint32_t main_avail_ver, bool main_update_avail,
                                   uint8_t selection) {
+#else
+esp_err_t ui_draw_firmware_status(display_manager_t *display,
+                                  uint32_t current_ver, uint32_t avail_ver,
+                                  bool update_avail) {
+#endif
     if (!display) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -499,10 +540,12 @@ esp_err_t ui_draw_firmware_status(display_manager_t *display,
     display_manager_set_font(display, u8g2_font_6x10_tf);
     display_manager_draw_box(display, 0, 0, 128, 12);
     display_manager_set_draw_color(display, 0);
-    display_manager_draw_text(display, 2, 10, "Firmware Updates");
+    display_manager_draw_text(display, 2, 10, "Firmware Update");
     display_manager_set_draw_color(display, 1);
 
-    char version_str[16];
+    char version_str[20];
+
+#ifdef CONFIG_PRODUCT_BLUESCSI
     int y = 24;
     const int row_height = 12;
 
@@ -512,17 +555,17 @@ esp_err_t ui_draw_firmware_status(display_manager_t *display,
         display_manager_set_draw_color(display, 0);
     }
     display_manager_draw_text(display, 2, y, "Panel:");
-    format_version_string(version_str, sizeof(version_str), panel_current_ver);
+    fw_version_format_panel(version_str, sizeof(version_str), panel_current_ver);
     display_manager_draw_text(display, 44, y, version_str);
     if (panel_update_avail) {
         display_manager_draw_text(display, 79, y, "->");
-        format_version_string(version_str, sizeof(version_str), panel_avail_ver);
+        fw_version_format_panel(version_str, sizeof(version_str), panel_avail_ver);
         display_manager_draw_text(display, 94, y, version_str);
     }
     if (selection == 0) {
         display_manager_set_draw_color(display, 1);
     }
-
+    
     y += row_height;
 
     // Main board firmware row
@@ -531,11 +574,11 @@ esp_err_t ui_draw_firmware_status(display_manager_t *display,
         display_manager_set_draw_color(display, 0);
     }
     display_manager_draw_text(display, 2, y, "Main:");
-    format_version_string(version_str, sizeof(version_str), main_current_ver);
+    fw_version_format_mainboard(version_str, sizeof(version_str), main_current_ver);
     display_manager_draw_text(display, 44, y, version_str);
     if (main_update_avail) {
         display_manager_draw_text(display, 79, y, "->");
-        format_version_string(version_str, sizeof(version_str), main_avail_ver);
+        fw_version_format_mainboard(version_str, sizeof(version_str), main_avail_ver);
         display_manager_draw_text(display, 94, y, version_str);
     }
     if (selection == 1) {
@@ -551,6 +594,28 @@ esp_err_t ui_draw_firmware_status(display_manager_t *display,
     } else {
         display_manager_draw_text(display, 0, 62, "No updates  [<] Back");
     }
+#else
+    // System version (main board version is user-facing)
+    display_manager_draw_text(display, 2, 26, "Version:");
+    fw_version_format_mainboard(version_str, sizeof(version_str), current_ver);
+    display_manager_draw_text(display, 56, 26, version_str);
+
+    // Available version
+    if (update_avail) {
+        display_manager_draw_text(display, 2, 40, "Available:");
+        fw_version_format_mainboard(version_str, sizeof(version_str), avail_ver);
+        display_manager_draw_text(display, 68, 40, version_str);
+    } else {
+        display_manager_draw_text(display, 2, 40, "Up to date");
+    }
+
+    // Instructions at bottom
+    if (update_avail) {
+        display_manager_draw_text(display, 0, 62, "[>] Update  [<] Back");
+    } else {
+        display_manager_draw_text(display, 0, 62, "[<] Back");
+    }
+#endif
 
     display_manager_request_update(display);
 
@@ -600,7 +665,9 @@ static char status_title_text[64] = "";
 esp_err_t ui_draw_status_screen(display_manager_t *display, const char *disc_name,
                                const loaded_image_status_t *image_status,
                                const playback_status_t *playback_status,
-                               bool title_changed) {
+                               bool title_changed,
+                               const char *device_label,
+                               bool eject_in_progress) {
     if (!display) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -615,8 +682,13 @@ esp_err_t ui_draw_status_screen(display_manager_t *display, const char *disc_nam
     display_manager_set_draw_color(display, 0);
 
     if (has_disc && image_status && image_status->directory_path[0]) {
-        // Get just the directory name
-        const char *dir_name = get_directory_name(image_status->directory_path);
+        // Determine left-side label: device label (multi-device) or directory name
+        const char *left_label;
+        if (device_label && device_label[0]) {
+            left_label = device_label;
+        } else {
+            left_label = get_directory_name(image_status->directory_path);
+        }
 
         // Calculate position indicator width if we have image count
         char pos_indicator[16] = "";
@@ -633,30 +705,40 @@ esp_err_t ui_draw_status_screen(display_manager_t *display, const char *disc_nam
             display_manager_draw_text(display, 126 - pos_indicator_width, 8, pos_indicator);
         }
 
-        // Draw directory name on the left (truncate if needed)
+        // Draw left label (truncate if needed)
         int available_width = 124 - pos_indicator_width - 4;  // Leave margin
-        int dir_name_width = u8g2_GetStrWidth(&display->u8g2, dir_name);
+        int label_width = u8g2_GetStrWidth(&display->u8g2, left_label);
 
-        if (dir_name_width <= available_width) {
-            display_manager_draw_text(display, 2, 8, dir_name);
+        if (label_width <= available_width) {
+            display_manager_draw_text(display, 2, 8, left_label);
         } else {
             // Truncate with ellipsis
             char truncated[32];
-            int len = strlen(dir_name);
+            int len = strlen(left_label);
             int max_chars = (available_width / 6) - 2;  // Approx 6px per char, minus "..."
             if (max_chars > 0 && max_chars < len) {
-                snprintf(truncated, sizeof(truncated), "%.*s...", max_chars, dir_name);
+                snprintf(truncated, sizeof(truncated), "%.*s...", max_chars, left_label);
                 display_manager_draw_text(display, 2, 8, truncated);
             } else {
-                display_manager_draw_text(display, 2, 8, dir_name);
+                display_manager_draw_text(display, 2, 8, left_label);
             }
         }
+    } else if (device_label && device_label[0]) {
+        // No disc but multi-device: still show device label
+        display_manager_draw_text(display, 2, 8, device_label);
     }
 
     display_manager_set_draw_color(display, 1);
 
     // === CENTER: Large image name with scrolling (regular text) ===
-    const char *title = has_disc ? disc_name : "No Disc Loaded";
+#ifdef CONFIG_PRODUCT_BLUESCSI
+    const char *title = has_disc ? disc_name : "No Image Loaded";
+#else
+    // Prefer any supplied disc_name even when disc_inserted is false: the main
+    // board uses this field to surface SD error strings like "No SD card" or
+    // "Wrong-mode card" when no image is mountable
+    const char *title = (disc_name && disc_name[0]) ? disc_name : "No Image Loaded";
+#endif
 
     display_manager_set_font(display, u8g2_font_helvR12_tf);
 
@@ -669,6 +751,20 @@ esp_err_t ui_draw_status_screen(display_manager_t *display, const char *disc_nam
 
     // Draw image name
     draw_text_scrolling(display, 2, 32, status_title_text, 124, &status_title_scroll_state);
+
+    // Optical tray open (disc ejected): show a clear banner instead of the normal
+    // playback area. The title above still shows the disc queued for next insert,
+    // so the user knows to load another disc or press eject again to close.
+    if (playback_status && playback_status->tray_open) {
+        display_manager_set_font(display, u8g2_font_6x10_tf);
+        display_manager_draw_box(display, 0, 42, 128, 22);
+        display_manager_set_draw_color(display, 0);
+        display_manager_draw_text(display, 2, 52, "TRAY OPEN");
+        display_manager_draw_text(display, 2, 62, "Load CD or close");
+        display_manager_set_draw_color(display, 1);
+        display_manager_request_update(display);
+        return ESP_OK;
+    }
 
     // If no disc inserted, we're done
     if (!has_disc) {
@@ -687,7 +783,14 @@ esp_err_t ui_draw_status_screen(display_manager_t *display, const char *disc_nam
     } else {
         type_icon = 0xe0ab;  // Disc icon
     }
+    if (eject_in_progress) {
+        display_manager_draw_box(display, 0, y - 12, 14, 14);
+        display_manager_set_draw_color(display, 0);
+    }
     display_manager_draw_glyph(display, 2, y, type_icon);
+    if (eject_in_progress) {
+        display_manager_set_draw_color(display, 1);
+    }
 
     // For audio/mixed discs, show playback status
     if (playback_status->disc_type == PANEL_DISC_TYPE_AUDIO ||
@@ -745,7 +848,7 @@ esp_err_t ui_draw_status_screen(display_manager_t *display, const char *disc_nam
                      (unsigned long)size_mb);
             display_manager_draw_text(display, 16, y, chs_line);
         } else {
-            display_manager_draw_text(display, 16, y, "IDE Hard Disk");
+            display_manager_draw_text(display, 16, y, "Hard Disk");
         }
     } else {
         // Data CD-ROM

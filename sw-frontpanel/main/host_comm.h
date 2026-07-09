@@ -49,18 +49,21 @@ esp_err_t host_comm_deinit(host_comm_t *comm);
 // Directory browsing functions
 esp_err_t host_comm_get_entry_count(host_comm_t *comm, uint32_t *count);
 esp_err_t host_comm_get_entry_info(host_comm_t *comm, uint32_t index, dir_entry_info_t *info);
-esp_err_t host_comm_select_entry(host_comm_t *comm, int32_t index);  // -1 = parent dir, >=0 = select entry
+esp_err_t host_comm_select_entry(host_comm_t *comm, int32_t index, uint16_t device_index);  // -1 = parent dir, >=0 = select entry
 esp_err_t host_comm_get_current_path(host_comm_t *comm, char *path, size_t max_len);
 
-// Image management functions
-esp_err_t host_comm_select_prev_image(host_comm_t *comm);
-esp_err_t host_comm_select_next_image(host_comm_t *comm);
-esp_err_t host_comm_eject_image(host_comm_t *comm);
-esp_err_t host_comm_get_loaded_image_status(host_comm_t *comm, loaded_image_status_t *status);
+// Image management functions (device_index selects target device, 0 for default/single device)
+esp_err_t host_comm_select_prev_image(host_comm_t *comm, uint16_t device_index);
+esp_err_t host_comm_select_next_image(host_comm_t *comm, uint16_t device_index);
+esp_err_t host_comm_eject_image(host_comm_t *comm, uint16_t device_index);
+esp_err_t host_comm_get_loaded_image_status(host_comm_t *comm, uint16_t device_index, loaded_image_status_t *status);
 
-// Status functions
-esp_err_t host_comm_get_device_status(host_comm_t *comm, uint8_t *status);
-esp_err_t host_comm_get_playback_status(host_comm_t *comm, playback_status_t *status);
+// Status functions (device_index selects target device, 0 for default/single device)
+esp_err_t host_comm_get_device_status(host_comm_t *comm, uint16_t device_index, uint8_t *status);
+esp_err_t host_comm_get_playback_status(host_comm_t *comm, uint16_t device_index, playback_status_t *status);
+
+// Device list
+esp_err_t host_comm_get_device_list(host_comm_t *comm, device_list_response_t *response, size_t max_size);
 
 // Firmware update functions
 esp_err_t host_comm_check_firmware(host_comm_t *comm, panel_firmware_info_t *info);
@@ -76,12 +79,26 @@ esp_err_t host_comm_finish_file_upload(host_comm_t *comm, uint8_t *result_code, 
 esp_err_t host_comm_start_file_download(host_comm_t *comm, const char *filename, uint32_t *file_size);
 esp_err_t host_comm_read_file_chunk(host_comm_t *comm, uint32_t chunk_index, uint8_t *buffer, size_t *bytes_read);
 
+// File delete/rename (paths are full paths, e.g., "/dir/image.iso"). On ESP_OK,
+// *result_code holds the PANEL_DELETE_*/PANEL_RENAME_* code from the main board.
+esp_err_t host_comm_delete_file(host_comm_t *comm, const char *path, uint8_t *result_code);
+esp_err_t host_comm_rename_file(host_comm_t *comm, const char *old_path,
+                                const char *new_path, uint8_t *result_code);
+
+// Create an empty file / a directory (path is full path). On ESP_OK, *result_code
+// holds the PANEL_TOUCH_*/PANEL_MKDIR_* code from the main board.
+esp_err_t host_comm_touch_file(host_comm_t *comm, const char *path, uint8_t *result_code);
+esp_err_t host_comm_mkdir(host_comm_t *comm, const char *path, uint8_t *result_code);
+
 // RP2350 (main board) firmware functions
 esp_err_t host_comm_get_rp2350_fw_status(host_comm_t *comm, rp2350_fw_status_t *status);
 esp_err_t host_comm_start_rp2350_update(host_comm_t *comm);
 
 // Command status polling (immediate read, doesn't interfere with running commands)
 esp_err_t host_comm_get_command_status(host_comm_t *comm, panel_command_status_t *status);
+
+// Reset host async state (clears any pending operation)
+esp_err_t host_comm_reset(host_comm_t *comm);
 
 const char* host_comm_get_transport_name(host_comm_t *comm);
 

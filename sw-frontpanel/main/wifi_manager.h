@@ -22,6 +22,7 @@
 #include "esp_err.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
+#include "sdkconfig.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -29,14 +30,28 @@ extern "C" {
 
 #define WIFI_MANAGER_SSID_MAX_LEN 32
 #define WIFI_MANAGER_PASSWORD_MAX_LEN 64
+
+#ifdef CONFIG_PRODUCT_BLUESCSI
+#define WIFI_MANAGER_AP_SSID "BlueSCSI-FrontPanel"
+#define WIFI_MANAGER_MDNS_HOSTNAME "bluescsi"
+#define WIFI_MANAGER_MDNS_INSTANCE "BlueSCSI Front Panel"
+#define PRODUCT_NAME_FULL "BlueSCSI Front Panel"
+#define PRODUCT_NAME_SHORT "BlueSCSI"
+#define PRODUCT_LOGO_URL "/logo.svg"
+#else
 #define WIFI_MANAGER_AP_SSID "PicoIDE-FrontPanel"
+#define WIFI_MANAGER_MDNS_HOSTNAME "picoide"
+#define WIFI_MANAGER_MDNS_INSTANCE "PicoIDE Front Panel"
+#define PRODUCT_NAME_FULL "PicoIDE Front Panel"
+#define PRODUCT_NAME_SHORT "PicoIDE"
+#define PRODUCT_LOGO_URL "/logo.svg"
+#endif
+
 #define WIFI_MANAGER_AP_PASSWORD "frontpanel123"
 #define WIFI_MANAGER_AP_CHANNEL 1
 #define WIFI_MANAGER_AP_MAX_CONNECTIONS 4
 #define WIFI_MANAGER_CONNECTION_RETRY_MAX 5
 #define WIFI_MANAGER_CONNECTION_RETRY_DELAY_MS 1000
-#define WIFI_MANAGER_MDNS_HOSTNAME "picoide"
-#define WIFI_MANAGER_MDNS_INSTANCE "PicoIDE Front Panel"
 
 typedef enum {
     WIFI_MANAGER_STATE_IDLE,

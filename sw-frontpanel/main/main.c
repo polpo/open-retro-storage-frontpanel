@@ -35,10 +35,27 @@
 #include "interface_common.h"
 #include "esp_netif_ip_addr.h"
 #include "ota_manager.h"
+#include "fw_version.h"
 #include "driver/gpio.h"
 #include "freertos/queue.h"
+#include "nvs_flash.h"
 
 static const char *TAG = "main";
+
+// Main board may be held in reset for several seconds after power-on. Wait
+// this long for it at startup before booting in degraded mode; a background
+// probe keeps trying afterward so the panel recovers whenever it appears.
+#define HOST_COMM_STARTUP_TIMEOUT_MS  20000
+#define HOST_COMM_RETRY_INTERVAL_MS   500
+
+// OLED startup recovery. When the panel is powered only from the host (no USB),
+// the +3V3 rail ramps slowly enough that the display's hardware reset (LM809)
+// can release — and its +9V VPP boost stabilize — after display_manager_init()
+// has already run its one-shot init, leaving the OLED dark. Re-assert the init
+// a few times over the first few seconds; harmless once the panel is up.
+#define DISPLAY_STARTUP_REINIT_FIRST_MS     2000
+#define DISPLAY_STARTUP_REINIT_INTERVAL_MS  500
+#define DISPLAY_STARTUP_REINIT_COUNT        3
 
 // Global instances
 static display_manager_t display;
@@ -46,6 +63,11 @@ static menu_t main_menu;
 static menu_t disc_menu;
 static menu_t wifi_menu;
 static menu_t settings_menu;
+static menu_t device_menu;
+static menu_t display_settings_menu;  // Parent: Idle Mode / Idle Timeout / Blank Timeout
+static menu_t idle_mode_menu;
+static menu_t idle_timeout_menu;
+static menu_t blank_timeout_menu;
 static menu_t *active_menu = NULL;  // Pointer to currently displayed menu
 static screen_type_t info_return_screen = SCREEN_MAIN_MENU;  // Screen to return to from SCREEN_INFO
 
@@ -55,8 +77,14 @@ static menu_t* screen_menus[SCREEN_COUNT] = {
     [SCREEN_DISC_LIST] = &disc_menu,
     [SCREEN_SETTINGS] = &settings_menu,
     [SCREEN_WIFI_MENU] = &wifi_menu,
+    [SCREEN_DEVICE_SELECT] = &device_menu,
+    [SCREEN_DISPLAY_SETTINGS] = &display_settings_menu,
+    [SCREEN_IDLE_MODE] = &idle_mode_menu,
+    [SCREEN_IDLE_TIMEOUT] = &idle_timeout_menu,
+    [SCREEN_BLANK_TIMEOUT] = &blank_timeout_menu,
 };
 static host_comm_t host_comm;
+static bool host_comm_ready = false;  // True once the transport layer is up (host_comm_init succeeded)
 static wifi_manager_t wifi_manager;
 static web_server_t web_server;
 static interface_context_t interface_ctx;
@@ -65,7 +93,7 @@ static ota_manager_t ota_manager;
 
 // Dynamic disc list - populated from I2C communication
 static bool disc_list_loaded = false;
-static char current_disc_name[64] = "No disc loaded";
+static char current_disc_name[64] = "";
 static playback_status_t current_playback_status = {0};
 static bool disc_name_changed = true;  // Flag to signal title changed (resets scroll)
 static bool status_needs_redraw = true;  // Flag to signal status screen needs redraw
@@ -74,35 +102,120 @@ static loaded_image_status_t current_image_status = {0};  // Full image status i
 // Device type (IDE vs ATAPI) - affects available operations
 static uint8_t current_device_type = PANEL_DEVICE_TYPE_ATAPI;  // Default to ATAPI
 
+// Multi-device support
+static uint8_t device_count = 0;
+static uint16_t active_device_index = 0;
+static uint8_t device_list_buffer[sizeof(device_list_response_t) + CONFIG_MAX_DEVICES * sizeof(device_summary_t)];
+static device_list_response_t *device_list = (device_list_response_t *)device_list_buffer;
+static bool device_list_valid = false;
+
+// Latest PANEL_CMD_GET_DEVICE_STATUS reply, refreshed alongside playback
+// status. Drives the LED color so SD error states (NO_CARD, WRONG_MODE) get
+// distinct indication beyond just "no disc."
+static uint8_t current_device_status = PANEL_DEVICE_STATUS_NO_IMAGE;
+
 // Firmware status tracking
 static rp2350_fw_status_t rp2350_fw_status = {0};
 static panel_firmware_info_t panel_fw_info = {0};
 static bool fw_status_valid = false;
+#ifdef CONFIG_PRODUCT_BLUESCSI
 static uint8_t fw_screen_selection = 0;  // 0=Panel, 1=Main board
+#endif
 
 // Forward declarations
 static esp_err_t refresh_directory_list(void);
 static void refresh_playback_status(void);
 static void refresh_device_type(void);
+static void refresh_device_list(void);
+static void populate_device_menu(void);
+static const char* get_active_device_label(void);
 static void check_firmware_status(void);
 static void draw_firmware_status_screen(void);
+#ifdef CONFIG_PRODUCT_BLUESCSI
 static void trigger_panel_update(void);
 static void trigger_mainboard_update(void);
+#else
+static void trigger_system_update(void);
+#endif
+static void reconnect_to_host(void);
+static bool handle_comm_error(esp_err_t err);
+static void show_info_screen(const char *title, const char *body);
+static void redraw_current_screen(void);
+
+// SCREEN_INFO state. Title is always a string literal (caller-owned). Body is
+// often built on the caller's stack, so we copy it so the screen survives
+// being re-rendered later (e.g. after the screensaver clears the buffer).
+static const char *info_screen_title = "";
+static char info_screen_body[256] = "";
+
+// Cached state used to refresh the LED both on activity events and on display
+// off-state transitions so breathing can pick up the current color
+static activity_event_t last_activity_event = {0};
+static bool display_is_off = false;
+
+// Computes the LED color implied by current state. Returns true via the
+// out-param when the color represents in-progress disc activity, which
+// suppresses the slow breathe so reads/writes remain clearly visible
+static rgb_color_t compute_led_state_color(bool *is_activity) {
+    *is_activity = false;
+    // SD-card error states win over the normal disc-inserted check so the
+    // user sees a clearly different color than the generic "no image" idle
+    switch (current_device_status) {
+        case PANEL_DEVICE_STATUS_NO_CARD:
+            return COLOR_RED;
+        case PANEL_DEVICE_STATUS_WRONG_MODE:
+            return COLOR_MAGENTA;
+        default:
+            break;
+    }
+    if (!current_playback_status.disc_inserted) {
+        return COLOR_ORANGE;  // No image loaded
+    }
+    if (last_activity_event.pin_state) {
+        *is_activity = true;
+        return COLOR_YELLOW;  // Activity
+    }
+    return COLOR_CYAN;        // Idle with image
+}
+
+// Re-applies the LED color and breathe state from current cached state.
+// Safe to call whenever device status, playback status, last activity event,
+// or display-off state changes
+static void refresh_led_state(void) {
+    bool is_activity;
+    rgb_color_t color = compute_led_state_color(&is_activity);
+
+    if (display_is_off && !is_activity) {
+        led_set_color(color);     // updates cache; breathe task picks up
+        led_start_breathe();      // idempotent
+    } else {
+        led_stop_breathe();       // idempotent
+        led_set_color(color);
+    }
+}
 
 // Activity LED handler
 static void handle_activity_event(activity_event_t *event) {
     if (!event) return;
+    last_activity_event = *event;
+    refresh_led_state();
+}
 
-    if (!current_playback_status.disc_inserted) {
-        led_set_color(COLOR_ORANGE);  // No image loaded
-    } else if (event->pin_state) {
-        led_set_color(COLOR_YELLOW);  // Activity
-    } else {
-        led_set_color(COLOR_CYAN);    // Idle with image
-    }
+static void on_display_off_state_change(bool now_off, void *ctx) {
+    (void)ctx;
+    display_is_off = now_off;
+    refresh_led_state();
 }
 
 static menu_item_t main_menu_items[] = {
+    {.text = "Select Image", .action = MENU_ACTION_CUSTOM, .selectable = true},
+    {.text = "Eject Image", .action = MENU_ACTION_CUSTOM, .selectable = true},
+    {.text = "Settings", .action = MENU_ACTION_CUSTOM, .selectable = true},
+    {.text = "System Info", .action = MENU_ACTION_CUSTOM, .selectable = true},
+};
+
+static menu_item_t main_menu_items_multi[] = {
+    {.text = "Select Device", .action = MENU_ACTION_CUSTOM, .selectable = true},
     {.text = "Select Image", .action = MENU_ACTION_CUSTOM, .selectable = true},
     {.text = "Eject Image", .action = MENU_ACTION_CUSTOM, .selectable = true},
     {.text = "Settings", .action = MENU_ACTION_CUSTOM, .selectable = true},
@@ -120,6 +233,115 @@ static menu_item_t wifi_menu_items[] = {
     {.text = "Reset WiFi", .action = MENU_ACTION_CUSTOM, .selectable = true},
 };
 
+// Display Settings parent — text rewritten by refresh_display_settings_labels()
+// to show the currently-selected value of each sub-setting.
+static menu_item_t display_settings_menu_items[] = {
+    {.text = "Idle Mode", .action = MENU_ACTION_CUSTOM, .selectable = true},
+    {.text = "Idle Timeout", .action = MENU_ACTION_CUSTOM, .selectable = true},
+    {.text = "Blank Timeout", .action = MENU_ACTION_CUSTOM, .selectable = true},
+};
+
+// Idle Mode picker — order matches display_idle_mode_t enum values.
+// To disable the idle stage entirely, set Idle Timeout to "Never".
+static menu_item_t idle_mode_menu_items[] = {
+    {.text = "Dim", .action = MENU_ACTION_CUSTOM, .selectable = true},
+    {.text = "Flying Toasters", .action = MENU_ACTION_CUSTOM, .selectable = true},
+    {.text = "DVD Logo", .action = MENU_ACTION_CUSTOM, .selectable = true},
+};
+static const char *idle_mode_names[] = { "Dim", "Flying Toasters", "DVD Logo" };
+
+// Idle Timeout picker. Values in milliseconds; labels rebuilt with selection mark.
+// DISPLAY_IDLE_TIMEOUT_NEVER (0) disables the dim/screensaver intermediate stage.
+static const uint32_t idle_timeout_options_ms[] = {
+    30 * 1000,
+    60 * 1000,
+    120 * 1000,
+    300 * 1000,
+    DISPLAY_IDLE_TIMEOUT_NEVER,
+};
+static const char *idle_timeout_labels[] = { "30 sec", "1 min", "2 min", "5 min", "Never" };
+#define IDLE_TIMEOUT_OPTION_COUNT (sizeof(idle_timeout_options_ms) / sizeof(idle_timeout_options_ms[0]))
+static menu_item_t idle_timeout_menu_items[IDLE_TIMEOUT_OPTION_COUNT] = {
+    {.action = MENU_ACTION_CUSTOM, .selectable = true},
+    {.action = MENU_ACTION_CUSTOM, .selectable = true},
+    {.action = MENU_ACTION_CUSTOM, .selectable = true},
+    {.action = MENU_ACTION_CUSTOM, .selectable = true},
+    {.action = MENU_ACTION_CUSTOM, .selectable = true},
+};
+
+// Blank Timeout picker. Total inactivity time before the screen is fully blanked.
+// While blanked, the LED slowly breathes the current idle color.
+// DISPLAY_OFF_TIMEOUT_NEVER (0) disables blanking entirely.
+static const uint32_t blank_timeout_options_ms[] = {
+    10 * 60 * 1000,
+    20 * 60 * 1000,
+    30 * 60 * 1000,
+    60 * 60 * 1000,
+    DISPLAY_OFF_TIMEOUT_NEVER,
+};
+static const char *blank_timeout_labels[] = { "10 min", "20 min", "30 min", "1 hour", "Never" };
+#define BLANK_TIMEOUT_OPTION_COUNT (sizeof(blank_timeout_options_ms) / sizeof(blank_timeout_options_ms[0]))
+static menu_item_t blank_timeout_menu_items[BLANK_TIMEOUT_OPTION_COUNT] = {
+    {.action = MENU_ACTION_CUSTOM, .selectable = true},
+    {.action = MENU_ACTION_CUSTOM, .selectable = true},
+    {.action = MENU_ACTION_CUSTOM, .selectable = true},
+    {.action = MENU_ACTION_CUSTOM, .selectable = true},
+    {.action = MENU_ACTION_CUSTOM, .selectable = true},
+};
+
+static const char *idle_timeout_short_label(uint32_t timeout_ms) {
+    for (size_t i = 0; i < IDLE_TIMEOUT_OPTION_COUNT; i++) {
+        if (idle_timeout_options_ms[i] == timeout_ms) return idle_timeout_labels[i];
+    }
+    return "Custom";
+}
+
+static const char *blank_timeout_short_label(uint32_t timeout_ms) {
+    for (size_t i = 0; i < BLANK_TIMEOUT_OPTION_COUNT; i++) {
+        if (blank_timeout_options_ms[i] == timeout_ms) return blank_timeout_labels[i];
+    }
+    return "Custom";
+}
+
+static void refresh_idle_mode_labels(void) {
+    display_idle_mode_t current = display_manager_get_idle_mode(&display);
+    for (size_t i = 0; i < sizeof(idle_mode_names) / sizeof(idle_mode_names[0]); i++) {
+        snprintf(idle_mode_menu_items[i].text, MENU_ITEM_MAX_LENGTH,
+                 "%s %s", (current == (display_idle_mode_t)i) ? "*" : " ", idle_mode_names[i]);
+    }
+    idle_mode_menu.needs_redraw = true;
+}
+
+static void refresh_idle_timeout_labels(void) {
+    uint32_t current = display_manager_get_idle_timeout(&display);
+    for (size_t i = 0; i < IDLE_TIMEOUT_OPTION_COUNT; i++) {
+        snprintf(idle_timeout_menu_items[i].text, MENU_ITEM_MAX_LENGTH,
+                 "%s %s", (idle_timeout_options_ms[i] == current) ? "*" : " ",
+                 idle_timeout_labels[i]);
+    }
+    idle_timeout_menu.needs_redraw = true;
+}
+
+static void refresh_blank_timeout_labels(void) {
+    uint32_t current = display_manager_get_off_timeout(&display);
+    for (size_t i = 0; i < BLANK_TIMEOUT_OPTION_COUNT; i++) {
+        snprintf(blank_timeout_menu_items[i].text, MENU_ITEM_MAX_LENGTH,
+                 "%s %s", (blank_timeout_options_ms[i] == current) ? "*" : " ",
+                 blank_timeout_labels[i]);
+    }
+    blank_timeout_menu.needs_redraw = true;
+}
+
+static void refresh_display_settings_labels(void) {
+    snprintf(display_settings_menu_items[0].text, MENU_ITEM_MAX_LENGTH,
+             "Idle Mode: %s", idle_mode_names[display_manager_get_idle_mode(&display)]);
+    snprintf(display_settings_menu_items[1].text, MENU_ITEM_MAX_LENGTH,
+             "Idle time: %s", idle_timeout_short_label(display_manager_get_idle_timeout(&display)));
+    snprintf(display_settings_menu_items[2].text, MENU_ITEM_MAX_LENGTH,
+             "Blank time: %s", blank_timeout_short_label(display_manager_get_off_timeout(&display)));
+    display_settings_menu.needs_redraw = true;
+}
+
 // Button event handler
 static void handle_button_event(button_event_t *event) {
     if (!event) return;
@@ -131,7 +353,7 @@ static void handle_button_event(button_event_t *event) {
     if (event->type == BUTTON_EVENT_CLICK) {
         esp_err_t wake_result = display_manager_wake(&display);
         if (wake_result == ESP_ERR_NOT_FINISHED) {
-            ESP_LOGI(TAG, "Display was off - ignoring button action, just waking up");
+            ESP_LOGI(TAG, "Display was idle - just waking, ignoring action");
             return;
         }
     }
@@ -143,7 +365,7 @@ static void handle_button_event(button_event_t *event) {
                 case 0: // Up button (North) - Previous image
                     if (event->type == BUTTON_EVENT_CLICK) {
                         if (host_comm.initialized && current_image_status.image_loaded) {
-                            esp_err_t ret = host_comm_select_prev_image(&host_comm);
+                            esp_err_t ret = host_comm_select_prev_image(&host_comm, active_device_index);
                             if (ret == ESP_OK) {
                                 refresh_playback_status();
                             }
@@ -158,7 +380,7 @@ static void handle_button_event(button_event_t *event) {
                 case 2: // Down button (South) - Next image
                     if (event->type == BUTTON_EVENT_CLICK) {
                         if (host_comm.initialized && current_image_status.image_loaded) {
-                            esp_err_t ret = host_comm_select_next_image(&host_comm);
+                            esp_err_t ret = host_comm_select_next_image(&host_comm, active_device_index);
                             if (ret == ESP_OK) {
                                 refresh_playback_status();
                             }
@@ -168,7 +390,14 @@ static void handle_button_event(button_event_t *event) {
                 case 3: // Back button (West) - Eject (ATAPI only)
                     if (event->type == BUTTON_EVENT_CLICK) {
                         if (current_device_type != PANEL_DEVICE_TYPE_IDE && host_comm.initialized) {
-                            esp_err_t ret = host_comm_eject_image(&host_comm);
+                            // Show inverted icon as eject feedback
+                            ui_draw_status_screen(&display, current_disc_name,
+                                                  &current_image_status,
+                                                  &current_playback_status,
+                                                  false, get_active_device_label(),
+                                                  true);
+                            display_manager_update(&display);
+                            esp_err_t ret = host_comm_eject_image(&host_comm, active_device_index);
                             if (ret == ESP_OK) {
                                 refresh_playback_status();
                                 ESP_LOGI(TAG, "Image ejected from status screen");
@@ -196,54 +425,75 @@ static void handle_button_event(button_event_t *event) {
                 case 1: // Select button (East)
                     if (event->type == BUTTON_EVENT_CLICK) {
                         uint32_t selected = menu_get_selected_index(&main_menu);
-                        if (selected == 0) { // "Select Image"
+                        // In multi-device mode, "Select Device" is item 0, shifting others by 1
+                        uint32_t offset = (device_count > 1) ? 1 : 0;
+
+                        if (device_count > 1 && selected == 0) { // "Select Device"
+                            populate_device_menu();
+                            current_screen = SCREEN_DEVICE_SELECT;
+                        } else if (selected == offset + 0) { // "Select Image"
                             // Refresh directory list before showing it
                             if (!disc_list_loaded && host_comm.initialized) {
                                 ESP_LOGI(TAG, "Loading directory list...");
                                 refresh_directory_list();
                             }
+                            // Show target device in title when multiple devices exist
+                            const char *label = get_active_device_label();
+                            if (label) {
+                                static char disc_title[48];
+                                snprintf(disc_title, sizeof(disc_title), "%.47s", label);
+                                disc_menu.title = disc_title;
+                            } else {
+                                disc_menu.title = "Select Image";
+                            }
                             current_screen = SCREEN_DISC_LIST;
-                        } else if (selected == 1) { // "Eject Image"
+                        } else if (selected == offset + 1) { // "Eject Image"
                             if (current_device_type == PANEL_DEVICE_TYPE_IDE) {
                                 // IDE mode: eject not supported
                                 info_return_screen = SCREEN_MAIN_MENU;
                                 current_screen = SCREEN_INFO;
-                                ui_draw_info_screen(&display, "Not Available",
+                                show_info_screen("Not Available",
                                     "Eject is not available\nin IDE mode.\n\nUse Select Image to\nchoose a different\nhard disk image.");
                             } else if (host_comm.initialized) {
-                                esp_err_t ret = host_comm_eject_image(&host_comm);
+                                // Show inverted icon as eject feedback
+                                ui_draw_status_screen(&display, current_disc_name,
+                                                      &current_image_status,
+                                                      &current_playback_status,
+                                                      false, get_active_device_label(),
+                                                      true);
+                                display_manager_update(&display);
+                                esp_err_t ret = host_comm_eject_image(&host_comm, active_device_index);
                                 if (ret == ESP_OK) {
                                     ESP_LOGI(TAG, "Image ejected");
                                     current_screen = SCREEN_STATUS;
                                     refresh_playback_status();
                                 } else {
                                     ESP_LOGW(TAG, "Failed to eject disc: %s", esp_err_to_name(ret));
+                                    handle_comm_error(ret);
                                 }
                             }
-                        } else if (selected == 2) { // "Settings"
+                        } else if (selected == offset + 2) { // "Settings"
                             current_screen = SCREEN_SETTINGS;
-                        } else if (selected == 3) { // "System Info"
+                        } else if (selected == offset + 3) { // "System Info"
                             info_return_screen = SCREEN_MAIN_MENU;
                             current_screen = SCREEN_INFO;
                             const esp_app_desc_t* info_app_desc = esp_app_get_description();
-                            char main_ver_str[16] = "N/A";
+                            char main_ver_str[20] = "N/A";
                             if (host_comm.initialized) {
                                 rp2350_fw_status_t fw_status;
                                 if (host_comm_get_rp2350_fw_status(&host_comm, &fw_status) == ESP_OK) {
-                                    snprintf(main_ver_str, sizeof(main_ver_str), "%lu.%lu.%lu",
-                                             (fw_status.current_version >> 16) & 0xFF,
-                                             (fw_status.current_version >> 8) & 0xFF,
-                                             fw_status.current_version & 0xFF);
+                                    fw_version_format_mainboard(main_ver_str, sizeof(main_ver_str), fw_status.current_version);
                                 }
                             }
                             char info_text[160];
                             snprintf(info_text, sizeof(info_text),
-                                     "PicoIDE Front Panel\nPanel: v%s\nMain:  v%s\n%s: %s",
+                                     "%s\nPanel: v%s\nMain:  v%s\n%s: %s",
+                                     PRODUCT_NAME_FULL,
                                      info_app_desc->version,
                                      main_ver_str,
                                      host_comm_get_transport_name(&host_comm),
                                      host_comm.initialized ? "Connected" : "Disconnected");
-                            ui_draw_info_screen(&display, "System Info", info_text);
+                            show_info_screen("System Info", info_text);
                         }
                     }
                     break;
@@ -283,7 +533,7 @@ static void handle_button_event(button_event_t *event) {
                                 // Check if this is directory navigation (".." or "[directory]")
                                 bool is_directory = (selected == 0) || (selected_item->text[0] == '[');
 
-                                esp_err_t ret = host_comm_select_entry(&host_comm, entry_index);
+                                esp_err_t ret = host_comm_select_entry(&host_comm, entry_index, active_device_index);
                                 if (ret == ESP_OK) {
                                     if (is_directory) {
                                         // Directory navigation: refresh the list
@@ -292,7 +542,7 @@ static void handle_button_event(button_event_t *event) {
                                         // IDE mode: image selected for next boot
                                         info_return_screen = SCREEN_DISC_LIST;
                                         current_screen = SCREEN_INFO;
-                                        ui_draw_info_screen(&display, "Image Selected",
+                                        show_info_screen("Image Selected",
                                             "Image will be loaded\non next power cycle.\n\nPress back to\nreturn to browser.");
                                     } else {
                                         // ATAPI mode: image loaded, return to status screen
@@ -301,6 +551,10 @@ static void handle_button_event(button_event_t *event) {
                                     }
                                 } else {
                                     ESP_LOGW(TAG, "Failed to select entry via host comm: %s", esp_err_to_name(ret));
+                                    if (handle_comm_error(ret)) {
+                                        current_screen = SCREEN_MAIN_MENU;
+                                        active_menu = &main_menu;
+                                    }
                                 }
                             }
                         }
@@ -336,7 +590,8 @@ static void handle_button_event(button_event_t *event) {
                         } else if (selected == 1) { // "WiFi Setup"
                             current_screen = SCREEN_WIFI_MENU;
                         } else if (selected == 2) { // "Display Settings"
-                            ESP_LOGI(TAG, "Display settings not implemented yet");
+                            refresh_display_settings_labels();
+                            current_screen = SCREEN_DISPLAY_SETTINGS;
                         }
                     }
                     break;
@@ -400,7 +655,7 @@ static void handle_button_event(button_event_t *event) {
                             }
                             info_return_screen = SCREEN_WIFI_MENU;
                             current_screen = SCREEN_INFO;
-                            ui_draw_info_screen(&display, "WiFi Status", info_text);
+                            show_info_screen("WiFi Status", info_text);
                         } else if (selected == 1) { // "Reset WiFi"
                             ESP_LOGI(TAG, "Resetting WiFi to defaults");
                             wifi_manager_disconnect(&wifi_manager);
@@ -415,13 +670,172 @@ static void handle_button_event(button_event_t *event) {
                                 WIFI_MANAGER_AP_SSID, WIFI_MANAGER_AP_PASSWORD);
                             info_return_screen = SCREEN_WIFI_MENU;
                             current_screen = SCREEN_INFO;
-                            ui_draw_info_screen(&display, "WiFi Reset", info_text);
+                            show_info_screen("WiFi Reset", info_text);
                         }
                     }
                     break;
                 case 3: // Back button (West)
                     if (event->type == BUTTON_EVENT_CLICK) {
                         current_screen = SCREEN_SETTINGS;
+                    }
+                    break;
+            }
+            break;
+
+        case SCREEN_DEVICE_SELECT:
+            switch (event->button_id) {
+                case 0: // Up button (North)
+                    if (event->type == BUTTON_EVENT_CLICK || event->type == BUTTON_EVENT_REPEAT) {
+                        menu_navigate_up(&device_menu);
+                    }
+                    break;
+                case 2: // Down button (South)
+                    if (event->type == BUTTON_EVENT_CLICK || event->type == BUTTON_EVENT_REPEAT) {
+                        menu_navigate_down(&device_menu);
+                    }
+                    break;
+                case 1: // Select button (East)
+                    if (event->type == BUTTON_EVENT_CLICK && device_list_valid) {
+                        uint32_t selected = menu_get_selected_index(&device_menu);
+                        if (selected < device_list->device_count) {
+                            active_device_index = device_list->devices[selected].device_index;
+                            interface_ctx.active_device_index = active_device_index;
+                            ESP_LOGI(TAG, "Selected device %u: %s",
+                                     active_device_index,
+                                     device_list->devices[selected].device_label);
+                            current_screen = SCREEN_STATUS;
+                            refresh_playback_status();
+                        }
+                    }
+                    break;
+                case 3: // Back button (West)
+                    if (event->type == BUTTON_EVENT_CLICK) {
+                        current_screen = SCREEN_MAIN_MENU;
+                    }
+                    break;
+            }
+            break;
+
+        case SCREEN_DISPLAY_SETTINGS:
+            switch (event->button_id) {
+                case 0: // Up (North)
+                    if (event->type == BUTTON_EVENT_CLICK || event->type == BUTTON_EVENT_REPEAT) {
+                        menu_navigate_up(&display_settings_menu);
+                    }
+                    break;
+                case 2: // Down (South)
+                    if (event->type == BUTTON_EVENT_CLICK || event->type == BUTTON_EVENT_REPEAT) {
+                        menu_navigate_down(&display_settings_menu);
+                    }
+                    break;
+                case 1: // Select (East)
+                    if (event->type == BUTTON_EVENT_CLICK) {
+                        uint32_t selected = menu_get_selected_index(&display_settings_menu);
+                        if (selected == 0) {
+                            refresh_idle_mode_labels();
+                            current_screen = SCREEN_IDLE_MODE;
+                        } else if (selected == 1) {
+                            refresh_idle_timeout_labels();
+                            current_screen = SCREEN_IDLE_TIMEOUT;
+                        } else if (selected == 2) {
+                            refresh_blank_timeout_labels();
+                            current_screen = SCREEN_BLANK_TIMEOUT;
+                        }
+                    }
+                    break;
+                case 3: // Back (West)
+                    if (event->type == BUTTON_EVENT_CLICK) {
+                        current_screen = SCREEN_SETTINGS;
+                    }
+                    break;
+            }
+            break;
+
+        case SCREEN_IDLE_MODE:
+            switch (event->button_id) {
+                case 0:
+                    if (event->type == BUTTON_EVENT_CLICK || event->type == BUTTON_EVENT_REPEAT) {
+                        menu_navigate_up(&idle_mode_menu);
+                    }
+                    break;
+                case 2:
+                    if (event->type == BUTTON_EVENT_CLICK || event->type == BUTTON_EVENT_REPEAT) {
+                        menu_navigate_down(&idle_mode_menu);
+                    }
+                    break;
+                case 1:
+                    if (event->type == BUTTON_EVENT_CLICK) {
+                        uint32_t selected = menu_get_selected_index(&idle_mode_menu);
+                        display_manager_set_idle_mode(&display, (display_idle_mode_t)selected);
+                        refresh_idle_mode_labels();
+                    }
+                    break;
+                case 3:
+                    if (event->type == BUTTON_EVENT_CLICK) {
+                        refresh_display_settings_labels();
+                        current_screen = SCREEN_DISPLAY_SETTINGS;
+                    }
+                    break;
+            }
+            break;
+
+        case SCREEN_IDLE_TIMEOUT:
+            switch (event->button_id) {
+                case 0:
+                    if (event->type == BUTTON_EVENT_CLICK || event->type == BUTTON_EVENT_REPEAT) {
+                        menu_navigate_up(&idle_timeout_menu);
+                    }
+                    break;
+                case 2:
+                    if (event->type == BUTTON_EVENT_CLICK || event->type == BUTTON_EVENT_REPEAT) {
+                        menu_navigate_down(&idle_timeout_menu);
+                    }
+                    break;
+                case 1:
+                    if (event->type == BUTTON_EVENT_CLICK) {
+                        uint32_t selected = menu_get_selected_index(&idle_timeout_menu);
+                        if (selected < IDLE_TIMEOUT_OPTION_COUNT) {
+                            display_manager_set_idle_timeout(&display,
+                                                             idle_timeout_options_ms[selected]);
+                            refresh_idle_timeout_labels();
+                        }
+                    }
+                    break;
+                case 3:
+                    if (event->type == BUTTON_EVENT_CLICK) {
+                        refresh_display_settings_labels();
+                        current_screen = SCREEN_DISPLAY_SETTINGS;
+                    }
+                    break;
+            }
+            break;
+
+        case SCREEN_BLANK_TIMEOUT:
+            switch (event->button_id) {
+                case 0:
+                    if (event->type == BUTTON_EVENT_CLICK || event->type == BUTTON_EVENT_REPEAT) {
+                        menu_navigate_up(&blank_timeout_menu);
+                    }
+                    break;
+                case 2:
+                    if (event->type == BUTTON_EVENT_CLICK || event->type == BUTTON_EVENT_REPEAT) {
+                        menu_navigate_down(&blank_timeout_menu);
+                    }
+                    break;
+                case 1:
+                    if (event->type == BUTTON_EVENT_CLICK) {
+                        uint32_t selected = menu_get_selected_index(&blank_timeout_menu);
+                        if (selected < BLANK_TIMEOUT_OPTION_COUNT) {
+                            display_manager_set_off_timeout(&display,
+                                                            blank_timeout_options_ms[selected]);
+                            refresh_blank_timeout_labels();
+                        }
+                    }
+                    break;
+                case 3:
+                    if (event->type == BUTTON_EVENT_CLICK) {
+                        refresh_display_settings_labels();
+                        current_screen = SCREEN_DISPLAY_SETTINGS;
                     }
                     break;
             }
@@ -441,6 +855,7 @@ static void handle_button_event(button_event_t *event) {
 
         case SCREEN_FIRMWARE_STATUS:
             switch (event->button_id) {
+#ifdef CONFIG_PRODUCT_BLUESCSI
                 case 0: // Up button (North)
                     if (event->type == BUTTON_EVENT_CLICK) {
                         if (fw_screen_selection > 0) {
@@ -466,6 +881,18 @@ static void handle_button_event(button_event_t *event) {
                         }
                     }
                     break;
+#else
+                case 1: // Select button (East) - trigger unified update
+                    if (event->type == BUTTON_EVENT_CLICK) {
+                        bool panel_needs_update = panel_fw_info.available &&
+                            (panel_fw_info.version > ota_manager_get_current_version());
+                        bool main_needs_update = (rp2350_fw_status.available_version != 0);
+                        if (panel_needs_update || main_needs_update) {
+                            trigger_system_update();
+                        }
+                    }
+                    break;
+#endif
                 case 3: // Back button (West)
                     if (event->type == BUTTON_EVENT_CLICK) {
                         current_screen = SCREEN_SETTINGS;
@@ -488,22 +915,89 @@ static void handle_button_event(button_event_t *event) {
     }
 }
 
+static void show_info_screen(const char *title, const char *body) {
+    info_screen_title = title ? title : "";
+    if (body) {
+        strncpy(info_screen_body, body, sizeof(info_screen_body) - 1);
+        info_screen_body[sizeof(info_screen_body) - 1] = '\0';
+    } else {
+        info_screen_body[0] = '\0';
+    }
+    ui_draw_info_screen(&display, info_screen_title, info_screen_body);
+}
+
+// Re-render whatever screen is currently active. Used after the screensaver
+// has overwritten the buffer.
+static void redraw_current_screen(void) {
+    switch (current_screen) {
+        case SCREEN_STATUS:
+            disc_name_changed = true;     // Reset scroll animation
+            status_needs_redraw = true;   // display_update_task will draw next tick
+            break;
+        case SCREEN_MAIN_MENU:
+        case SCREEN_DISC_LIST:
+        case SCREEN_SETTINGS:
+        case SCREEN_WIFI_MENU:
+        case SCREEN_DISPLAY_SETTINGS:
+        case SCREEN_IDLE_MODE:
+        case SCREEN_IDLE_TIMEOUT:
+        case SCREEN_BLANK_TIMEOUT:
+            if (active_menu) active_menu->needs_redraw = true;
+            break;
+        case SCREEN_INFO:
+            ui_draw_info_screen(&display, info_screen_title, info_screen_body);
+            break;
+        case SCREEN_FIRMWARE_STATUS:
+            draw_firmware_status_screen();
+            break;
+        case SCREEN_FIRMWARE_UPDATE:
+        case SCREEN_SPLASH:
+        default:
+            // FW update task owns its own rendering; splash only runs at boot
+            break;
+    }
+}
+
 // Display update task
 static void display_update_task(void *pvParameters) {
     static screen_type_t last_screen = SCREEN_COUNT;  // Invalid value forces initial draw
+    static uint8_t startup_reinits = 0;
+    static uint32_t next_reinit_ms = DISPLAY_STARTUP_REINIT_FIRST_MS;
 
     while (1) {
         if (display.initialized) {
+            // Recover the OLED if it missed its power-on init on a slow
+            // (host-only) power rail — re-assert the init a few times over the
+            // first few seconds. Non-blocking; repaints the current buffer.
+            if (startup_reinits < DISPLAY_STARTUP_REINIT_COUNT) {
+                uint32_t now_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
+                if (now_ms >= next_reinit_ms) {
+                    display_manager_reinit(&display);
+                    next_reinit_ms += DISPLAY_STARTUP_REINIT_INTERVAL_MS;
+                    startup_reinits++;
+                }
+            }
+
+            // Honor a deferred full-redraw request first (e.g. waking from screensaver).
+            if (display.needs_full_redraw) {
+                display.needs_full_redraw = false;
+                redraw_current_screen();
+            }
+
             bool screen_changed = (current_screen != last_screen);
             last_screen = current_screen;
 
-            if (current_screen == SCREEN_STATUS) {
+            if (display_manager_screensaver_active(&display)) {
+                display_manager_screensaver_tick(&display);
+            } else if (current_screen == SCREEN_STATUS) {
                 if (screen_changed || status_needs_redraw) {
                     // Full redraw when entering status screen or status changed
                     ui_draw_status_screen(&display, current_disc_name,
                                           &current_image_status,
                                           &current_playback_status,
-                                          screen_changed || disc_name_changed);
+                                          screen_changed || disc_name_changed,
+                                          get_active_device_label(),
+                                          false);
                     disc_name_changed = false;
                     status_needs_redraw = false;
                 } else {
@@ -530,14 +1024,41 @@ static void display_update_task(void *pvParameters) {
     }
 }
 
-// Status screen refresh task - updates playback data from host
+// Status screen refresh task - updates playback data from host, and
+// reconnects to the main board if it was unreachable at startup
 static void status_refresh_task(void *pvParameters) {
     while (1) {
-        // Only refresh if on status screen and host is initialized
-        if (current_screen == SCREEN_STATUS && host_comm.initialized) {
+        uint32_t poll_interval_ms = 1000;
+
+        if (display.state == DISPLAY_STATE_OFF) {
+            // Screen off: no need to poll at all
+            poll_interval_ms = 0;
+        } else if (current_screen == SCREEN_STATUS && host_comm.initialized) {
+            if (current_device_type == PANEL_DEVICE_TYPE_IDE ||
+                current_device_type == PANEL_DEVICE_TYPE_SCSI) {
+                // HDD: image can only change via web UI, poll infrequently
+                poll_interval_ms = 5000;
+            } else if (!current_playback_status.is_playing) {
+                // ATAPI with no audio playing: poll less frequently
+                poll_interval_ms = 5000;
+            } else {
+                // ATAPI with audio playing: fast poll for track position updates
+                poll_interval_ms = 1000;
+            }
             refresh_playback_status();
+        } else if (host_comm_ready) {
+            // Main board was unreachable at startup (e.g. held in reset).
+            // Keep probing so the panel recovers once it comes online.
+            uint8_t device_status;
+            if (host_comm_get_device_status(&host_comm, 0, &device_status) == ESP_OK) {
+                ESP_LOGI(TAG, "Main board is now responding, connection restored");
+                host_comm.initialized = true;
+                disc_list_loaded = false;   // Force directory reload when next opened
+                status_needs_redraw = true; // Refresh the status screen
+            }
         }
-        vTaskDelay(pdMS_TO_TICKS(1000)); // Update every 1 second
+
+        vTaskDelay(pdMS_TO_TICKS(poll_interval_ms ? poll_interval_ms : 10000));
     }
 }
 
@@ -547,41 +1068,67 @@ static void refresh_playback_status(void) {
     strncpy(old_disc_name, current_disc_name, sizeof(old_disc_name) - 1);
     old_disc_name[sizeof(old_disc_name) - 1] = '\0';
 
-    if (!host_comm.initialized) {
+    // The playback status poll doubles as the liveness probe by checking for
+    // PANEL_ALIVE_MAGIC. Poll the active device so the disc name, playback
+    // state, and device status all describe the same device.
+    esp_err_t ret = host_comm.initialized
+        ? host_comm_get_playback_status(&host_comm, active_device_index, &current_playback_status)
+        : ESP_FAIL;
+    if (ret != ESP_OK ||
+        current_playback_status.alive_magic != PANEL_ALIVE_MAGIC) {
         memset(&current_playback_status, 0, sizeof(current_playback_status));
         memset(&current_image_status, 0, sizeof(current_image_status));
-        strncpy(current_disc_name, "No disc loaded", sizeof(current_disc_name) - 1);
+        strncpy(current_disc_name, "No main board", sizeof(current_disc_name) - 1);
         current_disc_name[sizeof(current_disc_name) - 1] = '\0';
+        // This path returns early, so flag the redraw here the way the
+        // normal path does at the end
+        if (strcmp(old_disc_name, current_disc_name) != 0) {
+            disc_name_changed = true;  // Refresh the status title, reset scroll
+        }
+        status_needs_redraw = true;
         return;
     }
 
-    esp_err_t ret = host_comm_get_playback_status(&host_comm, &current_playback_status);
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "Failed to get playback status: %s", esp_err_to_name(ret));
-        memset(&current_playback_status, 0, sizeof(current_playback_status));
-        strncpy(current_disc_name, "No disc loaded", sizeof(current_disc_name) - 1);
-        current_disc_name[sizeof(current_disc_name) - 1] = '\0';
-    } else if (!current_playback_status.disc_inserted) {
-        strncpy(current_disc_name, "No disc loaded", sizeof(current_disc_name) - 1);
+    if (current_playback_status.disc_name[0]) {
+        // Trust whatever string the main board put in disc_name — it carries the
+        // image name when a disc is loaded (the main board caches the filename in
+        // its main loop), and the error text ("No SD card" / "Wrong-mode card")
+        // when in an SD error state.
+        strncpy(current_disc_name, current_playback_status.disc_name,
+                sizeof(current_disc_name) - 1);
         current_disc_name[sizeof(current_disc_name) - 1] = '\0';
     } else {
-        // Copy disc name from playback status
-        strncpy(current_disc_name, current_playback_status.disc_name, sizeof(current_disc_name) - 1);
+        strncpy(current_disc_name, "No image loaded", sizeof(current_disc_name) - 1);
         current_disc_name[sizeof(current_disc_name) - 1] = '\0';
+    }
+
+    // Track recovery from an SD error so a stale directory listing from the old
+    // card gets refetched. device_status rides along in the playback status.
+    uint8_t prev = current_device_status;
+    current_device_status = current_playback_status.device_status;
+    bool prev_err = (prev == PANEL_DEVICE_STATUS_NO_CARD ||
+                     prev == PANEL_DEVICE_STATUS_WRONG_MODE);
+    bool now_err  = (current_device_status == PANEL_DEVICE_STATUS_NO_CARD ||
+                     current_device_status == PANEL_DEVICE_STATUS_WRONG_MODE);
+    if (prev_err && !now_err) {
+        ESP_LOGI(TAG, "SD card recovered; invalidating disc list cache");
+        disc_list_loaded = false;
     }
 
     // Check if disc name actually changed (for fetching full image status and resetting scroll)
     bool name_changed = (strcmp(old_disc_name, current_disc_name) != 0);
 
-    // Fetch loaded image status when disc name changed (reduces SPI traffic)
     if (name_changed) {
         disc_name_changed = true;  // Reset scroll animation
-        ret = host_comm_get_loaded_image_status(&host_comm, &current_image_status);
-        if (ret != ESP_OK) {
-            ESP_LOGW(TAG, "Failed to get loaded image status: %s", esp_err_to_name(ret));
-            memset(&current_image_status, 0, sizeof(current_image_status));
-        } else {
-            current_device_type = current_image_status.device_type;
+        // Fetch loaded image status if not already done above
+        if (current_playback_status.disc_name[0]) {
+            ret = host_comm_get_loaded_image_status(&host_comm, active_device_index, &current_image_status);
+            if (ret != ESP_OK) {
+                ESP_LOGW(TAG, "Failed to get loaded image status: %s", esp_err_to_name(ret));
+                memset(&current_image_status, 0, sizeof(current_image_status));
+            } else {
+                current_device_type = current_image_status.device_type;
+            }
         }
     }
 
@@ -600,12 +1147,110 @@ static void refresh_device_type(void) {
     }
 
     loaded_image_status_t status;
-    esp_err_t ret = host_comm_get_loaded_image_status(&host_comm, &status);
+    esp_err_t ret = host_comm_get_loaded_image_status(&host_comm, active_device_index, &status);
     if (ret == ESP_OK) {
         current_device_type = status.device_type;
         ESP_LOGI(TAG, "Device type: %s",
                  current_device_type == PANEL_DEVICE_TYPE_IDE ? "IDE (Hard Disk)" : "ATAPI (CD-ROM)");
     }
+}
+
+// Function to refresh device list from host
+static void refresh_device_list(void) {
+    if (!host_comm.initialized) {
+        return;
+    }
+
+    esp_err_t ret = host_comm_get_device_list(&host_comm, device_list, sizeof(device_list_buffer));
+    if (ret == ESP_OK) {
+        device_count = device_list->device_count;
+        device_list_valid = true;
+        ESP_LOGI(TAG, "Device list: %u devices (max %u)", device_count, device_list->max_devices);
+    } else {
+        ESP_LOGW(TAG, "Failed to get device list: %s (single device assumed)", esp_err_to_name(ret));
+        // Assume single device if command not supported
+        device_count = 1;
+        device_list_valid = false;
+    }
+}
+
+// SCSI peripheral types (the device_summary_t.device_type values reported by
+// the main board) whose media is removable. These are the devices a user is
+// most likely to want selected on the panel. Mirrors EJECTABLE_TYPES in
+// www/app.js — keep the two in sync.
+static bool device_type_is_removable(uint8_t device_type) {
+    switch (device_type) {
+        case 1:  // removable
+        case 2:  // optical (CD-ROM)
+        case 3:  // floppy
+        case 4:  // MO
+        case 7:  // ZIP
+            return true;
+        default:
+            return false;
+    }
+}
+
+// Choose the device shown on the panel by default. Prefer the first removable
+// device (e.g. a CD-ROM) over device 0, which is commonly a fixed HDD or a
+// non-removable device such as a network adapter. Falls back to the first
+// listed device when none are removable. Call once after the initial device
+// list load so it does not override a later manual selection.
+static void select_default_device(void) {
+    if (!device_list_valid || device_list->device_count == 0) {
+        return;
+    }
+
+    for (uint8_t i = 0; i < device_list->device_count; i++) {
+        if (device_type_is_removable(device_list->devices[i].device_type)) {
+            active_device_index = device_list->devices[i].device_index;
+            interface_ctx.active_device_index = active_device_index;
+            ESP_LOGI(TAG, "Default device -> removable %u (%s)",
+                     active_device_index, device_list->devices[i].device_label);
+            return;
+        }
+    }
+
+    // No removable device present: default to the first listed device.
+    active_device_index = device_list->devices[0].device_index;
+    interface_ctx.active_device_index = active_device_index;
+}
+
+// Populate the device select menu from cached device list
+static void populate_device_menu(void) {
+    menu_clear_items(&device_menu);
+
+    if (!device_list_valid || device_count == 0) {
+        menu_add_item(&device_menu, "No devices", MENU_ACTION_SELECT, NULL, NULL);
+        return;
+    }
+
+    for (uint8_t i = 0; i < device_list->device_count; i++) {
+        char label[MENU_ITEM_MAX_LENGTH];
+        if (device_list->devices[i].image_name[0]) {
+            snprintf(label, sizeof(label), "%.28s: %.32s",
+                     device_list->devices[i].device_label,
+                     device_list->devices[i].image_name);
+        } else {
+            snprintf(label, sizeof(label), "%.28s: [empty]",
+                     device_list->devices[i].device_label);
+        }
+        menu_add_item(&device_menu, label, MENU_ACTION_SELECT, NULL, NULL);
+    }
+}
+
+// Get the device label for the currently active device (for status screen header)
+static const char* get_active_device_label(void) {
+    if (device_count <= 1 || !device_list_valid) {
+        return NULL;  // Single device, no label needed
+    }
+
+    for (uint8_t i = 0; i < device_list->device_count; i++) {
+        if (device_list->devices[i].device_index == active_device_index) {
+            return device_list->devices[i].device_label;
+        }
+    }
+    return NULL;
 }
 
 // Function to refresh directory entry list from host
@@ -644,6 +1289,10 @@ static esp_err_t refresh_directory_list(void) {
         ESP_LOGI(TAG, "Requesting entry info for index %lu", i);
         ret = host_comm_get_entry_info(&host_comm, i, &entry_info);
         if (ret == ESP_OK) {
+            // Skip ".." and "." entries — we already added our own ".." above
+            if (strcmp(entry_info.name, "..") == 0 || strcmp(entry_info.name, ".") == 0) {
+                continue;
+            }
             // Add prefix to distinguish directories from files
             char display_name[68];  // 64 + prefix + null
             if (entry_info.entry_type == 0) {  // DIRECTORY
@@ -667,31 +1316,73 @@ static esp_err_t refresh_directory_list(void) {
     return ESP_OK;
 }
 
+// Reconnect to host after communication error
+static void reconnect_to_host(void) {
+    ESP_LOGI(TAG, "Reconnecting to host...");
+
+    // Show reconnecting status on display
+    ui_draw_info_screen(&display, "Reconnecting...", "Restoring communication\nwith main board...");
+    display_manager_update(&display);
+
+    disc_list_loaded = false;
+
+    // Reset host async state
+    host_comm_reset(&host_comm);
+
+    // Re-enumerate directory
+    esp_err_t ret = refresh_directory_list();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to re-enumerate after reconnect: %s", esp_err_to_name(ret));
+        host_comm.initialized = false;
+    }
+}
+
+// Handle communication error - attempt recovery
+// Returns true if recovery succeeded
+static bool handle_comm_error(esp_err_t err) {
+    if (err == ESP_OK) {
+        return true;
+    }
+
+    ESP_LOGW(TAG, "Communication error: %s, attempting recovery", esp_err_to_name(err));
+
+    switch (err) {
+        case ESP_ERR_TIMEOUT:
+        case ESP_ERR_INVALID_RESPONSE:
+        case ESP_FAIL:
+            reconnect_to_host();
+            return host_comm.initialized;
+        default:
+            return false;
+    }
+}
+
 // Firmware update task
+#ifdef CONFIG_PRODUCT_BLUESCSI
 static void firmware_update_task(void *pvParameters) {
     ota_manager_t *ota = (ota_manager_t *)pvParameters;
 
     led_start_pulse(COLOR_RED);
-
+ 
     uint32_t last_display_update_ms = 0;
     uint8_t last_progress = 0;
-
+ 
     while (1) {
         esp_err_t ret = ota_manager_process(ota);
         if (ret != ESP_OK && ret != ESP_ERR_NOT_FINISHED) {
             ESP_LOGE(TAG, "OTA process error: %s", esp_err_to_name(ret));
             break;
         }
-
+ 
         ota_state_t state = ota_manager_get_state(ota);
         uint8_t progress = ota_manager_get_progress(ota);
-
+ 
         // Update display only every 100ms or when progress changes
         uint32_t current_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
         if (state != OTA_STATE_DOWNLOADING ||
             progress != last_progress ||
             (current_ms - last_display_update_ms) >= 100) {
-
+ 
             const char *status_msg = "Initializing...";
             switch (state) {
                 case OTA_STATE_CHECKING:
@@ -715,15 +1406,15 @@ static void firmware_update_task(void *pvParameters) {
                 default:
                     break;
             }
-
+ 
             if (state != OTA_STATE_IDLE) {
                 ui_draw_firmware_update(&display, status_msg, progress);
             }
-
+ 
             last_display_update_ms = current_ms;
             last_progress = progress;
         }
-
+ 
         // Exit on completion or error
         if (state == OTA_STATE_SUCCESS) {
             ESP_LOGI(TAG, "Firmware update successful, restarting in 3 seconds...");
@@ -738,25 +1429,181 @@ static void firmware_update_task(void *pvParameters) {
             vTaskDelay(pdMS_TO_TICKS(3000));
             break;
         }
-
+ 
         // Only yield briefly to other tasks, don't sleep
         taskYIELD();
     }
-
+ 
     led_stop_pulse();
     current_screen = SCREEN_MAIN_MENU;
     active_menu = screen_menus[current_screen];
     ui_draw_menu(&display, active_menu);
     vTaskDelete(NULL);
 }
+#else
+// Unified firmware update task: panel OTA (if needed) -> RP2350 update -> wait -> reboot self
+static void unified_firmware_update_task(void *pvParameters) {
+    led_start_pulse(COLOR_RED);
+
+    bool panel_needs_update = panel_fw_info.available &&
+        (panel_fw_info.version > ota_manager_get_current_version());
+    bool main_needs_update = (rp2350_fw_status.available_version != 0);
+    bool panel_ota_written = false;
+
+    // Phase 1: Panel OTA (download and write, but don't reboot yet)
+    if (panel_needs_update) {
+        ESP_LOGI(TAG, "Phase 1: Updating panel firmware...");
+        ui_draw_firmware_update(&display, "Updating panel...", 0);
+
+        // Initialize OTA manager
+        esp_err_t ret = ota_manager_init(&ota_manager, &host_comm);
+        if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+            ESP_LOGE(TAG, "Failed to initialize OTA manager: %s", esp_err_to_name(ret));
+            goto error;
+        }
+
+        // Copy firmware info and start OTA
+        memcpy(&ota_manager.firmware_info, &panel_fw_info, sizeof(panel_firmware_info_t));
+        ret = ota_manager_start_update(&ota_manager);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to start panel OTA: %s", esp_err_to_name(ret));
+            goto error;
+        }
+
+        // Process OTA chunks until complete
+        uint8_t last_progress = 0;
+        while (1) {
+            ret = ota_manager_process(&ota_manager);
+            if (ret != ESP_OK && ret != ESP_ERR_NOT_FINISHED) {
+                ESP_LOGE(TAG, "Panel OTA error: %s", esp_err_to_name(ret));
+                goto error;
+            }
+
+            ota_state_t state = ota_manager_get_state(&ota_manager);
+            uint8_t progress = ota_manager_get_progress(&ota_manager);
+
+            if (progress != last_progress) {
+                ui_draw_firmware_update(&display, "Updating panel...", progress);
+                last_progress = progress;
+            }
+
+            if (state == OTA_STATE_SUCCESS) {
+                panel_ota_written = true;
+                ESP_LOGI(TAG, "Panel OTA written successfully (reboot deferred)");
+                break;
+            } else if (state == OTA_STATE_ERROR) {
+                ESP_LOGE(TAG, "Panel OTA failed");
+                goto error;
+            }
+
+            taskYIELD();
+        }
+    }
+
+    // Phase 2: Main board update
+    if (main_needs_update) {
+        ESP_LOGI(TAG, "Phase 2: Updating main board...");
+        ui_draw_firmware_update(&display, "Updating main board...", 0);
+
+        esp_err_t ret = host_comm_start_rp2350_update(&host_comm);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to start RP2350 update: %s", esp_err_to_name(ret));
+            // If panel OTA was written, we have a version mismatch - still reboot panel
+            if (panel_ota_written) {
+                ui_draw_firmware_update(&display, "Main board failed!", 0);
+                vTaskDelay(pdMS_TO_TICKS(2000));
+                ESP_LOGW(TAG, "Rebooting panel despite main board failure");
+                esp_restart();
+            }
+            goto error;
+        }
+
+        // Show progress animation while main board flashes and reboots
+        for (int progress = 0; progress <= 100; progress += 2) {
+            char msg[32];
+            snprintf(msg, sizeof(msg), "Main board: %d%%", progress);
+            ui_draw_firmware_update(&display, msg, progress);
+            vTaskDelay(pdMS_TO_TICKS(100));  // 50 steps * 100ms = 5 seconds
+        }
+
+        // Wait for main board to come back online
+        ui_draw_firmware_update(&display, "Waiting for reboot...", 100);
+
+        bool main_board_back = false;
+        for (int attempts = 0; attempts < 20; attempts++) {  // Up to 10 seconds
+            vTaskDelay(pdMS_TO_TICKS(500));
+
+            rp2350_fw_status_t fw_status;
+            ret = host_comm_get_rp2350_fw_status(&host_comm, &fw_status);
+            if (ret == ESP_OK) {
+                char version_str[20];
+                fw_version_format_mainboard(version_str, sizeof(version_str), fw_status.current_version);
+                ESP_LOGI(TAG, "Main board back online: v%s", version_str);
+                main_board_back = true;
+                break;
+            }
+        }
+
+        if (!main_board_back) {
+            ESP_LOGW(TAG, "Main board did not come back in time");
+        }
+    }
+
+    // Phase 3: Reboot panel if OTA was written, otherwise just show success
+    if (panel_ota_written) {
+        ESP_LOGI(TAG, "Phase 3: Rebooting panel into new firmware...");
+        ui_draw_firmware_update(&display, "Restarting...", 100);
+        led_stop_pulse();
+        led_set_color(COLOR_GREEN);
+        vTaskDelay(pdMS_TO_TICKS(1500));
+        esp_restart();
+    }
+
+    // Only main board was updated, no panel reboot needed
+    ESP_LOGI(TAG, "System update complete");
+    ui_draw_firmware_update(&display, "Update complete!", 100);
+    led_stop_pulse();
+    led_set_color(COLOR_GREEN);
+    vTaskDelay(pdMS_TO_TICKS(3000));
+
+    current_screen = SCREEN_SETTINGS;
+    active_menu = screen_menus[current_screen];
+    ui_draw_menu(&display, active_menu);
+    vTaskDelete(NULL);
+    return;
+
+error:
+    ui_draw_firmware_update(&display, "Update failed!", 0);
+    led_stop_pulse();
+    led_set_color(COLOR_RED);
+    vTaskDelay(pdMS_TO_TICKS(3000));
+    current_screen = SCREEN_SETTINGS;
+    active_menu = screen_menus[current_screen];
+    ui_draw_menu(&display, active_menu);
+    vTaskDelete(NULL);
+}
+#endif
 
 static void draw_firmware_status_screen(void) {
+#ifdef CONFIG_PRODUCT_BLUESCSI
     uint32_t panel_current = ota_manager_get_current_version();
     ui_draw_firmware_status(&display,
                             panel_current, panel_fw_info.version, panel_fw_info.available,
                             rp2350_fw_status.current_version, rp2350_fw_status.available_version,
                             rp2350_fw_status.available_version != 0,
                             fw_screen_selection);
+#else
+    bool panel_update_avail = panel_fw_info.available &&
+        (panel_fw_info.version > ota_manager_get_current_version());
+    bool main_update_avail = (rp2350_fw_status.available_version != 0);
+    bool any_update = panel_update_avail || main_update_avail;
+
+    // Use main board version as the user-facing "system version"
+    ui_draw_firmware_status(&display,
+                            rp2350_fw_status.current_version,
+                            rp2350_fw_status.available_version,
+                            any_update);
+#endif
 }
 
 // Check firmware status for both panel and main board
@@ -764,17 +1611,19 @@ static void check_firmware_status(void) {
     ESP_LOGI(TAG, "Checking firmware status...");
 
     // Show loading screen
-    ui_draw_info_screen(&display, "Firmware", "Checking...");
+    show_info_screen("Firmware", "Checking...");
     display_manager_update(&display);  // Force immediate display update before blocking operations
 
     fw_status_valid = false;
+#ifdef CONFIG_PRODUCT_BLUESCSI
     fw_screen_selection = 0;
+#endif
     memset(&panel_fw_info, 0, sizeof(panel_fw_info));
     memset(&rp2350_fw_status, 0, sizeof(rp2350_fw_status));
 
     if (!host_comm.initialized) {
         ESP_LOGW(TAG, "Host communication not initialized");
-        ui_draw_info_screen(&display, "Error", "Host not connected");
+        show_info_screen("Error", "Host not connected");
         display_manager_update(&display);
         return;
     }
@@ -802,6 +1651,8 @@ static void check_firmware_status(void) {
     display_manager_update(&display);
 }
 
+
+#ifdef CONFIG_PRODUCT_BLUESCSI
 // Trigger panel firmware update
 static void trigger_panel_update(void) {
     ESP_LOGI(TAG, "Triggering panel firmware update...");
@@ -827,7 +1678,7 @@ static void trigger_panel_update(void) {
     current_screen = SCREEN_FIRMWARE_UPDATE;
 
     char version_str[14];
-    ota_manager_format_version_string(version_str, panel_fw_info.version);
+    fw_version_format_panel(version_str, sizeof(version_str), panel_fw_info.version);
     char status_msg[64];
     snprintf(status_msg, sizeof(status_msg), "Updating panel: v%s", version_str);
     ui_draw_firmware_update(&display, status_msg, 0);
@@ -875,10 +1726,7 @@ static void trigger_mainboard_update(void) {
         if (ret == ESP_OK) {
             // Board is back! Show new version
             char version_str[16];
-            uint8_t major = (fw_status.current_version >> 16) & 0xFF;
-            uint8_t minor = (fw_status.current_version >> 8) & 0xFF;
-            uint8_t patch = fw_status.current_version & 0xFF;
-            snprintf(version_str, sizeof(version_str), "%d.%d.%d", major, minor, patch);
+            fw_version_format_mainboard(version_str, sizeof(version_str), fw_status.current_version);
 
             char msg[48];
             snprintf(msg, sizeof(msg), "Update complete!\nNow running v%s", version_str);
@@ -899,6 +1747,17 @@ static void trigger_mainboard_update(void) {
     current_screen = SCREEN_SETTINGS;
     active_menu = screen_menus[current_screen];
 }
+#else
+// Trigger unified system update (panel OTA + main board update)
+static void trigger_system_update(void) {
+    ESP_LOGI(TAG, "Triggering system firmware update...");
+
+    current_screen = SCREEN_FIRMWARE_UPDATE;
+    ui_draw_firmware_update(&display, "Starting update...", 0);
+
+    xTaskCreate(unified_firmware_update_task, "firmware_update", 8192, NULL, 10, NULL);
+}
+#endif
 
 // Host communication task (currently unused)
 #if 0
@@ -931,7 +1790,17 @@ static void host_comm_task(void *pvParameters) {
 #endif
 
 void app_main(void) {
-    ESP_LOGI(TAG, "PicoIDE Front Panel Starting...");
+    ESP_LOGI(TAG, "%s Starting...", PRODUCT_NAME_FULL);
+
+    // NVS must be ready before display_manager_init loads its idle-mode/timeout
+    // config. wifi_manager_init also calls nvs_flash_init later, but that's
+    // idempotent.
+    esp_err_t nvs_ret = nvs_flash_init();
+    if (nvs_ret == ESP_ERR_NVS_NO_FREE_PAGES || nvs_ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        nvs_ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(nvs_ret);
 
     // Initialize shared SPI bus with MISO enabled for host communication
     spi_bus_config_t bus_config = {
@@ -961,8 +1830,6 @@ void app_main(void) {
     xTaskCreate(status_refresh_task, "status_refresh", 2048, NULL, 4, NULL);
 
     ui_show_splash_screen(&display);
-    const esp_app_desc_t* app_desc = esp_app_get_description();
-    ui_update_splash_versions(&display, app_desc->version, NULL);
     ui_update_splash_progress(&display, "Init display...", 10);
 
     ui_update_splash_progress(&display, "Init LED...", 20);
@@ -1057,6 +1924,29 @@ void app_main(void) {
     menu_set_items(&wifi_menu, wifi_menu_items,
                   sizeof(wifi_menu_items) / sizeof(wifi_menu_items[0]));
 
+    menu_init(&device_menu, MENU_VISIBLE_ITEMS_WITH_TITLE);
+    device_menu.title = "Select Device";
+
+    menu_init(&display_settings_menu, MENU_VISIBLE_ITEMS_WITH_TITLE);
+    display_settings_menu.title = "Display";
+    menu_set_items(&display_settings_menu, display_settings_menu_items,
+                  sizeof(display_settings_menu_items) / sizeof(display_settings_menu_items[0]));
+
+    menu_init(&idle_mode_menu, MENU_VISIBLE_ITEMS_WITH_TITLE);
+    idle_mode_menu.title = "Idle Mode";
+    menu_set_items(&idle_mode_menu, idle_mode_menu_items,
+                  sizeof(idle_mode_menu_items) / sizeof(idle_mode_menu_items[0]));
+
+    menu_init(&idle_timeout_menu, MENU_VISIBLE_ITEMS_WITH_TITLE);
+    idle_timeout_menu.title = "Idle Timeout";
+    menu_set_items(&idle_timeout_menu, idle_timeout_menu_items, IDLE_TIMEOUT_OPTION_COUNT);
+
+    menu_init(&blank_timeout_menu, MENU_VISIBLE_ITEMS_WITH_TITLE);
+    blank_timeout_menu.title = "Blank Timeout";
+    menu_set_items(&blank_timeout_menu, blank_timeout_menu_items, BLANK_TIMEOUT_OPTION_COUNT);
+
+    display_manager_set_off_state_callback(&display, on_display_off_state_change, NULL);
+
     transport_config_t transport_cfg = {
         .device_addr = HOST_DEVICE_ADDR,
         .sda_miso = PIN_SDA,
@@ -1068,18 +1958,34 @@ void app_main(void) {
     };
 
     ui_update_splash_progress(&display, "Establish comms...", 55);
-    vTaskDelay(pdMS_TO_TICKS(1000));
+    ESP_LOGI(TAG, "Waiting %d ms for main board startup...", HOST_STARTUP_DELAY_MS);
+    vTaskDelay(pdMS_TO_TICKS(HOST_STARTUP_DELAY_MS));
     ret = host_comm_init(&host_comm, &transport_cfg);
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "Failed to initialize host comm: %s", esp_err_to_name(ret));
     } else {
+        host_comm_ready = true;
         ESP_LOGI(TAG, "Host comm initialized successfully using %s",
                  host_comm_get_transport_name(&host_comm));
 
+        // Probe for the main board. Some systems hold it in reset for several
+        // seconds after power-on, so keep retrying for a bounded window
+        // instead of giving up on the first failure.
         uint8_t test_status;
-        ret = host_comm_get_device_status(&host_comm, &test_status);
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to communicate with main board: %s", esp_err_to_name(ret));
+        esp_err_t comm_ret = host_comm_get_device_status(&host_comm, 0, &test_status);
+        if (comm_ret != ESP_OK) {
+            ESP_LOGW(TAG, "Main board not responding, waiting for it to leave reset...");
+            uint32_t start_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
+            while (comm_ret != ESP_OK &&
+                   (xTaskGetTickCount() * portTICK_PERIOD_MS - start_ms) < HOST_COMM_STARTUP_TIMEOUT_MS) {
+                ui_update_splash_progress(&display, "Wait for main board", 60);
+                vTaskDelay(pdMS_TO_TICKS(HOST_COMM_RETRY_INTERVAL_MS));
+                comm_ret = host_comm_get_device_status(&host_comm, 0, &test_status);
+            }
+        }
+
+        if (comm_ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to communicate with main board: %s", esp_err_to_name(comm_ret));
             led_stop_pulse();
 
             for (int i = 0; i < 6; i++) {
@@ -1089,36 +1995,36 @@ void app_main(void) {
                 vTaskDelay(pdMS_TO_TICKS(200));
             }
 
-            display_manager_clear(&display);
-            display_manager_set_font(&display, u8g2_font_amstrad_cpc_extended_8f);
-            display_manager_draw_text(&display, 10, 16, "Communication");
-            display_manager_draw_text(&display, 30, 32, "Error!");
-            display_manager_set_font(&display, u8g2_font_6x10_tf);
-            display_manager_draw_text(&display, 8, 48, "Cannot reach");
-            display_manager_draw_text(&display, 8, 58, "main board");
-            display_manager_request_update(&display);
-            display_manager_update(&display);
-
-            vTaskDelay(pdMS_TO_TICKS(3000));
-            led_start_pulse(COLOR_CYAN);
             host_comm.initialized = false;
         } else {
-            ESP_LOGI(TAG, "Communication with main board verified (status: 0x%02X)", test_status);
+            ESP_LOGI(TAG, "Communication with main board verified");
 
             // Get and display main board firmware version
             rp2350_fw_status_t fw_status;
             if (host_comm_get_rp2350_fw_status(&host_comm, &fw_status) == ESP_OK) {
-                char main_version[16];
-                snprintf(main_version, sizeof(main_version), "%lu.%lu.%lu",
-                         (fw_status.current_version >> 16) & 0xFF,
-                         (fw_status.current_version >> 8) & 0xFF,
-                         fw_status.current_version & 0xFF);
-                ui_update_splash_versions(&display, app_desc->version, main_version);
+                char main_version[20];
+                fw_version_format_mainboard(main_version, sizeof(main_version), fw_status.current_version);
+                ui_update_splash_version(&display, main_version);
                 ESP_LOGI(TAG, "Main board firmware version: %s", main_version);
             }
 
             // Get device type (IDE vs ATAPI)
             refresh_device_type();
+
+            // Get device list for multi-device support
+            refresh_device_list();
+
+            // Default the panel to the first removable device (e.g. CD-ROM)
+            // rather than device 0, which is often a fixed HDD or a
+            // non-removable device like a network adapter.
+            select_default_device();
+
+            // Switch to multi-device main menu if multiple devices found
+            if (device_count > 1) {
+                menu_set_items(&main_menu, main_menu_items_multi,
+                              sizeof(main_menu_items_multi) / sizeof(main_menu_items_multi[0]));
+                ESP_LOGI(TAG, "Multi-device mode: %u devices", device_count);
+            }
 
             ESP_LOGI(TAG, "Fetching directory list at startup...");
             ui_update_splash_progress(&display, "Load directory...", 70);
@@ -1158,6 +2064,7 @@ void app_main(void) {
 
     interface_ctx.host_comm = &host_comm;
     interface_ctx.wifi_manager = &wifi_manager;
+    interface_ctx.active_device_index = active_device_index;
 
     web_server_set_interface_context(&web_server, &interface_ctx);
 
@@ -1168,7 +2075,7 @@ void app_main(void) {
         ESP_LOGW(TAG, "Failed to start web server: %s", esp_err_to_name(ret));
     } else {
         ESP_LOGI(TAG, "Web server started successfully");
-        ESP_LOGI(TAG, "Access web interface at: http://picoide.local (when WiFi connects)");
+        ESP_LOGI(TAG, "Access web interface at: http://%s.local (when WiFi connects)", WIFI_MANAGER_MDNS_HOSTNAME);
     }
 
     ui_update_splash_progress(&display, "Ready!", 100);
@@ -1181,7 +2088,9 @@ void app_main(void) {
     refresh_playback_status();
     ui_draw_status_screen(&display, current_disc_name,
                           &current_image_status,
-                          &current_playback_status, disc_name_changed);
+                          &current_playback_status, disc_name_changed,
+                          get_active_device_label(),
+                          false);
     disc_name_changed = false;
     status_needs_redraw = false;
 

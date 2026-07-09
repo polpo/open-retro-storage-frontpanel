@@ -108,8 +108,15 @@ static esp_err_t transport_spi_init(transport_handle_t *handle) {
     }
 
     handle->initialized = true;
+
+    // Query actual SPI clock frequency
+    int actual_freq_khz = 0;
+    spi_device_get_actual_freq(priv->spi_device, &actual_freq_khz);
+    ESP_LOGI(TAG, "SPI clock: requested %lu Hz, actual %d kHz",
+             (unsigned long)handle->config.clock_speed, actual_freq_khz);
+
     ESP_LOGI(TAG, "SPI transport initialized (MISO: %d, MOSI: %d, CLK: %d, CS: %d) %s",
-             handle->config.sda_miso, handle->config.mosi, 
+             handle->config.sda_miso, handle->config.mosi,
              handle->config.scl_clk, handle->config.cs,
              priv->owns_bus ? "[owns bus]" : "[sharing bus]");
     

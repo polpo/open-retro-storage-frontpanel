@@ -110,17 +110,22 @@ static esp_err_t host_comm_poll_async_result(host_comm_t *comm, uint32_t timeout
     bool ready = false;
     uint16_t response_size = 0;
 
+    // Immediate poll before delay loop (reduces latency for fast async ops at 20MHz)
+    esp_err_t ret = transport_poll_async_status(&comm->transport, &ready, &response_size,
+                                                rx_buffer, expected_size);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
     while (elapsed_ms < timeout_ms && !ready) {
         vTaskDelay(pdMS_TO_TICKS(poll_interval_ms));
         elapsed_ms += poll_interval_ms;
 
-        esp_err_t ret = transport_poll_async_status(&comm->transport, &ready, &response_size,
+        ret = transport_poll_async_status(&comm->transport, &ready, &response_size,
                                                     rx_buffer, expected_size);
         if (ret != ESP_OK) {
             return ret;
         }
-
-        /* ESP_LOGI(TAG, "Poll response: ready=%u, size=%u", ready, response_size); */
     }
 
     if (!ready) {
@@ -232,21 +237,23 @@ esp_err_t host_comm_get_entry_info(host_comm_t *comm, uint32_t index, dir_entry_
     return ret;
 }
 
-esp_err_t host_comm_select_entry(host_comm_t *comm, int32_t index) {
+esp_err_t host_comm_select_entry(host_comm_t *comm, int32_t index, uint16_t device_index) {
     if (!comm) {
         return ESP_ERR_INVALID_ARG;
     }
 
     HOST_COMM_LOCK(comm);
 
-    ESP_LOGI(TAG, "Selecting entry: %ld", index);
+    ESP_LOGI(TAG, "Selecting entry: %ld (device %u)", index, device_index);
 
     // Send command with signed 16-bit index in argument field
     int16_t index16 = (int16_t)index;
 
+    // Send device_index as 1-byte payload so BlueSCSI targets the correct device
+    uint8_t payload[1] = { (uint8_t)device_index };
     esp_err_t ret = transport_two_phase_transaction(&comm->transport,
                                                     PANEL_CMD_SELECT_ENTRY, (uint16_t)index16,
-                                                    NULL, 0,  // No write data
+                                                    payload, sizeof(payload),
                                                     NULL, 0);  // No read data
     if (ret != ESP_OK) {
         HOST_COMM_UNLOCK(comm);
@@ -254,7 +261,8 @@ esp_err_t host_comm_select_entry(host_comm_t *comm, int32_t index) {
     }
 
     // Poll for completion with 2 second timeout (may need to load image)
-    ret = host_comm_poll_async_result(comm, 2000, 10, 0, NULL, NULL);
+    // BlueSCSI returns 1-byte result code that must be read to clear SPI state
+    ret = host_comm_poll_async_result(comm, 2000, 10, 1, NULL, NULL);
     HOST_COMM_UNLOCK(comm);
     return ret;
 }
@@ -301,17 +309,17 @@ esp_err_t host_comm_get_current_path(host_comm_t *comm, char *path, size_t max_l
 
 // Image management functions
 
-esp_err_t host_comm_select_prev_image(host_comm_t *comm) {
+esp_err_t host_comm_select_prev_image(host_comm_t *comm, uint16_t device_index) {
     if (!comm) {
         return ESP_ERR_INVALID_ARG;
     }
 
     HOST_COMM_LOCK(comm);
 
-    ESP_LOGI(TAG, "Selecting previous image");
+    ESP_LOGI(TAG, "Selecting previous image (device %u)", device_index);
 
     esp_err_t ret = transport_two_phase_transaction(&comm->transport,
-                                                    PANEL_CMD_SELECT_PREV_IMAGE, PANEL_ARG_IGNORED,
+                                                    PANEL_CMD_SELECT_PREV_IMAGE, device_index,
                                                     NULL, 0,  // No write data
                                                     NULL, 0);  // No read data
     if (ret != ESP_OK) {
@@ -325,17 +333,17 @@ esp_err_t host_comm_select_prev_image(host_comm_t *comm) {
     return ret;
 }
 
-esp_err_t host_comm_select_next_image(host_comm_t *comm) {
+esp_err_t host_comm_select_next_image(host_comm_t *comm, uint16_t device_index) {
     if (!comm) {
         return ESP_ERR_INVALID_ARG;
     }
 
     HOST_COMM_LOCK(comm);
 
-    ESP_LOGI(TAG, "Selecting next image");
+    ESP_LOGI(TAG, "Selecting next image (device %u)", device_index);
 
     esp_err_t ret = transport_two_phase_transaction(&comm->transport,
-                                                    PANEL_CMD_SELECT_NEXT_IMAGE, PANEL_ARG_IGNORED,
+                                                    PANEL_CMD_SELECT_NEXT_IMAGE, device_index,
                                                     NULL, 0,  // No write data
                                                     NULL, 0);  // No read data
     if (ret != ESP_OK) {
@@ -349,17 +357,17 @@ esp_err_t host_comm_select_next_image(host_comm_t *comm) {
     return ret;
 }
 
-esp_err_t host_comm_eject_image(host_comm_t *comm) {
+esp_err_t host_comm_eject_image(host_comm_t *comm, uint16_t device_index) {
     if (!comm) {
         return ESP_ERR_INVALID_ARG;
     }
 
     HOST_COMM_LOCK(comm);
 
-    ESP_LOGI(TAG, "Ejecting image");
+    ESP_LOGI(TAG, "Ejecting image (device %u)", device_index);
 
     esp_err_t ret = transport_two_phase_transaction(&comm->transport,
-                                                    PANEL_CMD_EJECT_IMAGE, PANEL_ARG_IGNORED,
+                                                    PANEL_CMD_EJECT_IMAGE, device_index,
                                                     NULL, 0,  // No write data
                                                     NULL, 0);  // No read data
     if (ret != ESP_OK) {
@@ -373,18 +381,18 @@ esp_err_t host_comm_eject_image(host_comm_t *comm) {
     return ret;
 }
 
-esp_err_t host_comm_get_loaded_image_status(host_comm_t *comm, loaded_image_status_t *status) {
+esp_err_t host_comm_get_loaded_image_status(host_comm_t *comm, uint16_t device_index, loaded_image_status_t *status) {
     if (!comm || !status) {
         return ESP_ERR_INVALID_ARG;
     }
 
     HOST_COMM_LOCK(comm);
 
-    ESP_LOGI(TAG, "Getting loaded image status");
+    ESP_LOGI(TAG, "Getting loaded image status (device %u)", device_index);
 
     // Start the get status operation
     esp_err_t ret = transport_two_phase_transaction(&comm->transport,
-                                                    PANEL_CMD_GET_LOADED_IMAGE_STATUS, PANEL_ARG_IGNORED,
+                                                    PANEL_CMD_GET_LOADED_IMAGE_STATUS, device_index,
                                                     NULL, 0,  // No write data
                                                     NULL, 0);  // No read data
     if (ret != ESP_OK) {
@@ -411,18 +419,18 @@ esp_err_t host_comm_get_loaded_image_status(host_comm_t *comm, loaded_image_stat
 
 // Status functions
 
-esp_err_t host_comm_get_device_status(host_comm_t *comm, uint8_t *status) {
+esp_err_t host_comm_get_device_status(host_comm_t *comm, uint16_t device_index, uint8_t *status) {
     if (!comm || !status) {
         return ESP_ERR_INVALID_ARG;
     }
 
     HOST_COMM_LOCK(comm);
 
-    ESP_LOGI(TAG, "Getting device status");
+    ESP_LOGI(TAG, "Getting device status (device %u)", device_index);
 
     uint8_t device_status;
     esp_err_t ret = transport_two_phase_transaction(&comm->transport,
-                                                    PANEL_CMD_GET_DEVICE_STATUS, PANEL_ARG_IGNORED,
+                                                    PANEL_CMD_GET_DEVICE_STATUS, device_index,
                                                     NULL, 0,  // No write data
                                                     &device_status, 1);  // Read 1 byte
     if (ret == ESP_OK) {
@@ -433,17 +441,17 @@ esp_err_t host_comm_get_device_status(host_comm_t *comm, uint8_t *status) {
     return ret;
 }
 
-esp_err_t host_comm_get_playback_status(host_comm_t *comm, playback_status_t *status) {
+esp_err_t host_comm_get_playback_status(host_comm_t *comm, uint16_t device_index, playback_status_t *status) {
     if (!comm || !status) {
         return ESP_ERR_INVALID_ARG;
     }
 
     HOST_COMM_LOCK(comm);
 
-    ESP_LOGD(TAG, "Getting playback status");
+    ESP_LOGD(TAG, "Getting playback status (device %u)", device_index);
 
     esp_err_t ret = transport_two_phase_transaction(&comm->transport,
-                                                    PANEL_CMD_GET_PLAYBACK_STATUS, PANEL_ARG_IGNORED,
+                                                    PANEL_CMD_GET_PLAYBACK_STATUS, device_index,
                                                     NULL, 0,
                                                     (uint8_t*)status, sizeof(playback_status_t));
     if (ret == ESP_OK) {
@@ -595,6 +603,14 @@ esp_err_t host_comm_start_file_upload(host_comm_t *comm, const char *filename, u
         return ret;
     }
 
+    // Poll for async result (mirrors START_FILE_DOWNLOAD's timeout)
+    ret = host_comm_poll_async_result(comm, 5000, 10, 0, NULL, NULL);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed async result after start upload: %s", esp_err_to_name(ret));
+        HOST_COMM_UNLOCK(comm);
+        return ret;
+    }
+
     ESP_LOGD(TAG, "File upload start command sent successfully");
     HOST_COMM_UNLOCK(comm);
     return ESP_OK;
@@ -632,7 +648,8 @@ esp_err_t host_comm_write_file_chunk(host_comm_t *comm, const uint8_t *data, siz
         return ret;
     }
 
-    ret = host_comm_poll_async_result(comm, 1000, 1, 0, NULL, NULL);
+    // Poll for async result
+    ret = host_comm_poll_async_result(comm, 5000, 10, 0, NULL, NULL);
 
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed async result after write: %s", esp_err_to_name(ret));
@@ -666,10 +683,11 @@ esp_err_t host_comm_finish_file_upload(host_comm_t *comm, uint8_t *result_code, 
         return ret;
     }
 
-    // Poll for async result (33 bytes: 1 byte result code + 32 byte SHA256)
+    // Poll for async result (33 bytes: 1 byte result code + 32 byte SHA256).
+    // Generous timeout: finish flushes/closes the file and finalizes the SHA.
     uint8_t *result_data;
     size_t result_size;
-    ret = host_comm_poll_async_result(comm, 5000, 10, 33, &result_data, &result_size);
+    ret = host_comm_poll_async_result(comm, 30000, 10, 33, &result_data, &result_size);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to get file upload result: %s", esp_err_to_name(ret));
         HOST_COMM_UNLOCK(comm);
@@ -811,6 +829,91 @@ esp_err_t host_comm_read_file_chunk(host_comm_t *comm, uint32_t chunk_index, uin
     return ESP_OK;
 }
 
+// Shared helper: send one (path2 == NULL) or two null-terminated path strings
+// with `command` and read back a 1-byte result code. Used by delete, rename,
+// touch and mkdir.
+static esp_err_t host_comm_path_op(host_comm_t *comm, uint8_t command,
+                                   const char *path, const char *path2,
+                                   uint8_t *result_code) {
+    if (!comm || !comm->initialized || !path || !result_code) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    size_t path_len = strlen(path);
+    size_t path2_len = path2 ? strlen(path2) : 0;
+    size_t payload_size = path_len + 1 + (path2 ? path2_len + 1 : 0);
+    if (path_len == 0 || (path2 && path2_len == 0) ||
+        payload_size > PANEL_PROTOCOL_MAX_PAYLOAD) {
+        ESP_LOGE(TAG, "Path op 0x%02X path lengths invalid: %d / %d bytes",
+                 command, path_len, path2_len);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    HOST_COMM_LOCK(comm);
+
+    // Payload: path\0[path2\0]
+    memcpy(tx_buffer, path, path_len);
+    tx_buffer[path_len] = '\0';
+    if (path2) {
+        memcpy(tx_buffer + path_len + 1, path2, path2_len);
+        tx_buffer[path_len + 1 + path2_len] = '\0';
+    }
+
+    esp_err_t ret = transport_two_phase_transaction(&comm->transport,
+                                                   command, PANEL_ARG_EXTENDED,
+                                                   tx_buffer, payload_size,
+                                                   NULL, 0);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to send path op 0x%02X: %s", command, esp_err_to_name(ret));
+        HOST_COMM_UNLOCK(comm);
+        return ret;
+    }
+
+    uint8_t *result_data;
+    size_t result_size;
+    ret = host_comm_poll_async_result(comm, 5000, 10, 1, &result_data, &result_size);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to get path-op result: %s", esp_err_to_name(ret));
+        HOST_COMM_UNLOCK(comm);
+        return ret;
+    }
+
+    if (result_size < 1) {
+        ESP_LOGE(TAG, "Path-op result size mismatch: got %d", result_size);
+        HOST_COMM_UNLOCK(comm);
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    *result_code = result_data[0];
+    ESP_LOGD(TAG, "Path op 0x%02X result code: 0x%02X", command, *result_code);
+    HOST_COMM_UNLOCK(comm);
+    return ESP_OK;
+}
+
+esp_err_t host_comm_delete_file(host_comm_t *comm, const char *path, uint8_t *result_code) {
+    ESP_LOGI(TAG, "Deleting file: %s", path ? path : "(null)");
+    return host_comm_path_op(comm, PANEL_CMD_DELETE_FILE, path, NULL, result_code);
+}
+
+esp_err_t host_comm_rename_file(host_comm_t *comm, const char *old_path,
+                                const char *new_path, uint8_t *result_code) {
+    if (!new_path) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    ESP_LOGI(TAG, "Renaming file: %s -> %s", old_path ? old_path : "(null)", new_path);
+    return host_comm_path_op(comm, PANEL_CMD_RENAME_FILE, old_path, new_path, result_code);
+}
+
+esp_err_t host_comm_touch_file(host_comm_t *comm, const char *path, uint8_t *result_code) {
+    ESP_LOGI(TAG, "Touching file: %s", path ? path : "(null)");
+    return host_comm_path_op(comm, PANEL_CMD_TOUCH_FILE, path, NULL, result_code);
+}
+
+esp_err_t host_comm_mkdir(host_comm_t *comm, const char *path, uint8_t *result_code) {
+    ESP_LOGI(TAG, "Creating directory: %s", path ? path : "(null)");
+    return host_comm_path_op(comm, PANEL_CMD_MKDIR, path, NULL, result_code);
+}
+
 esp_err_t host_comm_get_rp2350_fw_status(host_comm_t *comm, rp2350_fw_status_t *status) {
     if (!comm || !comm->initialized || !status) {
         return ESP_ERR_INVALID_ARG;
@@ -879,6 +982,43 @@ esp_err_t host_comm_start_rp2350_update(host_comm_t *comm) {
     return ESP_OK;
 }
 
+esp_err_t host_comm_get_device_list(host_comm_t *comm, device_list_response_t *response, size_t max_size) {
+    if (!comm || !response || max_size < sizeof(device_list_response_t)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    HOST_COMM_LOCK(comm);
+
+    ESP_LOGI(TAG, "Getting device list");
+
+    // Start the get device list operation
+    esp_err_t ret = transport_two_phase_transaction(&comm->transport,
+                                                    PANEL_CMD_GET_DEVICE_LIST, PANEL_ARG_IGNORED,
+                                                    NULL, 0,  // No write data
+                                                    NULL, 0);  // No read data
+    if (ret != ESP_OK) {
+        HOST_COMM_UNLOCK(comm);
+        return ret;
+    }
+
+    // Poll for completion with 2 second timeout
+    uint8_t *result_data;
+    size_t result_size;
+    ret = host_comm_poll_async_result(comm, 2000, 10, max_size, &result_data, &result_size);
+    if (ret != ESP_OK) {
+        HOST_COMM_UNLOCK(comm);
+        return ret;
+    }
+
+    // Copy result to caller's buffer
+    size_t copy_size = (result_size < max_size) ? result_size : max_size;
+    memcpy(response, result_data, copy_size);
+    ESP_LOGI(TAG, "Device list: %u devices (max %u)", response->device_count, response->max_devices);
+
+    HOST_COMM_UNLOCK(comm);
+    return ESP_OK;
+}
+
 esp_err_t host_comm_get_command_status(host_comm_t *comm, panel_command_status_t *status) {
     if (!comm || !comm->initialized || !status) {
         return ESP_ERR_INVALID_ARG;
@@ -890,6 +1030,27 @@ esp_err_t host_comm_get_command_status(host_comm_t *comm, panel_command_status_t
                                            PANEL_CMD_GET_COMMAND_STATUS, PANEL_ARG_IGNORED,
                                            NULL, 0,
                                            (uint8_t*)status, sizeof(panel_command_status_t));
+
+    HOST_COMM_UNLOCK(comm);
+    return ret;
+}
+
+esp_err_t host_comm_reset(host_comm_t *comm) {
+    if (!comm || !comm->initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    HOST_COMM_LOCK(comm);
+
+    ESP_LOGI(TAG, "Resetting host async state");
+
+    esp_err_t ret = transport_two_phase_transaction(&comm->transport,
+                                                    PANEL_CMD_RESET, PANEL_ARG_IGNORED,
+                                                    NULL, 0,
+                                                    NULL, 0);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to send reset command: %s", esp_err_to_name(ret));
+    }
 
     HOST_COMM_UNLOCK(comm);
     return ret;

@@ -15,6 +15,7 @@
 //  with this program; if not, see <https://www.gnu.org/licenses/>.
 
 #include "ota_manager.h"
+#include "fw_version.h"
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_app_desc.h"
@@ -100,7 +101,8 @@ static uint32_t parse_version_string(const char* version_str) {
     if (!version_str) {
         return 0x00000000; // Default v0.0.0
     }
-
+#ifdef CONFIG_PRODUCT_BLUESCSI
+    // Encoding is 0x00MMmmpp
     uint32_t major, minor, patch;
 
     // Try to parse major.minor.patch format
@@ -117,6 +119,26 @@ static uint32_t parse_version_string(const char* version_str) {
     }
 
     return (major << 16) | (minor << 8) | patch;
+#else
+    // Encoding is 0xMMmmppPP: the low byte PP is 0xFF for a final release, or
+    // 0-254 for a "-preN" prerelease (which sorts below the matching final).
+
+    // pre stays 0xFF (final release) unless a -preN suffix overwrites it.
+    // Use %u, not %hhu: ESP-IDF's nano newlib sscanf doesn't support the C99
+    // "hh" length modifier, so %hhu silently fails to match.
+    unsigned int major = 0, minor = 0, patch = 0, pre = 0xFF;
+
+    // sscanf stops at the first field it can't match and returns the count it
+    // filled: "0.3.99" yields 3 (a final release), "0.4.0-pre2" yields 4.
+    int parsed = sscanf(version_str, "%u.%u.%u-pre%u", &major, &minor, &patch, &pre);
+    if (parsed < 3) {
+        ESP_LOGW(TAG, "Failed to parse version string '%s', using default", version_str);
+        return 0x00000000;
+    }
+
+    return ((uint32_t)(major & 0xFF) << 24) | ((uint32_t)(minor & 0xFF) << 16) |
+           ((uint32_t)(patch & 0xFF) << 8) | (uint32_t)(pre & 0xFF);
+#endif
 }
 
 
@@ -188,13 +210,10 @@ esp_err_t ota_manager_check_update(ota_manager_t* ota, bool* update_available) {
         uint32_t current_version = ota_manager_get_current_version();
         if (ota->firmware_info.version > current_version) {
             *update_available = true;
-            ESP_LOGI(TAG, "Update available: v%lu.%lu.%lu -> v%lu.%lu.%lu",
-                     (current_version >> 16) & 0xFF,
-                     (current_version >> 8) & 0xFF,
-                     current_version & 0xFF,
-                     (ota->firmware_info.version >> 16) & 0xFF,
-                     (ota->firmware_info.version >> 8) & 0xFF,
-                     ota->firmware_info.version & 0xFF);
+            char cur_str[20], avail_str[20];
+            fw_version_format_panel(cur_str, sizeof(cur_str), current_version);
+            fw_version_format_panel(avail_str, sizeof(avail_str), ota->firmware_info.version);
+            ESP_LOGI(TAG, "Update available: v%s -> v%s", cur_str, avail_str);
         } else {
             ESP_LOGI(TAG, "Firmware is up to date");
         }
@@ -470,10 +489,3 @@ uint32_t ota_manager_get_current_version(void) {
     return version;
 }
 
-void ota_manager_format_version_string(char *version_str, uint32_t version_num) {
-    // Version number (major.minor.patch as 0x00MMmmpp)
-    uint8_t major = (version_num >> 16) & 0xff;
-    uint8_t minor = (version_num >> 8) & 0xff;
-    uint8_t patch = version_num & 0xff;
-    sprintf(version_str, "%u.%u.%u", major, minor, patch);
-}

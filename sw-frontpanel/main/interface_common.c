@@ -15,6 +15,8 @@
 //  with this program; if not, see <https://www.gnu.org/licenses/>.
 
 #include "interface_common.h"
+#include "ota_manager.h"
+#include "fw_version.h"
 #include <string.h>
 #include <stdio.h>
 #include "esp_log.h"
@@ -65,7 +67,7 @@ esp_err_t interface_get_entry_list(interface_context_t *ctx, dir_entry_info_t *e
     return ESP_OK;
 }
 
-esp_err_t interface_select_entry(interface_context_t *ctx, int32_t entry_index) {
+esp_err_t interface_select_entry(interface_context_t *ctx, int32_t entry_index, uint16_t device_index) {
     if (!ctx) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -75,7 +77,7 @@ esp_err_t interface_select_entry(interface_context_t *ctx, int32_t entry_index) 
         return ESP_ERR_INVALID_STATE;
     }
 
-    esp_err_t ret = host_comm_select_entry(ctx->host_comm, entry_index);
+    esp_err_t ret = host_comm_select_entry(ctx->host_comm, entry_index, device_index);
     if (ret == ESP_OK) {
         if (entry_index == -1) {
             ESP_LOGI(TAG, "Navigated to parent directory");
@@ -89,7 +91,7 @@ esp_err_t interface_select_entry(interface_context_t *ctx, int32_t entry_index) 
     return ret;
 }
 
-esp_err_t interface_eject_image(interface_context_t *ctx) {
+esp_err_t interface_eject_image(interface_context_t *ctx, uint16_t device_index) {
     if (!ctx) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -99,9 +101,9 @@ esp_err_t interface_eject_image(interface_context_t *ctx) {
         return ESP_ERR_INVALID_STATE;
     }
 
-    esp_err_t ret = host_comm_eject_image(ctx->host_comm);
+    esp_err_t ret = host_comm_eject_image(ctx->host_comm, device_index);
     if (ret == ESP_OK) {
-        ESP_LOGI(TAG, "Ejected image");
+        ESP_LOGI(TAG, "Ejected image (device %u)", device_index);
     } else {
         ESP_LOGW(TAG, "Failed to eject image: %s", esp_err_to_name(ret));
     }
@@ -109,7 +111,7 @@ esp_err_t interface_eject_image(interface_context_t *ctx) {
     return ret;
 }
 
-esp_err_t interface_get_current_image(interface_context_t *ctx, char *image_name, size_t max_len) {
+esp_err_t interface_get_current_image(interface_context_t *ctx, uint16_t device_index, char *image_name, size_t max_len) {
     if (!ctx || !image_name || max_len == 0) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -121,7 +123,7 @@ esp_err_t interface_get_current_image(interface_context_t *ctx, char *image_name
     }
 
     loaded_image_status_t status;
-    esp_err_t ret = host_comm_get_loaded_image_status(ctx->host_comm, &status);
+    esp_err_t ret = host_comm_get_loaded_image_status(ctx->host_comm, device_index, &status);
     if (ret == ESP_OK && status.image_loaded) {
         strncpy(image_name, status.image_name, max_len - 1);
         image_name[max_len - 1] = '\0';
@@ -131,6 +133,19 @@ esp_err_t interface_get_current_image(interface_context_t *ctx, char *image_name
     }
 
     return ESP_OK;
+}
+
+esp_err_t interface_get_device_list(interface_context_t *ctx, device_list_response_t *response, size_t max_size) {
+    if (!ctx || !response) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (!ctx->host_comm || !ctx->host_comm->initialized) {
+        ESP_LOGW(TAG, "Host communication not available");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    return host_comm_get_device_list(ctx->host_comm, response, max_size);
 }
 
 esp_err_t interface_wifi_scan(interface_context_t *ctx, wifi_ap_info_t *networks, size_t max_networks, size_t *found_networks) {
@@ -237,10 +252,22 @@ esp_err_t interface_get_system_info(interface_context_t *ctx, system_info_t *inf
     memset(info, 0, sizeof(system_info_t));
 
     // Static system information
-    info->firmware_version = "v0.1.0";
-    info->hardware_name = "ESP32-C3";
     info->free_memory = esp_get_free_heap_size();
     info->uptime_seconds = esp_log_timestamp() / 1000;
+
+    // Firmware versions: the front panel runs its own image and the user-facing
+    // "main" version is reported by the main board (empty if unreachable)
+    fw_version_format_panel(info->panel_firmware_version,
+                            sizeof(info->panel_firmware_version),
+                            ota_manager_get_current_version());
+    if (ctx->host_comm && ctx->host_comm->initialized) {
+        rp2350_fw_status_t fw_status;
+        if (host_comm_get_rp2350_fw_status(ctx->host_comm, &fw_status) == ESP_OK) {
+            fw_version_format_mainboard(info->main_firmware_version,
+                                        sizeof(info->main_firmware_version),
+                                        fw_status.current_version);
+        }
+    }
 
     // Host communication info
     if (ctx->host_comm) {
@@ -266,7 +293,7 @@ esp_err_t interface_get_system_info(interface_context_t *ctx, system_info_t *inf
     }
 
     // Current image information
-    interface_get_current_image(ctx, info->current_disc, sizeof(info->current_disc));
+    interface_get_current_image(ctx, ctx->active_device_index, info->current_disc, sizeof(info->current_disc));
 
     return ESP_OK;
 }
