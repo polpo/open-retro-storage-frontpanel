@@ -22,4 +22,24 @@ menu "Product Configuration"
         default 8 if PRODUCT_BLUESCSI
         default 2 if PRODUCT_PICOIDE
 
+    choice HOST_TRANSPORT
+        prompt "Host communication transport"
+        default HOST_TRANSPORT_SPI
+        help
+            Physical link used to talk to the host main board. This is
+            orthogonal to the product choice: BlueSCSI Ultra/Ultra Wide and
+            PicoIDE use SPI, while BlueSCSI v2 uses I2C. Set per-build via the
+            sdkconfig.defaults.<variant> files rather than menuconfig.
+
+        config HOST_TRANSPORT_SPI
+            bool "SPI"
+            help
+                10 MHz SPI master (BlueSCSI Ultra/Ultra Wide, PicoIDE).
+
+        config HOST_TRANSPORT_I2C
+            bool "I2C"
+            help
+                400 kHz I2C master (BlueSCSI v2).
+    endchoice
+
 endmenu

@@ -4,17 +4,29 @@ set(MINIFY_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/../tools/minify_www.py")
 set(REQUIREMENTS_FILE "${CMAKE_CURRENT_SOURCE_DIR}/../requirements.txt")
 set(REQUIREMENTS_STAMP "${CMAKE_BINARY_DIR}/.requirements_installed")
 
-# Install Python dependencies from requirements.txt (once per build dir)
+# Install Python dependencies from requirements.txt (once per build dir).
+# If they're already importable (e.g. provided by the Nix dev shell via
+# PYTHONPATH, where pip can't write to the immutable store), skip pip entirely.
 if(NOT CMAKE_SCRIPT_MODE_FILE AND NOT EXISTS "${REQUIREMENTS_STAMP}")
-    message(STATUS "Installing Python dependencies from requirements.txt...")
     execute_process(
-        COMMAND ${PYTHON} -m pip install --quiet --no-build-isolation -r "${REQUIREMENTS_FILE}"
-        RESULT_VARIABLE PIP_RESULT
+        COMMAND ${PYTHON} -c "import preprocess, htmlmin, rjsmin"
+        RESULT_VARIABLE DEPS_PRESENT
+        OUTPUT_QUIET ERROR_QUIET
     )
-    if(PIP_RESULT EQUAL 0)
+    if(DEPS_PRESENT EQUAL 0)
+        message(STATUS "Web-asset Python dependencies already available - skipping pip install")
         file(TOUCH "${REQUIREMENTS_STAMP}")
     else()
-        message(WARNING "Failed to install Python dependencies - minification will be skipped")
+        message(STATUS "Installing Python dependencies from requirements.txt...")
+        execute_process(
+            COMMAND ${PYTHON} -m pip install --quiet --no-build-isolation -r "${REQUIREMENTS_FILE}"
+            RESULT_VARIABLE PIP_RESULT
+        )
+        if(PIP_RESULT EQUAL 0)
+            file(TOUCH "${REQUIREMENTS_STAMP}")
+        else()
+            message(WARNING "Failed to install Python dependencies - minification will be skipped")
+        endif()
     endif()
 endif()
 

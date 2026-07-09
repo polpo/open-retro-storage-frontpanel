@@ -1,10 +1,14 @@
-// SPDX-License-Identifier: GPL-2.0-only
+// SPDX-License-Identifier: GPL-2.0-or-later
 //
-//  Copyright (C) 2025  Ian Scott
+//  Copyright (C) 2025-2026  Ian Scott
+//  Copyright (C) 2026       Eric Helgeson
+//
+//  NOTE: This file alone is licensed GPL-2.0-or-later.
 //
 //  This program is free software; you can redistribute it and/or modify it
-//  under the terms of the GNU General Public License (as published by the
-//  Free Software Foundation) version 2, dated June 1991.
+//  under the terms of the GNU General Public License as published by the
+//  Free Software Foundation; either version 2 of the License, or (at your
+//  option) any later version.
 //
 //  This program is distributed in the hope that it will be useful,
 //  but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -57,6 +61,11 @@
 #define PANEL_CMD_START_RP2350_UPDATE  0x56  // Start RP2350 firmware update from SD card (async, reboots on success)
 #define PANEL_CMD_START_FILE_DOWNLOAD  0x57  // Start file download (async, payload: null-terminated filename)
 #define PANEL_CMD_READ_FILE_CHUNK      0x58  // Read file chunk (async, arg: chunk index, returns chunk data)
+// 0x59 reserved for PANEL_CMD_GET_INITIATOR_STATUS on the main board (not used by this panel build)
+#define PANEL_CMD_DELETE_FILE          0x5A  // Delete file (async, payload: null-terminated path)
+#define PANEL_CMD_RENAME_FILE          0x5B  // Rename file (async, payload: oldpath\0newpath\0)
+#define PANEL_CMD_TOUCH_FILE           0x5C  // Create empty file (async, payload: null-terminated path)
+#define PANEL_CMD_MKDIR                0x5D  // Create directory (async, payload: null-terminated path)
 #define PANEL_CMD_RESET                0x7F  // Reset system
 
 // Read commands (bit 7 = 1)
@@ -80,6 +89,7 @@
 #define PANEL_DEVICE_STATUS_ERROR       0x03  // Image error
 #define PANEL_DEVICE_STATUS_NO_CARD     0x04  // SD card not present
 #define PANEL_DEVICE_STATUS_WRONG_MODE  0x05  // SD card configured for the other device type
+#define PANEL_DEVICE_STATUS_TRAY_OPEN   0x06  // Optical tray open (disc ejected), awaiting load/close
 
 // Special argument values
 #define PANEL_ARG_EXTENDED             0xFFFF  // Use payload for extended data
@@ -167,6 +177,33 @@ typedef struct __attribute__((packed)) {
 #define PANEL_DOWNLOAD_ERROR_NOT_FOUND 0x01
 #define PANEL_DOWNLOAD_ERROR_READ      0x02
 
+// File delete result codes (DELETE_FILE returns a single result_code byte)
+#define PANEL_DELETE_OK                0x00
+#define PANEL_DELETE_ERROR_NOT_FOUND   0x01
+#define PANEL_DELETE_ERROR_IN_USE      0x02  // target is a currently-loaded image
+#define PANEL_DELETE_ERROR_IO          0x03
+#define PANEL_DELETE_ERROR_PATH        0x04  // empty path or ".." traversal
+
+// File rename result codes (RENAME_FILE returns a single result_code byte)
+#define PANEL_RENAME_OK                0x00
+#define PANEL_RENAME_ERROR_NOT_FOUND   0x01
+#define PANEL_RENAME_ERROR_EXISTS      0x02  // destination already exists
+#define PANEL_RENAME_ERROR_IN_USE      0x03  // source is a currently-loaded image
+#define PANEL_RENAME_ERROR_IO          0x04
+#define PANEL_RENAME_ERROR_PATH        0x05  // empty/invalid path or ".." traversal
+
+// File touch (create empty file) result codes (single result_code byte)
+#define PANEL_TOUCH_OK                 0x00
+#define PANEL_TOUCH_ERROR_EXISTS       0x01  // a file/dir with that name already exists
+#define PANEL_TOUCH_ERROR_PATH         0x02  // empty/invalid path or ".." traversal
+#define PANEL_TOUCH_ERROR_IO           0x03
+
+// Make-directory result codes (single result_code byte)
+#define PANEL_MKDIR_OK                 0x00
+#define PANEL_MKDIR_ERROR_EXISTS       0x01  // a file/dir with that name already exists
+#define PANEL_MKDIR_ERROR_PATH         0x02  // empty/invalid path or ".." traversal
+#define PANEL_MKDIR_ERROR_IO           0x03
+
 // Disc type codes for playback status
 #define PANEL_DISC_TYPE_NO_DISC    0x00
 #define PANEL_DISC_TYPE_DATA       0x01  // Data CD-ROM
@@ -195,7 +232,8 @@ typedef struct __attribute__((packed)) {
     char disc_name[64];       // Current disc name (null-terminated)
     uint8_t device_status;    // PANEL_DEVICE_STATUS_*
     uint8_t alive_magic;      // PANEL_ALIVE_MAGIC when written by a live main board
-    uint8_t reserved[2];      // Reserved for future use
+    uint8_t tray_open;        // 1 if optical tray open (disc ejected), awaiting load/close
+    uint8_t reserved[1];      // Reserved for future use
 } panel_playback_status_t;
 
 // Entry type for directory listings

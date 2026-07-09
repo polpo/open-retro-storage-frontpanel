@@ -1,6 +1,14 @@
 name: Build
 on: [push, pull_request]
 jobs:
+  host-tests:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v5
+      - name: Run host-native protocol/comm tests
+        run: make -C sw-frontpanel/test
+
   build-frontpanel-firmware:
     runs-on: ubuntu-22.04
     strategy:
@@ -8,13 +16,15 @@ jobs:
         product:
           - name: picoide
             sdkconfig_extra: sdkconfig.defaults.picoide
-          - name: bluescsi
+          - name: bluescsi-ultra
             sdkconfig_extra: sdkconfig.defaults.bluescsi
+          - name: bluescsi-v2
+            sdkconfig_extra: sdkconfig.defaults.bluescsi;sdkconfig.defaults.i2c
     env:
       OUTPUT_DIR: ${{github.workspace}}/binaries
     steps:
       - name: Checkout repo with submodules
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           submodules: recursive
       - name: Build Front Panel Firmware (${{ matrix.product.name }})
@@ -23,7 +33,7 @@ jobs:
           esp_idf_version: v5.5.4
           target: esp32c3
           path: 'sw-frontpanel'
-          command: 'idf.py -B build-${{ matrix.product.name }} -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;${{ matrix.product.sdkconfig_extra }}" build'
+          command: 'idf.py -B build-${{ matrix.product.name }} -DSDKCONFIG=build-${{ matrix.product.name }}/sdkconfig -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;${{ matrix.product.sdkconfig_extra }}" build'
       - name: Upload Front Panel Firmware
         uses: actions/upload-artifact@v7
         with:
@@ -43,7 +53,7 @@ jobs:
       STAGING_DIR: ${{github.workspace}}/release-staging-dir
     steps:
       - name: Checkout repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
       - name: Classify release
         id: relinfo
         shell: bash
@@ -73,10 +83,12 @@ jobs:
           pattern: frontpanel-firmware-*
           merge-multiple: true
       - name: Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v3
         with:
           body_path: release-body.md
           files: |
             */picoide-frontpanel.bin
+            */bluescsi-ultra-frontpanel.bin
+            */bluescsi-v2-frontpanel.bin
           draft: true
           prerelease: ${{ steps.relinfo.outputs.prerelease }}

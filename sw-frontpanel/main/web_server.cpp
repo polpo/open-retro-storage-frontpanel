@@ -17,6 +17,7 @@
 #include "web_server.h"
 #include <string.h>
 #include <stdlib.h>
+#include <ctype.h>
 #include <inttypes.h>
 #include <sys/param.h>  // MIN()
 #include "esp_log.h"
@@ -49,6 +50,11 @@ static esp_err_t api_mainboard_firmware_check_handler(httpd_req_t *req);
 static esp_err_t api_mainboard_firmware_update_handler(httpd_req_t *req);
 static esp_err_t api_mainboard_firmware_status_handler(httpd_req_t *req);
 static esp_err_t api_mainboard_firmware_upload_handler(httpd_req_t *req);
+static esp_err_t api_panel_firmware_upload_handler(httpd_req_t *req);
+static esp_err_t api_delete_handler(httpd_req_t *req);
+static esp_err_t api_rename_handler(httpd_req_t *req);
+static esp_err_t api_touch_handler(httpd_req_t *req);
+static esp_err_t api_mkdir_handler(httpd_req_t *req);
 #endif
 static esp_err_t api_devices_handler(httpd_req_t *req);
 static esp_err_t api_upload_handler(httpd_req_t *req);
@@ -164,10 +170,18 @@ static const httpd_uri_t uri_handlers[] = {
     { .uri = "/api/firmware/mainboard/update", .method = HTTP_POST, .handler = api_mainboard_firmware_update_handler, .user_ctx = NULL },
     { .uri = "/api/firmware/mainboard/status", .method = HTTP_GET, .handler = api_mainboard_firmware_status_handler, .user_ctx = NULL },
     { .uri = "/api/firmware/mainboard/upload", .method = HTTP_POST, .handler = api_mainboard_firmware_upload_handler, .user_ctx = NULL },
+    { .uri = "/api/firmware/panel/upload", .method = HTTP_POST, .handler = api_panel_firmware_upload_handler, .user_ctx = NULL },
+    { .uri = "/api/delete", .method = HTTP_POST, .handler = api_delete_handler, .user_ctx = NULL },
+    { .uri = "/api/rename", .method = HTTP_POST, .handler = api_rename_handler, .user_ctx = NULL },
+    { .uri = "/api/touch", .method = HTTP_POST, .handler = api_touch_handler, .user_ctx = NULL },
+    { .uri = "/api/mkdir", .method = HTTP_POST, .handler = api_mkdir_handler, .user_ctx = NULL },
 #endif
     { .uri = "/api/upload", .method = HTTP_POST, .handler = api_upload_handler, .user_ctx = NULL },
     { .uri = "/api/download", .method = HTTP_GET, .handler = api_download_handler, .user_ctx = NULL }
 };
+
+static_assert(sizeof(uri_handlers) / sizeof(uri_handlers[0]) <= WEB_SERVER_MAX_HANDLERS,
+              "uri_handlers[] exceeds WEB_SERVER_MAX_HANDLERS; bump it in web_server.h");
 
 static esp_err_t static_file_handler(httpd_req_t *req) {
     const static_file_t *file = (const static_file_t *)req->user_ctx;
@@ -562,7 +576,7 @@ static esp_err_t api_eject_image_handler(httpd_req_t *req) {
         if (ret != ESP_OK) return ret;
     }
 
-    ret = json.write("success", success ? 1 : 0);
+    ret = json.write("success", success);
     if (ret != ESP_OK) return ret;
 
     ret = json.endObject();
@@ -593,7 +607,7 @@ static esp_err_t api_prev_image_handler(httpd_req_t *req) {
         if (ret != ESP_OK) return ret;
     }
 
-    ret = json.write("success", success ? 1 : 0);
+    ret = json.write("success", success);
     if (ret != ESP_OK) return ret;
 
     ret = json.endObject();
@@ -624,7 +638,7 @@ static esp_err_t api_next_image_handler(httpd_req_t *req) {
         if (ret != ESP_OK) return ret;
     }
 
-    ret = json.write("success", success ? 1 : 0);
+    ret = json.write("success", success);
     if (ret != ESP_OK) return ret;
 
     ret = json.endObject();
@@ -1267,7 +1281,7 @@ static esp_err_t api_firmware_update_handler(httpd_req_t *req) {
         if (ret != ESP_OK) return ret;
     }
 
-    ret = json.write("success", success ? 1 : 0);
+    ret = json.write("success", success);
     if (ret != ESP_OK) return ret;
 
     ret = json.endObject();
@@ -1309,7 +1323,7 @@ static esp_err_t api_firmware_update_handler(httpd_req_t *req) {
         if (ret != ESP_OK) return ret;
     }
 
-    ret = json.write("success", success ? 1 : 0);
+    ret = json.write("success", success);
     if (ret != ESP_OK) return ret;
 
     ret = json.endObject();
@@ -1500,7 +1514,7 @@ static esp_err_t api_mainboard_firmware_update_handler(httpd_req_t *req) {
         if (ret != ESP_OK) return ret;
     }
 
-    ret = json.write("success", success ? 1 : 0);
+    ret = json.write("success", success);
     if (ret != ESP_OK) return ret;
 
     ret = json.endObject();
@@ -1612,6 +1626,76 @@ static inline char* strnmem(const void* haystack, const char* needle, size_t hay
     return (char *)memmem(haystack, haystacklen, needle, strlen(needle));
 }
 
+// Parse the first chunk of a multipart/form-data body for the {fileSize,
+// fileData} fields the web UI sends. On success returns ESP_OK and fills
+// filename, *file_size, and *file_data_start (offset of the file payload
+// within buf, 0 if the payload hasn't started in this chunk). On failure
+// returns ESP_FAIL and points *err_msg at a static reason string.
+static esp_err_t parse_upload_multipart_header(const char *buf, int received,
+                                               char *filename, size_t filename_size,
+                                               uint32_t *file_size,
+                                               uint32_t *file_data_start,
+                                               const char **err_msg) {
+    *file_size = 0;
+    *file_data_start = 0;
+    filename[0] = '\0';
+    bool found_file_size = false;
+
+    // fileSize field
+    char *filesize_field = strnmem(buf, "name=\"fileSize\"", received);
+    if (filesize_field) {
+        char *value_start = strnmem(filesize_field, "\r\n\r\n", received - (filesize_field - buf));
+        if (value_start) {
+            value_start += 4; // Skip \r\n\r\n
+            char *value_end = strnmem(value_start, "\r\n--", received - (value_start - buf));
+            if (value_end) {
+                char size_str[32] = {0};
+                size_t size_len = value_end - value_start;
+                if (size_len < sizeof(size_str)) {
+                    strncpy(size_str, value_start, size_len);
+                    *file_size = strtoul(size_str, NULL, 10);
+                    found_file_size = true;
+                }
+            }
+        }
+    }
+
+    // filename in the fileData field
+    char *filename_start = NULL;
+    char *filedata_field = strnmem(buf, "name=\"fileData\"", received);
+    if (filedata_field) {
+        filename_start = strnmem(filedata_field, "filename=\"", received - (filedata_field - buf));
+    }
+    if (filename_start) {
+        filename_start += 10; // Skip 'filename="'
+        char *filename_end = strchr(filename_start, '"');
+        if (filename_end) {
+            size_t filename_len = filename_end - filename_start;
+            if (filename_len < filename_size) {
+                strncpy(filename, filename_start, filename_len);
+                filename[filename_len] = '\0';
+            }
+        }
+    }
+
+    if (filename[0] == '\0') {
+        *err_msg = "Invalid multipart data - missing filename";
+        return ESP_FAIL;
+    }
+    if (!found_file_size) {
+        *err_msg = "Invalid multipart data - missing file size";
+        return ESP_FAIL;
+    }
+
+    // Start of file payload (after the file field headers)
+    char *data_start = strnmem(filename_start, "\r\n\r\n", received - (filename_start - buf));
+    if (data_start) {
+        data_start += 4; // Skip \r\n\r\n
+        *file_data_start = data_start - buf;
+    }
+    return ESP_OK;
+}
+
 static esp_err_t handle_file_upload(httpd_req_t *req, const char *path_prefix) {
     ESP_LOGI(TAG, "Upload request received (prefix: \"%s\")", path_prefix);
 
@@ -1623,7 +1707,7 @@ static esp_err_t handle_file_upload(httpd_req_t *req, const char *path_prefix) {
     if (content_length == 0) {
         ESP_LOGE(TAG, "No content in upload request");
         httpd_resp_set_status(req, "400 Bad Request");
-        httpd_resp_send(req, "No content", 10);
+        httpd_resp_send(req, "No content", HTTPD_RESP_USE_STRLEN);
         return ESP_FAIL;
     }
 
@@ -1635,13 +1719,10 @@ static esp_err_t handle_file_upload(httpd_req_t *req, const char *path_prefix) {
     if (!chunk_buffer) {
         ESP_LOGE(TAG, "Failed to allocate upload buffer");
         httpd_resp_set_status(req, "500 Internal Server Error");
-        httpd_resp_send(req, "Memory allocation failed", 23);
+        httpd_resp_send(req, "Memory allocation failed", HTTPD_RESP_USE_STRLEN);
         return ESP_FAIL;
     }
 
-    // Variables for parsing multipart data
-    bool found_filename = false;
-    bool found_file_size = false;
     uint32_t actual_file_size = 0;
     uint32_t file_data_start = 0;
 
@@ -1651,88 +1732,34 @@ static esp_err_t handle_file_upload(httpd_req_t *req, const char *path_prefix) {
         ESP_LOGE(TAG, "Failed to receive upload data");
         free(chunk_buffer);
         httpd_resp_set_status(req, "400 Bad Request");
-        httpd_resp_send(req, "Failed to receive data", 22);
+        httpd_resp_send(req, "Failed to receive data", HTTPD_RESP_USE_STRLEN);
         return ESP_FAIL;
     }
 
-    // Parse multipart data - look for fileSize field first
-    char *filesize_field = strnmem(chunk_buffer, "name=\"fileSize\"", received);
-    if (filesize_field) {
-        // Find the value after the field header
-        char *value_start = strnmem(filesize_field, "\r\n\r\n", received - (filesize_field - chunk_buffer));
-        if (value_start) {
-            value_start += 4; // Skip \r\n\r\n
-            char *value_end = strnmem(value_start, "\r\n--", received - (value_start - chunk_buffer));
-            if (value_end) {
-                char size_str[32] = {0};
-                size_t size_len = value_end - value_start;
-                if (size_len < sizeof(size_str)) {
-                    strncpy(size_str, value_start, size_len);
-                    actual_file_size = strtoul(size_str, NULL, 10);
-                    found_file_size = true;
-                    ESP_LOGI(TAG, "Found file size: %u bytes", actual_file_size);
-                }
-            }
-        }
-    }
-
-    // Look for filename in the file data field
-    char *filename_start = NULL;
-    char *filedata_field = strnmem(chunk_buffer, "name=\"fileData\"", received);
-    if (filedata_field) {
-        filename_start = strnmem(filedata_field, "filename=\"", received - (filedata_field - chunk_buffer));
-    }
-    if (filename_start) {
-        filename_start += 10; // Skip 'filename="'
-        char *filename_end = strchr(filename_start, '"');
-        if (filename_end) {
-            size_t filename_len = filename_end - filename_start;
-            if (filename_len < sizeof(g_upload_state.filename)) {
-                strncpy(g_upload_state.filename, filename_start, filename_len);
-                g_upload_state.filename[filename_len] = '\0';
-                found_filename = true;
-                ESP_LOGI(TAG, "Found filename: %s", g_upload_state.filename);
-            }
-        }
-    }
-
-    if (!found_filename) {
-        ESP_LOGE(TAG, "Could not parse filename from upload");
+    // Parse multipart headers (filename + file size) from the first chunk
+    const char *parse_err = NULL;
+    if (parse_upload_multipart_header(chunk_buffer, received,
+                                      g_upload_state.filename, sizeof(g_upload_state.filename),
+                                      &actual_file_size, &file_data_start, &parse_err) != ESP_OK) {
+        ESP_LOGE(TAG, "%s", parse_err);
         free(chunk_buffer);
         httpd_resp_set_status(req, "400 Bad Request");
-        httpd_resp_send(req, "Invalid multipart data - missing filename", 40);
+        httpd_resp_send(req, parse_err, HTTPD_RESP_USE_STRLEN);
         return ESP_FAIL;
     }
-
-    if (!found_file_size) {
-        ESP_LOGE(TAG, "Could not parse file size from upload");
-        free(chunk_buffer);
-        httpd_resp_set_status(req, "400 Bad Request");
-        httpd_resp_send(req, "Invalid multipart data - missing file size", 41);
-        return ESP_FAIL;
-    }
+    ESP_LOGI(TAG, "Upload: %s (%u bytes), data at offset %u",
+             g_upload_state.filename, actual_file_size, file_data_start);
 
     // Set target path using path_prefix + filename
     snprintf(g_upload_state.target_path, sizeof(g_upload_state.target_path),
              "%s%s", path_prefix, g_upload_state.filename);
-
-    // Look for start of file data (after the file field headers)
-    if (filename_start) {
-        // Now search for \r\n\r\n after filename_start
-        char *data_start = strnmem(filename_start, "\r\n\r\n", received - (filename_start - chunk_buffer));
-        if (data_start) {
-            data_start += 4; // Skip \r\n\r\n
-            file_data_start = data_start - chunk_buffer;
-            ESP_LOGI(TAG, "File data starts at offset: %u", file_data_start);
-        }
-    }
 
     // Start file upload to RP2350
     if (!g_server || !g_server->interface_ctx->host_comm) {
         ESP_LOGE(TAG, "Host communication not available");
         free(chunk_buffer);
         httpd_resp_set_status(req, "503 Service Unavailable");
-        httpd_resp_send(req, "Host not connected", 18);
+        httpd_resp_send(req, "Host not connected", HTTPD_RESP_USE_STRLEN);
         return ESP_FAIL;
     }
 
@@ -1744,7 +1771,7 @@ static esp_err_t handle_file_upload(httpd_req_t *req, const char *path_prefix) {
         ESP_LOGE(TAG, "Failed to start file upload: %s", esp_err_to_name(ret));
         free(chunk_buffer);
         httpd_resp_set_status(req, "500 Internal Server Error");
-        httpd_resp_send(req, "Failed to start upload", 21);
+        httpd_resp_send(req, "Failed to start upload", HTTPD_RESP_USE_STRLEN);
         return ESP_FAIL;
     }
 
@@ -1763,7 +1790,7 @@ static esp_err_t handle_file_upload(httpd_req_t *req, const char *path_prefix) {
                      first_chunk_data_size, PANEL_FILE_CHUNK_SIZE);
             free(chunk_buffer);
             httpd_resp_set_status(req, "400 Bad Request");
-            httpd_resp_send(req, "Multipart header too large", 26);
+            httpd_resp_send(req, "Multipart header too large", HTTPD_RESP_USE_STRLEN);
             return ESP_FAIL;
         }
 
@@ -1774,7 +1801,7 @@ static esp_err_t handle_file_upload(httpd_req_t *req, const char *path_prefix) {
             ESP_LOGE(TAG, "Failed to write first chunk: %s", esp_err_to_name(ret));
             free(chunk_buffer);
             httpd_resp_set_status(req, "500 Internal Server Error");
-            httpd_resp_send(req, "Upload failed", 13);
+            httpd_resp_send(req, "Upload failed", HTTPD_RESP_USE_STRLEN);
             return ESP_FAIL;
         }
 
@@ -1792,7 +1819,7 @@ static esp_err_t handle_file_upload(httpd_req_t *req, const char *path_prefix) {
             ESP_LOGE(TAG, "Failed to receive chunk data");
             free(chunk_buffer);
             httpd_resp_set_status(req, "400 Bad Request");
-            httpd_resp_send(req, "Failed to receive data", 22);
+            httpd_resp_send(req, "Failed to receive data", HTTPD_RESP_USE_STRLEN);
             return ESP_FAIL;
         }
 
@@ -1802,7 +1829,7 @@ static esp_err_t handle_file_upload(httpd_req_t *req, const char *path_prefix) {
             ESP_LOGE(TAG, "Failed to write chunk: %s", esp_err_to_name(ret));
             free(chunk_buffer);
             httpd_resp_set_status(req, "500 Internal Server Error");
-            httpd_resp_send(req, "Upload failed", 13);
+            httpd_resp_send(req, "Upload failed", HTTPD_RESP_USE_STRLEN);
             return ESP_FAIL;
         }
 
@@ -1821,7 +1848,7 @@ static esp_err_t handle_file_upload(httpd_req_t *req, const char *path_prefix) {
         ESP_LOGE(TAG, "Failed to finish upload: %s", esp_err_to_name(ret));
         free(chunk_buffer);
         httpd_resp_set_status(req, "500 Internal Server Error");
-        httpd_resp_send(req, "Upload failed", 13);
+        httpd_resp_send(req, "Upload failed", HTTPD_RESP_USE_STRLEN);
         return ESP_FAIL;
     }
 
@@ -1850,7 +1877,7 @@ static esp_err_t handle_file_upload(httpd_req_t *req, const char *path_prefix) {
                 error_msg = "Unknown error";
         }
 
-        httpd_resp_send(req, error_msg, strlen(error_msg));
+        httpd_resp_send(req, error_msg, HTTPD_RESP_USE_STRLEN);
         return ESP_FAIL;
     }
 
@@ -1902,7 +1929,415 @@ static esp_err_t api_upload_handler(httpd_req_t *req) {
 static esp_err_t api_mainboard_firmware_upload_handler(httpd_req_t *req) {
     return handle_file_upload(req, "/");
 }
+
+// Reboot shortly after the HTTP response is flushed, so the freshly written
+// OTA image becomes active.
+static void panel_reboot_task(void *pvParameters) {
+    vTaskDelay(pdMS_TO_TICKS(2000));
+    ESP_LOGI(TAG, "Rebooting to apply uploaded panel firmware...");
+    esp_restart();
+}
+
+// Direct ESP32 panel firmware upload: stream the posted .bin straight into the
+// next OTA partition (no SD card / main board round-trip), then reboot. This is
+// the front-panel counterpart to api_mainboard_firmware_upload_handler.
+static esp_err_t api_panel_firmware_upload_handler(httpd_req_t *req) {
+    // Don't collide with the SD-card-based panel OTA background task.
+    if (g_ota_task_handle != NULL) {
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_send(req, "Update already in progress", HTTPD_RESP_USE_STRLEN);
+        return ESP_FAIL;
+    }
+
+    if (req->content_len == 0) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_send(req, "No content", HTTPD_RESP_USE_STRLEN);
+        return ESP_FAIL;
+    }
+
+    const size_t chunk_size = PANEL_FILE_CHUNK_SIZE;
+    char *chunk_buffer = (char *)malloc(chunk_size);
+    if (!chunk_buffer) {
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_send(req, "Memory allocation failed", HTTPD_RESP_USE_STRLEN);
+        return ESP_FAIL;
+    }
+
+    int received = httpd_req_recv(req, chunk_buffer, chunk_size);
+    if (received <= 0) {
+        free(chunk_buffer);
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_send(req, "Failed to receive data", HTTPD_RESP_USE_STRLEN);
+        return ESP_FAIL;
+    }
+
+    char filename[256];
+    uint32_t firmware_size = 0;
+    uint32_t file_data_start = 0;
+    const char *parse_err = NULL;
+    if (parse_upload_multipart_header(chunk_buffer, received, filename, sizeof(filename),
+                                      &firmware_size, &file_data_start, &parse_err) != ESP_OK) {
+        ESP_LOGE(TAG, "%s", parse_err);
+        free(chunk_buffer);
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_send(req, parse_err, HTTPD_RESP_USE_STRLEN);
+        return ESP_FAIL;
+    }
+    ESP_LOGI(TAG, "Panel firmware upload: %s (%u bytes)", filename, firmware_size);
+
+    const esp_partition_t *update_partition = esp_ota_get_next_update_partition(NULL);
+    if (!update_partition) {
+        free(chunk_buffer);
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_send(req, "No OTA partition available", HTTPD_RESP_USE_STRLEN);
+        return ESP_FAIL;
+    }
+
+    esp_ota_handle_t ota_handle = 0;
+    esp_err_t ret = esp_ota_begin(update_partition, firmware_size, &ota_handle);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "esp_ota_begin failed: %s", esp_err_to_name(ret));
+        free(chunk_buffer);
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_send(req, "Failed to begin OTA", HTTPD_RESP_USE_STRLEN);
+        return ESP_FAIL;
+    }
+
+    uint32_t bytes_written = 0;
+
+    // File payload bytes that already arrived in the first (header) chunk.
+    if (file_data_start > 0 && (uint32_t)file_data_start < (uint32_t)received) {
+        size_t first_size = received - file_data_start;
+        if (first_size > firmware_size) first_size = firmware_size;
+        ret = esp_ota_write(ota_handle, chunk_buffer + file_data_start, first_size);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "esp_ota_write failed: %s", esp_err_to_name(ret));
+            esp_ota_abort(ota_handle);
+            free(chunk_buffer);
+            httpd_resp_set_status(req, "500 Internal Server Error");
+            httpd_resp_send(req, "OTA write failed", HTTPD_RESP_USE_STRLEN);
+            return ESP_FAIL;
+        }
+        bytes_written += first_size;
+    }
+
+    // Stream the remaining firmware bytes (capped at firmware_size so the
+    // trailing multipart boundary is never written into flash).
+    while (bytes_written < firmware_size) {
+        size_t remaining = firmware_size - bytes_written;
+        size_t to_read = (remaining > chunk_size) ? chunk_size : remaining;
+        int n = httpd_req_recv(req, chunk_buffer, to_read);
+        if (n <= 0) {
+            ESP_LOGE(TAG, "Failed to receive firmware data at %u/%u", bytes_written, firmware_size);
+            esp_ota_abort(ota_handle);
+            free(chunk_buffer);
+            httpd_resp_set_status(req, "400 Bad Request");
+            httpd_resp_send(req, "Failed to receive data", HTTPD_RESP_USE_STRLEN);
+            return ESP_FAIL;
+        }
+        ret = esp_ota_write(ota_handle, chunk_buffer, n);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "esp_ota_write failed: %s", esp_err_to_name(ret));
+            esp_ota_abort(ota_handle);
+            free(chunk_buffer);
+            httpd_resp_set_status(req, "500 Internal Server Error");
+            httpd_resp_send(req, "OTA write failed", HTTPD_RESP_USE_STRLEN);
+            return ESP_FAIL;
+        }
+        bytes_written += n;
+    }
+
+    free(chunk_buffer);
+
+    // esp_ota_end validates the image (magic byte, checksum, signature).
+    ret = esp_ota_end(ota_handle);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "esp_ota_end failed: %s", esp_err_to_name(ret));
+        httpd_resp_set_status(req, "400 Bad Request");
+        const char *msg = (ret == ESP_ERR_OTA_VALIDATE_FAILED)
+            ? "Firmware image validation failed" : "OTA finalize failed";
+        httpd_resp_send(req, msg, HTTPD_RESP_USE_STRLEN);
+        return ESP_FAIL;
+    }
+
+    ret = esp_ota_set_boot_partition(update_partition);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "esp_ota_set_boot_partition failed: %s", esp_err_to_name(ret));
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_send(req, "Failed to set boot partition", HTTPD_RESP_USE_STRLEN);
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "Panel firmware uploaded (%u bytes), rebooting", bytes_written);
+
+    httpd_resp_set_type(req, "application/json");
+    JsonStreamWriter json(req);
+    ret = json.beginObject();
+    if (ret != ESP_OK) return ret;
+    ret = json.write("success", true);
+    if (ret != ESP_OK) return ret;
+    ret = json.write("size", (int)bytes_written);
+    if (ret != ESP_OK) return ret;
+    ret = json.endObject();
+    if (ret != ESP_OK) return ret;
+    ret = json.finalize();
+    if (ret != ESP_OK) return ret;
+
+    // Reboot once the response has been flushed to the client.
+    xTaskCreate(panel_reboot_task, "panel_reboot", 2048, NULL, 5, NULL);
+    return ESP_OK;
+}
 #endif
+
+// Decode percent-encoding (and '+' as space) in place. httpd_query_key_value()
+// returns the raw query value without decoding, so callers that send
+// encodeURIComponent()'d values (e.g. paths with '/' as %2F) must decode here.
+static void url_decode_inplace(char *s) {
+    char *src = s, *dst = s;
+    while (*src) {
+        if (*src == '%' && isxdigit((unsigned char)src[1]) && isxdigit((unsigned char)src[2])) {
+            char hex[3] = { src[1], src[2], '\0' };
+            *dst++ = (char)strtol(hex, NULL, 16);
+            src += 3;
+        } else if (*src == '+') {
+            *dst++ = ' ';
+            src++;
+        } else {
+            *dst++ = *src++;
+        }
+    }
+    *dst = '\0';
+}
+
+#ifdef CONFIG_PRODUCT_BLUESCSI
+// Map a PANEL_DELETE_* result code to a user-facing message (NULL means success).
+static const char *delete_error_string(uint8_t code) {
+    switch (code) {
+        case PANEL_DELETE_OK:              return NULL;
+        case PANEL_DELETE_ERROR_NOT_FOUND: return "File not found";
+        case PANEL_DELETE_ERROR_IN_USE:    return "File is currently loaded — eject it first";
+        case PANEL_DELETE_ERROR_PATH:      return "Invalid path";
+        case PANEL_DELETE_ERROR_IO:        return "Failed to delete file";
+        default:                           return "Delete failed";
+    }
+}
+
+// Map a PANEL_RENAME_* result code to a user-facing message (NULL means success).
+static const char *rename_error_string(uint8_t code) {
+    switch (code) {
+        case PANEL_RENAME_OK:              return NULL;
+        case PANEL_RENAME_ERROR_NOT_FOUND: return "File not found";
+        case PANEL_RENAME_ERROR_EXISTS:    return "A file with that name already exists";
+        case PANEL_RENAME_ERROR_IN_USE:    return "File is currently loaded — eject it first";
+        case PANEL_RENAME_ERROR_PATH:      return "Invalid path";
+        case PANEL_RENAME_ERROR_IO:        return "Failed to rename file";
+        default:                           return "Rename failed";
+    }
+}
+
+// Delete handler - removes a file from the main board SD card.
+// Usage: POST /api/delete  body: { "path": "/dir/image.iso" }
+static esp_err_t api_delete_handler(httpd_req_t *req) {
+    if (!g_server || !g_server->interface_ctx || !g_server->interface_ctx->host_comm) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Host communication not available");
+        return ESP_FAIL;
+    }
+
+    char content[512];
+    size_t recv_size = MIN(req->content_len, sizeof(content) - 1);
+    int ret = httpd_req_recv(req, content, recv_size);
+    if (ret <= 0) {
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+    content[ret] = '\0';
+
+    cJSON *json = cJSON_Parse(content);
+    if (!json) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+        return ESP_FAIL;
+    }
+
+    cJSON *path_json = cJSON_GetObjectItem(json, "path");
+    if (!cJSON_IsString(path_json) || path_json->valuestring[0] == '\0') {
+        cJSON_Delete(json);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing or invalid path");
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "Delete request for: %s", path_json->valuestring);
+
+    uint8_t result_code = 0xFF;
+    esp_err_t del_ret = host_comm_delete_file(g_server->interface_ctx->host_comm,
+                                              path_json->valuestring, &result_code);
+    cJSON_Delete(json);
+
+    httpd_resp_set_type(req, "application/json");
+    JsonStreamWriter jw(req);
+    esp_err_t jret = jw.beginObject();
+    if (jret != ESP_OK) return jret;
+
+    bool success = (del_ret == ESP_OK && result_code == PANEL_DELETE_OK);
+    if (!success) {
+        const char *msg = (del_ret != ESP_OK) ? "Communication error with main board"
+                                              : delete_error_string(result_code);
+        jret = jw.write("error", msg ? msg : "Delete failed");
+        if (jret != ESP_OK) return jret;
+    }
+    jret = jw.write("success", success);
+    if (jret != ESP_OK) return jret;
+    jret = jw.endObject();
+    if (jret != ESP_OK) return jret;
+    return jw.finalize();
+}
+
+// Rename handler - renames a file on the main board SD card.
+// Usage: POST /api/rename  body: { "old_path": "/a.iso", "new_path": "/b.iso" }
+static esp_err_t api_rename_handler(httpd_req_t *req) {
+    if (!g_server || !g_server->interface_ctx || !g_server->interface_ctx->host_comm) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Host communication not available");
+        return ESP_FAIL;
+    }
+
+    char content[768];
+    size_t recv_size = MIN(req->content_len, sizeof(content) - 1);
+    int ret = httpd_req_recv(req, content, recv_size);
+    if (ret <= 0) {
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+    content[ret] = '\0';
+
+    cJSON *json = cJSON_Parse(content);
+    if (!json) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+        return ESP_FAIL;
+    }
+
+    cJSON *old_json = cJSON_GetObjectItem(json, "old_path");
+    cJSON *new_json = cJSON_GetObjectItem(json, "new_path");
+    if (!cJSON_IsString(old_json) || old_json->valuestring[0] == '\0' ||
+        !cJSON_IsString(new_json) || new_json->valuestring[0] == '\0') {
+        cJSON_Delete(json);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing or invalid old_path/new_path");
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "Rename request: %s -> %s", old_json->valuestring, new_json->valuestring);
+
+    uint8_t result_code = 0xFF;
+    esp_err_t rn_ret = host_comm_rename_file(g_server->interface_ctx->host_comm,
+                                             old_json->valuestring, new_json->valuestring,
+                                             &result_code);
+    cJSON_Delete(json);
+
+    httpd_resp_set_type(req, "application/json");
+    JsonStreamWriter jw(req);
+    esp_err_t jret = jw.beginObject();
+    if (jret != ESP_OK) return jret;
+
+    bool success = (rn_ret == ESP_OK && result_code == PANEL_RENAME_OK);
+    if (!success) {
+        const char *msg = (rn_ret != ESP_OK) ? "Communication error with main board"
+                                             : rename_error_string(result_code);
+        jret = jw.write("error", msg ? msg : "Rename failed");
+        if (jret != ESP_OK) return jret;
+    }
+    jret = jw.write("success", success);
+    if (jret != ESP_OK) return jret;
+    jret = jw.endObject();
+    if (jret != ESP_OK) return jret;
+    return jw.finalize();
+}
+
+static const char *touch_error_string(uint8_t code) {
+    switch (code) {
+        case PANEL_TOUCH_OK:           return NULL;
+        case PANEL_TOUCH_ERROR_EXISTS: return "A file or folder with that name already exists";
+        case PANEL_TOUCH_ERROR_PATH:   return "Invalid name";
+        case PANEL_TOUCH_ERROR_IO:     return "Failed to create file";
+        default:                       return "Create failed";
+    }
+}
+
+static const char *mkdir_error_string(uint8_t code) {
+    switch (code) {
+        case PANEL_MKDIR_OK:           return NULL;
+        case PANEL_MKDIR_ERROR_EXISTS: return "A file or folder with that name already exists";
+        case PANEL_MKDIR_ERROR_PATH:   return "Invalid name";
+        case PANEL_MKDIR_ERROR_IO:     return "Failed to create folder";
+        default:                       return "Create failed";
+    }
+}
+
+// Shared body for the single-path create endpoints (touch / mkdir). Parses
+// { "path": "..." }, calls op_fn, and writes a JSON success/error response.
+static esp_err_t api_create_path_op(httpd_req_t *req,
+                                    esp_err_t (*op_fn)(host_comm_t *, const char *, uint8_t *),
+                                    const char *(*err_fn)(uint8_t)) {
+    if (!g_server || !g_server->interface_ctx || !g_server->interface_ctx->host_comm) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Host communication not available");
+        return ESP_FAIL;
+    }
+
+    char content[512];
+    size_t recv_size = MIN(req->content_len, sizeof(content) - 1);
+    int ret = httpd_req_recv(req, content, recv_size);
+    if (ret <= 0) {
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+    content[ret] = '\0';
+
+    cJSON *json = cJSON_Parse(content);
+    if (!json) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+        return ESP_FAIL;
+    }
+
+    cJSON *path_json = cJSON_GetObjectItem(json, "path");
+    if (!cJSON_IsString(path_json) || path_json->valuestring[0] == '\0') {
+        cJSON_Delete(json);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing or invalid path");
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "Create-path request for: %s", path_json->valuestring);
+
+    uint8_t result_code = 0xFF;
+    esp_err_t op_ret = op_fn(g_server->interface_ctx->host_comm,
+                             path_json->valuestring, &result_code);
+    cJSON_Delete(json);
+
+    httpd_resp_set_type(req, "application/json");
+    JsonStreamWriter jw(req);
+    esp_err_t jret = jw.beginObject();
+    if (jret != ESP_OK) return jret;
+
+    bool success = (op_ret == ESP_OK && result_code == 0);
+    if (!success) {
+        const char *msg = (op_ret != ESP_OK) ? "Communication error with main board"
+                                             : err_fn(result_code);
+        jret = jw.write("error", msg ? msg : "Create failed");
+        if (jret != ESP_OK) return jret;
+    }
+    jret = jw.write("success", success);
+    if (jret != ESP_OK) return jret;
+    jret = jw.endObject();
+    if (jret != ESP_OK) return jret;
+    return jw.finalize();
+}
+
+// Create an empty file. Usage: POST /api/touch  body: { "path": "/NE4.hda" }
+static esp_err_t api_touch_handler(httpd_req_t *req) {
+    return api_create_path_op(req, host_comm_touch_file, touch_error_string);
+}
+
+// Create a directory. Usage: POST /api/mkdir  body: { "path": "/CD3" }
+static esp_err_t api_mkdir_handler(httpd_req_t *req) {
+    return api_create_path_op(req, host_comm_mkdir, mkdir_error_string);
+}
+#endif // CONFIG_PRODUCT_BLUESCSI
 
 // File download handler - downloads a file from the main board SD card
 // Usage: GET /api/download?path=/picoide.ini
@@ -1941,6 +2376,10 @@ static esp_err_t api_download_handler(httpd_req_t *req) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing or invalid path parameter");
         return ESP_FAIL;
     }
+
+    // httpd_query_key_value() does not decode percent-encoding; the client sends
+    // the path via encodeURIComponent(), so '/' arrives as %2F, etc.
+    url_decode_inplace(path);
 
     ESP_LOGI(TAG, "Download request for: %s", path);
 

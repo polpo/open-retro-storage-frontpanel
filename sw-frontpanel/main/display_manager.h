@@ -91,6 +91,10 @@ typedef struct {
 } display_manager_t;
 
 esp_err_t display_manager_init(display_manager_t *display);
+// Re-assert the SH1107 init sequence and repaint the current buffer. Used to
+// recover the OLED when it missed its power-on init on a slow (host-only) power
+// rail. Idempotent when the panel is already up.
+esp_err_t display_manager_reinit(display_manager_t *display);
 esp_err_t display_manager_clear(display_manager_t *display);
 esp_err_t display_manager_request_update(display_manager_t *display);
 esp_err_t display_manager_update(display_manager_t *display);

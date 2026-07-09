@@ -603,13 +603,8 @@ esp_err_t host_comm_start_file_upload(host_comm_t *comm, const char *filename, u
         return ret;
     }
 
-    // Poll for async result
-#ifdef CONFIG_PRODUCT_BLUESCSI
-    // Might not be required, was having issues, leaving for now
-    ret = host_comm_poll_async_result(comm, 10000, 10, 0, NULL, NULL);
-#else
-    ret = host_comm_poll_async_result(comm, 2000, 1, 0, NULL, NULL);
-#endif
+    // Poll for async result (mirrors START_FILE_DOWNLOAD's timeout)
+    ret = host_comm_poll_async_result(comm, 5000, 10, 0, NULL, NULL);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed async result after start upload: %s", esp_err_to_name(ret));
         HOST_COMM_UNLOCK(comm);
@@ -654,13 +649,7 @@ esp_err_t host_comm_write_file_chunk(host_comm_t *comm, const uint8_t *data, siz
     }
 
     // Poll for async result
-#ifdef CONFIG_PRODUCT_BLUESCSI
-    // BlueSCSI processes panel SPI commands between SCSI bus operations,
-    // which can block for 10+ seconds during large transfers
-    ret = host_comm_poll_async_result(comm, 30000, 10, 0, NULL, NULL);
-#else
-    ret = host_comm_poll_async_result(comm, 1000, 1, 0, NULL, NULL);
-#endif
+    ret = host_comm_poll_async_result(comm, 5000, 10, 0, NULL, NULL);
 
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed async result after write: %s", esp_err_to_name(ret));
@@ -694,14 +683,11 @@ esp_err_t host_comm_finish_file_upload(host_comm_t *comm, uint8_t *result_code, 
         return ret;
     }
 
-    // Poll for async result (33 bytes: 1 byte result code + 32 byte SHA256)
+    // Poll for async result (33 bytes: 1 byte result code + 32 byte SHA256).
+    // Generous timeout: finish flushes/closes the file and finalizes the SHA.
     uint8_t *result_data;
     size_t result_size;
-#ifdef CONFIG_PRODUCT_BLUESCSI
     ret = host_comm_poll_async_result(comm, 30000, 10, 33, &result_data, &result_size);
-#else
-    ret = host_comm_poll_async_result(comm, 30000, 1, 33, &result_data, &result_size);
-#endif
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to get file upload result: %s", esp_err_to_name(ret));
         HOST_COMM_UNLOCK(comm);
@@ -841,6 +827,91 @@ esp_err_t host_comm_read_file_chunk(host_comm_t *comm, uint32_t chunk_index, uin
     ESP_LOGD(TAG, "File chunk read: index=%lu, size=%d", chunk_index, result_size);
     HOST_COMM_UNLOCK(comm);
     return ESP_OK;
+}
+
+// Shared helper: send one (path2 == NULL) or two null-terminated path strings
+// with `command` and read back a 1-byte result code. Used by delete, rename,
+// touch and mkdir.
+static esp_err_t host_comm_path_op(host_comm_t *comm, uint8_t command,
+                                   const char *path, const char *path2,
+                                   uint8_t *result_code) {
+    if (!comm || !comm->initialized || !path || !result_code) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    size_t path_len = strlen(path);
+    size_t path2_len = path2 ? strlen(path2) : 0;
+    size_t payload_size = path_len + 1 + (path2 ? path2_len + 1 : 0);
+    if (path_len == 0 || (path2 && path2_len == 0) ||
+        payload_size > PANEL_PROTOCOL_MAX_PAYLOAD) {
+        ESP_LOGE(TAG, "Path op 0x%02X path lengths invalid: %d / %d bytes",
+                 command, path_len, path2_len);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    HOST_COMM_LOCK(comm);
+
+    // Payload: path\0[path2\0]
+    memcpy(tx_buffer, path, path_len);
+    tx_buffer[path_len] = '\0';
+    if (path2) {
+        memcpy(tx_buffer + path_len + 1, path2, path2_len);
+        tx_buffer[path_len + 1 + path2_len] = '\0';
+    }
+
+    esp_err_t ret = transport_two_phase_transaction(&comm->transport,
+                                                   command, PANEL_ARG_EXTENDED,
+                                                   tx_buffer, payload_size,
+                                                   NULL, 0);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to send path op 0x%02X: %s", command, esp_err_to_name(ret));
+        HOST_COMM_UNLOCK(comm);
+        return ret;
+    }
+
+    uint8_t *result_data;
+    size_t result_size;
+    ret = host_comm_poll_async_result(comm, 5000, 10, 1, &result_data, &result_size);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to get path-op result: %s", esp_err_to_name(ret));
+        HOST_COMM_UNLOCK(comm);
+        return ret;
+    }
+
+    if (result_size < 1) {
+        ESP_LOGE(TAG, "Path-op result size mismatch: got %d", result_size);
+        HOST_COMM_UNLOCK(comm);
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    *result_code = result_data[0];
+    ESP_LOGD(TAG, "Path op 0x%02X result code: 0x%02X", command, *result_code);
+    HOST_COMM_UNLOCK(comm);
+    return ESP_OK;
+}
+
+esp_err_t host_comm_delete_file(host_comm_t *comm, const char *path, uint8_t *result_code) {
+    ESP_LOGI(TAG, "Deleting file: %s", path ? path : "(null)");
+    return host_comm_path_op(comm, PANEL_CMD_DELETE_FILE, path, NULL, result_code);
+}
+
+esp_err_t host_comm_rename_file(host_comm_t *comm, const char *old_path,
+                                const char *new_path, uint8_t *result_code) {
+    if (!new_path) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    ESP_LOGI(TAG, "Renaming file: %s -> %s", old_path ? old_path : "(null)", new_path);
+    return host_comm_path_op(comm, PANEL_CMD_RENAME_FILE, old_path, new_path, result_code);
+}
+
+esp_err_t host_comm_touch_file(host_comm_t *comm, const char *path, uint8_t *result_code) {
+    ESP_LOGI(TAG, "Touching file: %s", path ? path : "(null)");
+    return host_comm_path_op(comm, PANEL_CMD_TOUCH_FILE, path, NULL, result_code);
+}
+
+esp_err_t host_comm_mkdir(host_comm_t *comm, const char *path, uint8_t *result_code) {
+    ESP_LOGI(TAG, "Creating directory: %s", path ? path : "(null)");
+    return host_comm_path_op(comm, PANEL_CMD_MKDIR, path, NULL, result_code);
 }
 
 esp_err_t host_comm_get_rp2350_fw_status(host_comm_t *comm, rp2350_fw_status_t *status) {

@@ -48,6 +48,15 @@ static const char *TAG = "main";
 #define HOST_COMM_STARTUP_TIMEOUT_MS  20000
 #define HOST_COMM_RETRY_INTERVAL_MS   500
 
+// OLED startup recovery. When the panel is powered only from the host (no USB),
+// the +3V3 rail ramps slowly enough that the display's hardware reset (LM809)
+// can release — and its +9V VPP boost stabilize — after display_manager_init()
+// has already run its one-shot init, leaving the OLED dark. Re-assert the init
+// a few times over the first few seconds; harmless once the panel is up.
+#define DISPLAY_STARTUP_REINIT_FIRST_MS     2000
+#define DISPLAY_STARTUP_REINIT_INTERVAL_MS  500
+#define DISPLAY_STARTUP_REINIT_COUNT        3
+
 // Global instances
 static display_manager_t display;
 static menu_t main_menu;
@@ -952,9 +961,23 @@ static void redraw_current_screen(void) {
 // Display update task
 static void display_update_task(void *pvParameters) {
     static screen_type_t last_screen = SCREEN_COUNT;  // Invalid value forces initial draw
+    static uint8_t startup_reinits = 0;
+    static uint32_t next_reinit_ms = DISPLAY_STARTUP_REINIT_FIRST_MS;
 
     while (1) {
         if (display.initialized) {
+            // Recover the OLED if it missed its power-on init on a slow
+            // (host-only) power rail — re-assert the init a few times over the
+            // first few seconds. Non-blocking; repaints the current buffer.
+            if (startup_reinits < DISPLAY_STARTUP_REINIT_COUNT) {
+                uint32_t now_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
+                if (now_ms >= next_reinit_ms) {
+                    display_manager_reinit(&display);
+                    next_reinit_ms += DISPLAY_STARTUP_REINIT_INTERVAL_MS;
+                    startup_reinits++;
+                }
+            }
+
             // Honor a deferred full-redraw request first (e.g. waking from screensaver).
             if (display.needs_full_redraw) {
                 display.needs_full_redraw = false;
@@ -1046,16 +1069,13 @@ static void refresh_playback_status(void) {
     old_disc_name[sizeof(old_disc_name) - 1] = '\0';
 
     // The playback status poll doubles as the liveness probe by checking for
-    // PANEL_ALIVE_MAGIC
+    // PANEL_ALIVE_MAGIC. Poll the active device so the disc name, playback
+    // state, and device status all describe the same device.
     esp_err_t ret = host_comm.initialized
-        ? host_comm_get_playback_status(&host_comm, 0, &current_playback_status)
+        ? host_comm_get_playback_status(&host_comm, active_device_index, &current_playback_status)
         : ESP_FAIL;
-#ifdef CONFIG_PRODUCT_BLUESCSI
-    if (ret != ESP_OK) {
-#else
     if (ret != ESP_OK ||
         current_playback_status.alive_magic != PANEL_ALIVE_MAGIC) {
-#endif
         memset(&current_playback_status, 0, sizeof(current_playback_status));
         memset(&current_image_status, 0, sizeof(current_image_status));
         strncpy(current_disc_name, "No main board", sizeof(current_disc_name) - 1);
@@ -1069,28 +1089,11 @@ static void refresh_playback_status(void) {
         return;
     }
 
-#ifdef CONFIG_PRODUCT_BLUESCSI
-    if (!current_playback_status.disc_inserted) {
-        strncpy(current_disc_name, "No image loaded", sizeof(current_disc_name) - 1);
-        current_disc_name[sizeof(current_disc_name) - 1] = '\0';
-    } else {
-        // BlueSCSI: disc_name not in playback status (ISR can't call getFilename),
-        // fetch it via GET_LOADED_IMAGE_STATUS which runs in the main loop.
-        ret = host_comm_get_loaded_image_status(&host_comm, active_device_index, &current_image_status);
-        if (ret == ESP_OK && current_image_status.image_loaded) {
-            strncpy(current_disc_name, current_image_status.image_name, sizeof(current_disc_name) - 1);
-            current_disc_name[sizeof(current_disc_name) - 1] = '\0';
-            current_device_type = current_image_status.device_type;
-        } else {
-            strncpy(current_disc_name, "No image loaded", sizeof(current_disc_name) - 1);
-            current_disc_name[sizeof(current_disc_name) - 1] = '\0';
-        }
-    }
-#else
     if (current_playback_status.disc_name[0]) {
-        // PicoIDE: Trust whatever string the main board put in disc_name — it
-        // carries the image name when a disc is loaded, and the error text ("No
-        // SD card" / "Wrong-mode card") when in an SD error state
+        // Trust whatever string the main board put in disc_name — it carries the
+        // image name when a disc is loaded (the main board caches the filename in
+        // its main loop), and the error text ("No SD card" / "Wrong-mode card")
+        // when in an SD error state.
         strncpy(current_disc_name, current_playback_status.disc_name,
                 sizeof(current_disc_name) - 1);
         current_disc_name[sizeof(current_disc_name) - 1] = '\0';
@@ -1098,7 +1101,6 @@ static void refresh_playback_status(void) {
         strncpy(current_disc_name, "No image loaded", sizeof(current_disc_name) - 1);
         current_disc_name[sizeof(current_disc_name) - 1] = '\0';
     }
-#endif
 
     // Track recovery from an SD error so a stale directory listing from the old
     // card gets refetched. device_status rides along in the playback status.
@@ -1170,6 +1172,48 @@ static void refresh_device_list(void) {
         device_count = 1;
         device_list_valid = false;
     }
+}
+
+// SCSI peripheral types (the device_summary_t.device_type values reported by
+// the main board) whose media is removable. These are the devices a user is
+// most likely to want selected on the panel. Mirrors EJECTABLE_TYPES in
+// www/app.js — keep the two in sync.
+static bool device_type_is_removable(uint8_t device_type) {
+    switch (device_type) {
+        case 1:  // removable
+        case 2:  // optical (CD-ROM)
+        case 3:  // floppy
+        case 4:  // MO
+        case 7:  // ZIP
+            return true;
+        default:
+            return false;
+    }
+}
+
+// Choose the device shown on the panel by default. Prefer the first removable
+// device (e.g. a CD-ROM) over device 0, which is commonly a fixed HDD or a
+// non-removable device such as a network adapter. Falls back to the first
+// listed device when none are removable. Call once after the initial device
+// list load so it does not override a later manual selection.
+static void select_default_device(void) {
+    if (!device_list_valid || device_list->device_count == 0) {
+        return;
+    }
+
+    for (uint8_t i = 0; i < device_list->device_count; i++) {
+        if (device_type_is_removable(device_list->devices[i].device_type)) {
+            active_device_index = device_list->devices[i].device_index;
+            interface_ctx.active_device_index = active_device_index;
+            ESP_LOGI(TAG, "Default device -> removable %u (%s)",
+                     active_device_index, device_list->devices[i].device_label);
+            return;
+        }
+    }
+
+    // No removable device present: default to the first listed device.
+    active_device_index = device_list->devices[0].device_index;
+    interface_ctx.active_device_index = active_device_index;
 }
 
 // Populate the device select menu from cached device list
@@ -1924,12 +1968,6 @@ void app_main(void) {
         ESP_LOGI(TAG, "Host comm initialized successfully using %s",
                  host_comm_get_transport_name(&host_comm));
 
-#ifdef CONFIG_PRODUCT_BLUESCSI
-        uint8_t test_status;
-        ret = host_comm_get_device_status(&host_comm, 0, &test_status);
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to communicate with main board: %s", esp_err_to_name(ret));
-#else
         // Probe for the main board. Some systems hold it in reset for several
         // seconds after power-on, so keep retrying for a bounded window
         // instead of giving up on the first failure.
@@ -1948,7 +1986,6 @@ void app_main(void) {
 
         if (comm_ret != ESP_OK) {
             ESP_LOGE(TAG, "Failed to communicate with main board: %s", esp_err_to_name(comm_ret));
-#endif
             led_stop_pulse();
 
             for (int i = 0; i < 6; i++) {
@@ -1976,6 +2013,11 @@ void app_main(void) {
 
             // Get device list for multi-device support
             refresh_device_list();
+
+            // Default the panel to the first removable device (e.g. CD-ROM)
+            // rather than device 0, which is often a fixed HDD or a
+            // non-removable device like a network adapter.
+            select_default_device();
 
             // Switch to multi-device main menu if multiple devices found
             if (device_count > 1) {
