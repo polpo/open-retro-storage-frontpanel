@@ -152,7 +152,7 @@ There are two footprints on the board that can be used to program it: J4 (prog) 
 | 5   | RX |
 | 6   | IO0 (DTR) |
 
-J6 is a JST SH 6-pin connector with the following pinout (pins numbered ascending left to right):
+J6 is a JST SH 5-pin connector with the following pinout (pins numbered ascending left to right):
 
 | Pin | Function |
 |-----|----------|
