@@ -27,6 +27,7 @@
 #include "display_manager.h"
 #include "menu_system.h"
 #include "host_comm.h"  // Modular transport layer (I2C/SPI)
+#include "host_link.h"  // Per-transport config + persisted transport type
 #include "transport_config.h" // Transport configuration
 #include "ui_screens.h"
 #include "led_driver.h"
@@ -47,6 +48,13 @@ static const char *TAG = "main";
 // probe keeps trying afterward so the panel recovers whenever it appears.
 #define HOST_COMM_STARTUP_TIMEOUT_MS  20000
 #define HOST_COMM_RETRY_INTERVAL_MS   500
+
+#ifdef CONFIG_HOST_TRANSPORT_AUTO
+// Auto-detect: give the NVS-saved transport this much of the startup window
+// to itself before alternating both transports (covers a panel moved between
+// board types without probing the other bus on every normal boot).
+#define HOST_LINK_SAVED_EXCLUSIVE_MS  10000
+#endif
 
 // OLED startup recovery. When the panel is powered only from the host (no USB),
 // the +3V3 rail ramps slowly enough that the display's hardware reset (LM809)
@@ -85,6 +93,11 @@ static menu_t* screen_menus[SCREEN_COUNT] = {
 };
 static host_comm_t host_comm;
 static bool host_comm_ready = false;  // True once the transport layer is up (host_comm_init succeeded)
+#ifdef CONFIG_HOST_TRANSPORT_AUTO
+static bool auto_link_pending = false;  // Boot detection found no main board; keep probing in the background
+static host_comm_t probe_comm;  // Scratch handle for background probes; the shared host_comm
+                                // (and its mutex) must never be torn down once handlers can see it
+#endif
 static wifi_manager_t wifi_manager;
 static web_server_t web_server;
 static interface_context_t interface_ctx;
@@ -1057,6 +1070,33 @@ static void status_refresh_task(void *pvParameters) {
                 status_needs_redraw = true; // Refresh the status screen
             }
         }
+#ifdef CONFIG_HOST_TRANSPORT_AUTO
+        else if (auto_link_pending) {
+            // Boot detection found no main board on either transport. Keep
+            // alternating probes with the scratch handle; only bring up the
+            // shared host_comm once a live board is confirmed (web handlers
+            // may already be using it, so it must never be torn down here).
+            static transport_type_t next_type = TRANSPORT_TYPE_I2C;
+            transport_config_t cfg;
+            host_link_build_config(next_type, &cfg);
+            if (host_comm_init(&probe_comm, &cfg) == ESP_OK) {
+                bool alive = host_comm_probe_alive(&probe_comm, 0) == ESP_OK &&
+                             host_comm_probe_alive(&probe_comm, 0) == ESP_OK;
+                host_comm_deinit(&probe_comm);
+                if (alive && host_comm_init(&host_comm, &cfg) == ESP_OK) {
+                    ESP_LOGI(TAG, "Main board found on %s transport, connection established",
+                             host_comm_get_transport_name(&host_comm));
+                    auto_link_pending = false;
+                    host_comm_ready = true;
+                    host_link_save_type(next_type);
+                    disc_list_loaded = false;   // Force directory reload when next opened
+                    status_needs_redraw = true; // Refresh the status screen
+                }
+            }
+            next_type = (next_type == TRANSPORT_TYPE_SPI) ? TRANSPORT_TYPE_I2C
+                                                          : TRANSPORT_TYPE_SPI;
+        }
+#endif
 
         vTaskDelay(pdMS_TO_TICKS(poll_interval_ms ? poll_interval_ms : 10000));
     }
@@ -1789,6 +1829,88 @@ static void host_comm_task(void *pvParameters) {
 }
 #endif
 
+// Bring up the host link and verify a live main board is answering, retrying
+// within the startup window (some systems hold the board in reset for several
+// seconds after power-on). Forced-transport builds init the compile-time
+// transport and probe it. AUTO builds (BlueSCSI) probe with alive-magic
+// validation — an absent SPI host "answers" reads with floating-bus garbage —
+// giving the NVS-saved transport the first part of the window to itself, then
+// alternating both; the winner is persisted. On ESP_OK the shared host_comm is
+// up and verified; on failure host_comm_ready reflects whether it is up at all.
+static esp_err_t establish_host_link(void) {
+#ifdef CONFIG_HOST_TRANSPORT_AUTO
+    transport_type_t saved_type = TRANSPORT_TYPE_SPI;
+    bool have_saved = host_link_load_type(&saved_type);
+    // Without a saved type, try I2C first: an absent I2C slave NACKs
+    // immediately, while an absent SPI host needs the magic check to reject it.
+    transport_type_t current = have_saved ? saved_type : TRANSPORT_TYPE_I2C;
+    ESP_LOGI(TAG, "Detecting host transport (saved: %s)",
+             !have_saved ? "none" : (saved_type == TRANSPORT_TYPE_I2C ? "I2C" : "SPI"));
+
+    uint32_t start_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
+    while (1) {
+        transport_config_t cfg;
+        host_link_build_config(current, &cfg);
+        if (host_comm_init(&host_comm, &cfg) == ESP_OK) {
+            // Probe twice: a floating SPI bus could clock in one
+            // valid-looking alive magic by chance.
+            if (host_comm_probe_alive(&host_comm, 0) == ESP_OK &&
+                host_comm_probe_alive(&host_comm, 0) == ESP_OK) {
+                host_comm_ready = true;
+                ESP_LOGI(TAG, "Main board found on %s transport",
+                         host_comm_get_transport_name(&host_comm));
+                if (!have_saved || current != saved_type) {
+                    host_link_save_type(current);
+                }
+                return ESP_OK;
+            }
+            host_comm_deinit(&host_comm);
+        }
+
+        uint32_t elapsed = xTaskGetTickCount() * portTICK_PERIOD_MS - start_ms;
+        if (elapsed >= HOST_COMM_STARTUP_TIMEOUT_MS) {
+            return ESP_ERR_TIMEOUT;
+        }
+        if (!have_saved || elapsed >= HOST_LINK_SAVED_EXCLUSIVE_MS) {
+            current = (current == TRANSPORT_TYPE_SPI) ? TRANSPORT_TYPE_I2C
+                                                      : TRANSPORT_TYPE_SPI;
+        }
+        ui_update_splash_progress(&display, "Wait for main board", 60);
+        vTaskDelay(pdMS_TO_TICKS(HOST_COMM_RETRY_INTERVAL_MS));
+    }
+#else
+    transport_config_t transport_cfg;
+#ifdef CONFIG_HOST_TRANSPORT_I2C
+    host_link_build_config(TRANSPORT_TYPE_I2C, &transport_cfg);
+#else
+    host_link_build_config(TRANSPORT_TYPE_SPI, &transport_cfg);
+#endif
+
+    esp_err_t ret = host_comm_init(&host_comm, &transport_cfg);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to initialize host comm: %s", esp_err_to_name(ret));
+        return ret;
+    }
+    host_comm_ready = true;
+    ESP_LOGI(TAG, "Host comm initialized successfully using %s",
+             host_comm_get_transport_name(&host_comm));
+
+    uint8_t test_status;
+    esp_err_t comm_ret = host_comm_get_device_status(&host_comm, 0, &test_status);
+    if (comm_ret != ESP_OK) {
+        ESP_LOGW(TAG, "Main board not responding, waiting for it to leave reset...");
+        uint32_t start_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
+        while (comm_ret != ESP_OK &&
+               (xTaskGetTickCount() * portTICK_PERIOD_MS - start_ms) < HOST_COMM_STARTUP_TIMEOUT_MS) {
+            ui_update_splash_progress(&display, "Wait for main board", 60);
+            vTaskDelay(pdMS_TO_TICKS(HOST_COMM_RETRY_INTERVAL_MS));
+            comm_ret = host_comm_get_device_status(&host_comm, 0, &test_status);
+        }
+    }
+    return comm_ret;
+#endif
+}
+
 void app_main(void) {
     ESP_LOGI(TAG, "%s Starting...", PRODUCT_NAME_FULL);
 
@@ -1947,44 +2069,23 @@ void app_main(void) {
 
     display_manager_set_off_state_callback(&display, on_display_off_state_change, NULL);
 
-    transport_config_t transport_cfg = {
-        .device_addr = HOST_DEVICE_ADDR,
-        .sda_miso = PIN_SDA,
-        .scl_clk = PIN_SCL,
-        .cs = PIN_HOST_CS,
-        .mosi = PIN_SPI_MOSI,
-        .clock_speed = HOST_CLOCK_SPEED,
-        .timeout_ms = HOST_TIMEOUT_MS,
-    };
-
     ui_update_splash_progress(&display, "Establish comms...", 55);
     ESP_LOGI(TAG, "Waiting %d ms for main board startup...", HOST_STARTUP_DELAY_MS);
     vTaskDelay(pdMS_TO_TICKS(HOST_STARTUP_DELAY_MS));
-    ret = host_comm_init(&host_comm, &transport_cfg);
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "Failed to initialize host comm: %s", esp_err_to_name(ret));
-    } else {
-        host_comm_ready = true;
-        ESP_LOGI(TAG, "Host comm initialized successfully using %s",
-                 host_comm_get_transport_name(&host_comm));
 
-        // Probe for the main board. Some systems hold it in reset for several
-        // seconds after power-on, so keep retrying for a bounded window
-        // instead of giving up on the first failure.
-        uint8_t test_status;
-        esp_err_t comm_ret = host_comm_get_device_status(&host_comm, 0, &test_status);
-        if (comm_ret != ESP_OK) {
-            ESP_LOGW(TAG, "Main board not responding, waiting for it to leave reset...");
-            uint32_t start_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
-            while (comm_ret != ESP_OK &&
-                   (xTaskGetTickCount() * portTICK_PERIOD_MS - start_ms) < HOST_COMM_STARTUP_TIMEOUT_MS) {
-                ui_update_splash_progress(&display, "Wait for main board", 60);
-                vTaskDelay(pdMS_TO_TICKS(HOST_COMM_RETRY_INTERVAL_MS));
-                comm_ret = host_comm_get_device_status(&host_comm, 0, &test_status);
-            }
-        }
-
-        if (comm_ret != ESP_OK) {
+    esp_err_t comm_ret = establish_host_link();
+    {
+#ifdef CONFIG_HOST_TRANSPORT_AUTO
+        // Detection exhausted the window with no live board on either
+        // transport; keep probing from status_refresh_task.
+        bool board_missing = (comm_ret != ESP_OK);
+        auto_link_pending = board_missing;
+#else
+        // Transport up but board silent. (If host_comm_init itself failed,
+        // there is nothing to probe and no blink, as before.)
+        bool board_missing = (comm_ret != ESP_OK) && host_comm_ready;
+#endif
+        if (board_missing) {
             ESP_LOGE(TAG, "Failed to communicate with main board: %s", esp_err_to_name(comm_ret));
             led_stop_pulse();
 
@@ -1995,8 +2096,11 @@ void app_main(void) {
                 vTaskDelay(pdMS_TO_TICKS(200));
             }
 
-            host_comm.initialized = false;
-        } else {
+            if (host_comm_ready) {
+                host_comm.initialized = false;
+            }
+        }
+        if (comm_ret == ESP_OK) {
             ESP_LOGI(TAG, "Communication with main board verified");
 
             // Get and display main board firmware version

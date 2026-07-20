@@ -26,6 +26,13 @@
 // Forward declaration
 typedef struct transport_handle transport_handle_t;
 
+// Physical link to the host main board. SPI = 0 so a zeroed config selects
+// SPI (the host-native tests rely on this).
+typedef enum {
+    TRANSPORT_TYPE_SPI = 0,
+    TRANSPORT_TYPE_I2C = 1,
+} transport_type_t;
+
 // Transport operations structure
 typedef struct {
     esp_err_t (*init)(transport_handle_t *handle);
@@ -42,6 +49,7 @@ typedef struct {
 
 // Transport configuration
 typedef struct {
+    transport_type_t type; // Which transport implementation to use
     uint8_t device_addr;  // I2C address or SPI device ID
     gpio_num_t sda_miso;  // I2C SDA or SPI MISO
     gpio_num_t scl_clk;   // I2C SCL or SPI CLK
@@ -72,6 +80,6 @@ esp_err_t transport_poll_async_status(transport_handle_t *handle,
 const char* transport_get_name(transport_handle_t *handle);
 
 // Factory function to get the appropriate transport implementation
-const transport_ops_t* transport_get_ops(void);
+const transport_ops_t* transport_get_ops(transport_type_t type);
 
 #endif // TRANSPORT_H

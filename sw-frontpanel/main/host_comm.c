@@ -463,6 +463,19 @@ esp_err_t host_comm_get_playback_status(host_comm_t *comm, uint16_t device_index
     return ret;
 }
 
+esp_err_t host_comm_probe_alive(host_comm_t *comm, uint16_t device_index) {
+    playback_status_t status;
+    esp_err_t ret = host_comm_get_playback_status(comm, device_index, &status);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+    // A transaction that "succeeds" is not proof of a live host: SPI reads
+    // from an absent host return ESP_OK with whatever the floating MISO line
+    // clocked in. Only the alive magic confirms a main board answered.
+    return status.alive_magic == PANEL_ALIVE_MAGIC ? ESP_OK
+                                                   : ESP_ERR_INVALID_RESPONSE;
+}
+
 esp_err_t host_comm_check_firmware(host_comm_t *comm, panel_firmware_info_t *info) {
     if (!comm || !comm->initialized || !info) {
         return ESP_ERR_INVALID_ARG;

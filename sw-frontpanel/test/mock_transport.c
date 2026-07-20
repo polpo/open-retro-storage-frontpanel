@@ -148,7 +148,7 @@ static const char *mock_get_name(void) { return "MOCK"; }
 }
 
 // The real transport.c factory (transport_get_ops) returns one of these by
-// compile-time flag. Defining both means the test links regardless of which
-// TRANSPORT_USE_* the build is configured for.
+// the transport_type_t in the config. Both resolve to the same mock, so tests
+// exercise the routing layer regardless of which type a config selects.
 const transport_ops_t transport_spi_ops = MOCK_OPS_INITIALIZER;
 const transport_ops_t transport_i2c_ops = MOCK_OPS_INITIALIZER;

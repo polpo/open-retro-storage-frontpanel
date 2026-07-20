@@ -17,50 +17,34 @@
 #ifndef TRANSPORT_CONFIG_H
 #define TRANSPORT_CONFIG_H
 
-// Transport selection is driven by the Kconfig choice HOST_TRANSPORT, set
-// per-build via the sdkconfig.defaults.<variant> files. The internal
-// TRANSPORT_USE_* macros below fan out from it so the rest of the transport
-// layer (transport.c / transport_spi.c / transport_i2c.c) is unchanged.
-//   BlueSCSI v2              -> I2C  (sdkconfig.defaults.i2c)
-//   BlueSCSI Ultra / PicoIDE -> SPI  (default)
-#if defined(CONFIG_HOST_TRANSPORT_I2C)
-#define TRANSPORT_USE_I2C
-#elif defined(CONFIG_HOST_TRANSPORT_SPI)
-#define TRANSPORT_USE_SPI
-#else
-// Host-native unit tests compile without sdkconfig.h; default to SPI.
-#define TRANSPORT_USE_SPI
-#endif
+// The transport is selected at runtime (transport_config_t.type), so both
+// implementations' constants are defined unconditionally. Which transport a
+// build actually uses is the Kconfig choice HOST_TRANSPORT: forced SPI or I2C,
+// or AUTO (BlueSCSI) where the panel detects the link and persists it in NVS.
 
 // Host communication settings
 #define HOST_TIMEOUT_MS     1000       // Communication timeout in milliseconds
 
-// I2C-specific settings
-#ifdef TRANSPORT_USE_I2C
-#define HOST_DEVICE_ADDR    0x50       // I2C address or SPI device ID
-#define HOST_CLOCK_SPEED    1000000    // 1 MHz (fast-mode-plus); needs good pull-ups
+// I2C settings (BlueSCSI v2)
+#define HOST_I2C_DEVICE_ADDR  0x50
+#define HOST_I2C_CLOCK_SPEED  1000000  // 1 MHz (fast-mode-plus); needs good pull-ups
 // Delay between header/write and read phases (lets the slave prepare its response).
 // Busy-wait in microseconds; the slave prepares reads in its FINISH ISR, so this
 // can be small. Too small -> master reads before the slave is ready.
 #define I2C_INTER_PHASE_DELAY_US  200
-#endif
 
-// I2C link retries (outside the guard: transport_i2c.c builds in all variants).
-// A busy slave NACKs its address (the RP2040 slave does not clock-stretch), so a
-// transient busy window surfaces as a NACK/timeout. Retry briefly to match SPI,
-// where the master always clocks and readiness is handled by POLL_OP_READY.
+// I2C link retries. A busy slave NACKs its address (the RP2040 slave does not
+// clock-stretch), so a transient busy window surfaces as a NACK/timeout. Retry
+// briefly to match SPI, where the master always clocks and readiness is handled
+// by POLL_OP_READY.
 #define I2C_RETRY_COUNT           3
 #define I2C_RETRY_DELAY_US        200
 
-// SPI-specific settings
-#ifdef TRANSPORT_USE_SPI
-#define HOST_DEVICE_ADDR    -1         // SPI has no device addr
-#define SPI_MODE            0          // SPI mode (0-3)
-#define HOST_CLOCK_SPEED    10000000    // 10MHz for SPI (matches PicoIDE)
+// SPI settings (BlueSCSI Ultra/Ultra Wide, PicoIDE)
+#define HOST_SPI_CLOCK_SPEED  10000000 // 10MHz (matches PicoIDE)
 // Delay between header and payload phases
 // No longer needed since IRQ handler debug prints are disabled by default on main board
 #define SPI_INTER_PHASE_DELAY_US  0
-#endif
 
 // Startup delay: time to wait for main board to be ready before first comm attempt
 #ifdef CONFIG_PRODUCT_BLUESCSI

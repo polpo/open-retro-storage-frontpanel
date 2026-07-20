@@ -169,6 +169,51 @@ TEST(get_playback_status_reads_full_struct) {
     CHECK_EQ_STR(got.disc_name, "Dark Side");
 }
 
+// --- Liveness probe ----------------------------------------------------------
+
+TEST(probe_alive_ok_on_valid_magic) {
+    setup();
+    panel_playback_status_t pb;
+    memset(&pb, 0, sizeof(pb));
+    pb.alive_magic = PANEL_ALIVE_MAGIC;
+    mock_set_poll_result(&pb, sizeof(pb));
+
+    CHECK_ESP_OK(host_comm_probe_alive(&comm, 0));
+    CHECK_EQ_HEX(mock_xfer(0)->command, PANEL_CMD_GET_PLAYBACK_STATUS);
+}
+
+TEST(probe_alive_rejects_garbage) {
+    // Reads from an absent SPI host "succeed" with floating-bus garbage
+    // (typically constant 0x00 or 0xFF); the missing magic must fail the probe.
+    panel_playback_status_t pb;
+
+    setup();
+    memset(&pb, 0x00, sizeof(pb));
+    mock_set_poll_result(&pb, sizeof(pb));
+    CHECK_EQ_INT(host_comm_probe_alive(&comm, 0), ESP_ERR_INVALID_RESPONSE);
+
+    setup();
+    memset(&pb, 0xFF, sizeof(pb));
+    mock_set_poll_result(&pb, sizeof(pb));
+    CHECK_EQ_INT(host_comm_probe_alive(&comm, 0), ESP_ERR_INVALID_RESPONSE);
+}
+
+TEST(probe_alive_propagates_transport_error) {
+    setup();
+    mock_set_xfer_error(ESP_FAIL);
+    CHECK_EQ_INT(host_comm_probe_alive(&comm, 0), ESP_FAIL);
+}
+
+// --- Transport factory --------------------------------------------------------
+
+TEST(factory_selects_ops_by_type) {
+    extern const transport_ops_t transport_spi_ops;
+    extern const transport_ops_t transport_i2c_ops;
+    CHECK_TRUE(transport_get_ops(TRANSPORT_TYPE_SPI) == &transport_spi_ops);
+    CHECK_TRUE(transport_get_ops(TRANSPORT_TYPE_I2C) == &transport_i2c_ops);
+    CHECK_TRUE(transport_get_ops((transport_type_t)99) == NULL);
+}
+
 // --- Firmware / file transfer framing ---------------------------------------
 
 TEST(read_firmware_chunk_sends_le32_offset) {
@@ -390,6 +435,10 @@ void run_host_comm_suite(void) {
     RUN(image_nav_commands_carry_device_in_argument);
     RUN(get_device_status_reads_single_byte);
     RUN(get_playback_status_reads_full_struct);
+    RUN(probe_alive_ok_on_valid_magic);
+    RUN(probe_alive_rejects_garbage);
+    RUN(probe_alive_propagates_transport_error);
+    RUN(factory_selects_ops_by_type);
     RUN(read_firmware_chunk_sends_le32_offset);
     RUN(read_firmware_chunk_rejects_size_mismatch);
     RUN(write_file_chunk_frames_crc16_and_payload);

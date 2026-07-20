@@ -1,3 +1,11 @@
+# v0.4.1
+
+- One BlueSCSI firmware image for all boards: the panel auto-detects the host
+  transport (v2 = I2C, Ultra/Ultra Wide = SPI) at boot and remembers it, so
+  `bluescsi-frontpanel.bin` replaces the separate `-ultra`/`-v2` images
+- Recover the OLED when it misses power-on init (slow 3V3 ramp on host power)
+- Show the SD-card panel update path in the BlueSCSI web UI
+
 # v0.4.0
 
 - Add screensavers and configurable idle/blank timeouts
