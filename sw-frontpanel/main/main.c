@@ -539,9 +539,12 @@ static void handle_button_event(button_event_t *event) {
                             ESP_LOGI(TAG, "Selected entry: %s (menu index %lu)", selected_item->text, selected);
                             // Send command to host device
                             if (host_comm.initialized) {
-                                // First menu item is ".." (parent dir = index -1)
-                                // Other items are entries (index 0, 1, 2...)
-                                int32_t entry_index = (selected == 0) ? -1 : (int32_t)(selected - 1);
+                                // Use the host's real entry index recorded on the
+                                // row (-1 = parent dir). Deriving it from the menu
+                                // position breaks whenever the host list contains
+                                // entries we skip (its own "..") — that desync
+                                // loaded the entry above the one selected.
+                                int32_t entry_index = selected_item->entry_index;
 
                                 // Check if this is directory navigation (".." or "[directory]")
                                 bool is_directory = (selected == 0) || (selected_item->text[0] == '[');
@@ -1293,6 +1296,14 @@ static const char* get_active_device_label(void) {
     return NULL;
 }
 
+// Record the host directory-entry index on the most recently added menu row.
+// menu_add_item() has no field for caller payload, so we set it after the fact.
+static void set_last_menu_entry_index(menu_t *menu, int32_t entry_index) {
+    if (menu && menu->items && menu->item_count > 0) {
+        menu->items[menu->item_count - 1].entry_index = entry_index;
+    }
+}
+
 // Function to refresh directory entry list from host
 static esp_err_t refresh_directory_list(void) {
     if (!host_comm.initialized) {
@@ -1317,13 +1328,19 @@ static esp_err_t refresh_directory_list(void) {
 
     if (entry_count == 0) {
         menu_add_item(&disc_menu, "Empty directory", MENU_ACTION_SELECT, NULL, NULL);
+        set_last_menu_entry_index(&disc_menu, -1);
         return ESP_OK;
     }
 
-    // Add ".." entry to go to parent directory
+    // Add ".." entry to go to parent directory (host parent-dir sentinel)
     menu_add_item(&disc_menu, "..", MENU_ACTION_SELECT, NULL, NULL);
+    set_last_menu_entry_index(&disc_menu, -1);
 
-    // Get info for each entry (directories and files)
+    // Get info for each entry (directories and files). The host's real entry
+    // index is recorded on each menu row: the host injects its own ".." at
+    // index 0 in every non-root directory (and we skip it, since we add our
+    // own above), so the menu row no longer lines up 1:1 with the host index.
+    // Selection must send the recorded index, not the row position.
     for (uint32_t i = 0; i < entry_count && i < MENU_MAX_ITEMS - 1; i++) {
         dir_entry_info_t entry_info;
         ESP_LOGI(TAG, "Requesting entry info for index %lu", i);
@@ -1343,11 +1360,13 @@ static esp_err_t refresh_directory_list(void) {
 
             ESP_LOGI(TAG, "Entry %lu: %s (type=%u)", i, entry_info.name, entry_info.entry_type);
             menu_add_item(&disc_menu, display_name, MENU_ACTION_SELECT, NULL, NULL);
+            set_last_menu_entry_index(&disc_menu, (int32_t)i);
         } else {
             ESP_LOGW(TAG, "Failed to get info for entry %lu: %s", i, esp_err_to_name(ret));
             char fallback_name[32];
             snprintf(fallback_name, sizeof(fallback_name), "Entry %lu (error)", i);
             menu_add_item(&disc_menu, fallback_name, MENU_ACTION_SELECT, NULL, NULL);
+            set_last_menu_entry_index(&disc_menu, (int32_t)i);
         }
     }
 
