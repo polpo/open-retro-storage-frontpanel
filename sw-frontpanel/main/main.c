@@ -1321,6 +1321,9 @@ static esp_err_t refresh_directory_list(void) {
         ESP_LOGW(TAG, "Failed to get entry count: %s", esp_err_to_name(ret));
         // Add fallback message
         menu_add_item(&disc_menu, "No entries available", MENU_ACTION_SELECT, NULL, NULL);
+        // Selecting this row still sends SELECT_ENTRY; without an explicit -1 it
+        // would send the default 0 and load a real image the user never picked.
+        set_last_menu_entry_index(&disc_menu, -1);
         return ret;
     }
 
