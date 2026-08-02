@@ -54,6 +54,12 @@ static const char *TAG = "main";
 // to itself before alternating both transports (covers a panel moved between
 // board types without probing the other bus on every normal boot).
 #define HOST_LINK_SAVED_EXCLUSIVE_MS  10000
+// Background probe cadence once boot detection has given up. Backs off from
+// MIN to MAX: every probe installs and removes a bus driver, and the SPI one
+// shares SPI2_HOST with the OLED, so a panel left with no main board attached
+// must not churn the display's bus once a second forever.
+#define HOST_LINK_PROBE_MIN_MS        1000
+#define HOST_LINK_PROBE_MAX_MS        30000
 #endif
 
 // OLED startup recovery. When the panel is powered only from the host (no USB),
@@ -141,6 +147,7 @@ static void refresh_playback_status(void);
 static void refresh_device_type(void);
 static void refresh_device_list(void);
 static void populate_device_menu(void);
+static void on_host_link_established(void);
 static const char* get_active_device_label(void);
 static void check_firmware_status(void);
 static void draw_firmware_status_screen(void);
@@ -1042,9 +1049,69 @@ static void display_update_task(void *pvParameters) {
 
 // Status screen refresh task - updates playback data from host, and
 // reconnects to the main board if it was unreachable at startup
+#ifdef CONFIG_HOST_TRANSPORT_AUTO
+// One alternating probe for a main board, using the scratch handle. The shared
+// host_comm is only ever brought up on success — web handlers may already hold
+// it, so it must never be torn down here. Returns true once the link is up.
+static bool auto_link_probe_once(void) {
+    static transport_type_t next_type = TRANSPORT_TYPE_I2C;
+    bool established = false;
+
+    transport_config_t cfg;
+    host_link_build_config(next_type, &cfg);
+    if (host_comm_init(&probe_comm, &cfg) == ESP_OK) {
+        bool alive = host_comm_probe_alive(&probe_comm, 0) == ESP_OK &&
+                     host_comm_probe_alive(&probe_comm, 0) == ESP_OK;
+        host_comm_deinit(&probe_comm);
+        if (alive && host_comm_init(&host_comm, &cfg) == ESP_OK) {
+            ESP_LOGI(TAG, "Main board found on %s transport, connection established",
+                     host_comm_get_transport_name(&host_comm));
+            auto_link_pending = false;
+            host_comm_ready = true;
+            host_link_save_type(next_type);
+            on_host_link_established();
+            established = true;
+        }
+    }
+
+    next_type = (next_type == TRANSPORT_TYPE_SPI) ? TRANSPORT_TYPE_I2C
+                                                  : TRANSPORT_TYPE_SPI;
+    return established;
+}
+#endif
+
 static void status_refresh_task(void *pvParameters) {
+#ifdef CONFIG_HOST_TRANSPORT_AUTO
+    uint32_t probe_backoff_ms = HOST_LINK_PROBE_MIN_MS;
+    int32_t  probe_due_in_ms = 0;   // probe on the first pass
+#endif
     while (1) {
         uint32_t poll_interval_ms = 1000;
+
+#ifdef CONFIG_HOST_TRANSPORT_AUTO
+        // Runs BEFORE the display-state gate: a blanked screen must not stop the
+        // panel from noticing a main board powered on later, and idle blanking
+        // is on by default. Backs off because each probe installs and removes a
+        // bus driver — the SPI one on SPI2_HOST, shared with the OLED — and
+        // doing that every second forever on a panel with no board attached is
+        // both pointless and contention on a live display bus.
+        if (auto_link_pending) {
+            if (probe_due_in_ms <= 0) {
+                if (auto_link_probe_once()) {
+                    probe_backoff_ms = HOST_LINK_PROBE_MIN_MS;
+                } else if (probe_backoff_ms < HOST_LINK_PROBE_MAX_MS) {
+                    probe_backoff_ms *= 2;
+                    if (probe_backoff_ms > HOST_LINK_PROBE_MAX_MS) {
+                        probe_backoff_ms = HOST_LINK_PROBE_MAX_MS;
+                    }
+                }
+                probe_due_in_ms = (int32_t)probe_backoff_ms;
+            }
+        } else {
+            probe_backoff_ms = HOST_LINK_PROBE_MIN_MS;
+            probe_due_in_ms = 0;
+        }
+#endif
 
         if (display.state == DISPLAY_STATE_OFF) {
             // Screen off: no need to poll at all
@@ -1069,39 +1136,19 @@ static void status_refresh_task(void *pvParameters) {
             if (host_comm_get_device_status(&host_comm, 0, &device_status) == ESP_OK) {
                 ESP_LOGI(TAG, "Main board is now responding, connection restored");
                 host_comm.initialized = true;
-                disc_list_loaded = false;   // Force directory reload when next opened
-                status_needs_redraw = true; // Refresh the status screen
+                on_host_link_established();
             }
         }
-#ifdef CONFIG_HOST_TRANSPORT_AUTO
-        else if (auto_link_pending) {
-            // Boot detection found no main board on either transport. Keep
-            // alternating probes with the scratch handle; only bring up the
-            // shared host_comm once a live board is confirmed (web handlers
-            // may already be using it, so it must never be torn down here).
-            static transport_type_t next_type = TRANSPORT_TYPE_I2C;
-            transport_config_t cfg;
-            host_link_build_config(next_type, &cfg);
-            if (host_comm_init(&probe_comm, &cfg) == ESP_OK) {
-                bool alive = host_comm_probe_alive(&probe_comm, 0) == ESP_OK &&
-                             host_comm_probe_alive(&probe_comm, 0) == ESP_OK;
-                host_comm_deinit(&probe_comm);
-                if (alive && host_comm_init(&host_comm, &cfg) == ESP_OK) {
-                    ESP_LOGI(TAG, "Main board found on %s transport, connection established",
-                             host_comm_get_transport_name(&host_comm));
-                    auto_link_pending = false;
-                    host_comm_ready = true;
-                    host_link_save_type(next_type);
-                    disc_list_loaded = false;   // Force directory reload when next opened
-                    status_needs_redraw = true; // Refresh the status screen
-                }
-            }
-            next_type = (next_type == TRANSPORT_TYPE_SPI) ? TRANSPORT_TYPE_I2C
-                                                          : TRANSPORT_TYPE_SPI;
-        }
-#endif
 
-        vTaskDelay(pdMS_TO_TICKS(poll_interval_ms ? poll_interval_ms : 10000));
+        uint32_t delay_ms = poll_interval_ms ? poll_interval_ms : 10000;
+#ifdef CONFIG_HOST_TRANSPORT_AUTO
+        // Never sleep past the next probe, and charge the sleep against it.
+        if (auto_link_pending && (uint32_t)probe_due_in_ms < delay_ms) {
+            delay_ms = (probe_due_in_ms > 100) ? (uint32_t)probe_due_in_ms : 100;
+        }
+        probe_due_in_ms -= (int32_t)delay_ms;
+#endif
+        vTaskDelay(pdMS_TO_TICKS(delay_ms));
     }
 }
 
@@ -1294,6 +1341,27 @@ static const char* get_active_device_label(void) {
         }
     }
     return NULL;
+}
+
+// Bring the UI into sync with a main board that has just answered. Boot-time
+// detection did this inline, so a board that appeared LATER (the normal case for
+// a USB-powered panel) came up half-initialized: no device list, so the
+// device-select screen stayed inert, and current_device_type stuck at its
+// default of ATAPI, giving CD affordances and CD poll cadence on an HDD-only
+// board. Called from every path that establishes the link.
+static void on_host_link_established(void) {
+    refresh_device_type();
+    refresh_device_list();
+    select_default_device();
+
+    if (device_count > 1) {
+        menu_set_items(&main_menu, main_menu_items_multi,
+                       sizeof(main_menu_items_multi) / sizeof(main_menu_items_multi[0]));
+        ESP_LOGI(TAG, "Multi-device mode: %u devices", device_count);
+    }
+
+    disc_list_loaded = false;   // Force directory reload when next opened
+    status_needs_redraw = true; // Refresh the status screen
 }
 
 // Record the host directory-entry index on the most recently added menu row.
@@ -1873,11 +1941,18 @@ static esp_err_t establish_host_link(void) {
     while (1) {
         transport_config_t cfg;
         host_link_build_config(current, &cfg);
-        if (host_comm_init(&host_comm, &cfg) == ESP_OK) {
+        // Probe on the scratch handle, never the shared one: host_comm_deinit()
+        // deletes host_comm.mutex and leaves it NULL, and the web server is
+        // started even when detection times out. Tearing down the shared handle
+        // here left every host_comm_* caller locking a NULL semaphore. Same
+        // discipline as status_refresh_task's background probe.
+        if (host_comm_init(&probe_comm, &cfg) == ESP_OK) {
             // Probe twice: a floating SPI bus could clock in one
             // valid-looking alive magic by chance.
-            if (host_comm_probe_alive(&host_comm, 0) == ESP_OK &&
-                host_comm_probe_alive(&host_comm, 0) == ESP_OK) {
+            bool alive = host_comm_probe_alive(&probe_comm, 0) == ESP_OK &&
+                         host_comm_probe_alive(&probe_comm, 0) == ESP_OK;
+            host_comm_deinit(&probe_comm);
+            if (alive && host_comm_init(&host_comm, &cfg) == ESP_OK) {
                 host_comm_ready = true;
                 ESP_LOGI(TAG, "Main board found on %s transport",
                          host_comm_get_transport_name(&host_comm));
@@ -1886,7 +1961,6 @@ static esp_err_t establish_host_link(void) {
                 }
                 return ESP_OK;
             }
-            host_comm_deinit(&host_comm);
         }
 
         uint32_t elapsed = xTaskGetTickCount() * portTICK_PERIOD_MS - start_ms;
