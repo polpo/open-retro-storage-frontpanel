@@ -1265,7 +1265,7 @@ static esp_err_t refresh_directory_list(void) {
 
     // Get entry count from host
     uint32_t entry_count = 0;
-    esp_err_t ret = host_comm_get_entry_count(&host_comm, &entry_count);
+    esp_err_t ret = host_comm_get_entry_count(&host_comm, active_device_index, &entry_count);
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "Failed to get entry count: %s", esp_err_to_name(ret));
         // Add fallback message
@@ -1287,7 +1287,7 @@ static esp_err_t refresh_directory_list(void) {
     for (uint32_t i = 0; i < entry_count && i < MENU_MAX_ITEMS - 1; i++) {
         dir_entry_info_t entry_info;
         ESP_LOGI(TAG, "Requesting entry info for index %lu", i);
-        ret = host_comm_get_entry_info(&host_comm, i, &entry_info);
+        ret = host_comm_get_entry_info(&host_comm, active_device_index, i, &entry_info);
         if (ret == ESP_OK) {
             // Skip ".." and "." entries — we already added our own ".." above
             if (strcmp(entry_info.name, "..") == 0 || strcmp(entry_info.name, ".") == 0) {

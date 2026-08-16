@@ -33,17 +33,35 @@ TEST(get_entry_count_frames_command_and_parses_be32) {
     mock_set_poll_result(result, sizeof(result));
 
     uint32_t count = 0;
-    CHECK_ESP_OK(host_comm_get_entry_count(&comm, &count));
+    CHECK_ESP_OK(host_comm_get_entry_count(&comm, 0, &count));
     CHECK_EQ_INT(count, 258);
 
     const mock_xfer_t *x = mock_xfer(0);
     CHECK_TRUE(x != NULL);
     CHECK_EQ_HEX(x->command, PANEL_CMD_GET_DIR_ENTRY_COUNT);
-    CHECK_EQ_HEX(x->argument, PANEL_ARG_IGNORED);
+    CHECK_EQ_HEX(x->argument, 0);
     CHECK_EQ_INT(x->write_len, 0);
 }
 
-TEST(get_entry_info_small_index_uses_argument_field) {
+// This command carries the browse device in the argument
+TEST(get_entry_count_carries_browse_device_in_argument) {
+    setup();
+    uint8_t result[4] = { 0x00, 0x00, 0x00, 0x07 };
+    mock_set_poll_result(result, sizeof(result));
+
+    uint32_t count = 0;
+    CHECK_ESP_OK(host_comm_get_entry_count(&comm, 1, &count));
+    CHECK_EQ_INT(count, 7);
+
+    const mock_xfer_t *x = mock_xfer(0);
+    CHECK_TRUE(x != NULL);
+    CHECK_EQ_HEX(x->command, PANEL_CMD_GET_DIR_ENTRY_COUNT);
+    CHECK_EQ_HEX(x->argument, 1);
+    CHECK_EQ_INT(x->write_len, 0);
+}
+
+// This command carries the browse device in the payload
+TEST(get_entry_info_sends_index_in_argument_and_device_in_payload) {
     setup();
     dir_entry_info_t entry;
     memset(&entry, 0, sizeof(entry));
@@ -52,32 +70,25 @@ TEST(get_entry_info_small_index_uses_argument_field) {
     mock_set_poll_result(&entry, sizeof(entry));
 
     dir_entry_info_t got;
-    CHECK_ESP_OK(host_comm_get_entry_info(&comm, 7, &got));
+    CHECK_ESP_OK(host_comm_get_entry_info(&comm, 1, 7, &got));
 
     const mock_xfer_t *x = mock_xfer(0);
     CHECK_EQ_HEX(x->command, PANEL_CMD_GET_ENTRY_INFO);
     CHECK_EQ_HEX(x->argument, 7);
-    CHECK_EQ_INT(x->write_len, 0);            // small index -> no payload
+    // The index owns the argument, so the browsed device rides in payload[0].
+    CHECK_EQ_INT(x->write_len, 1);
+    CHECK_EQ_HEX(x->write_data[0], 1);
     CHECK_EQ_STR(got.name, "GAME.ISO");
     CHECK_EQ_HEX(got.entry_type, PANEL_ENTRY_TYPE_FILE);
 }
 
-TEST(get_entry_info_large_index_uses_extended_be32_payload) {
+// Test that we reject an index that would get confused with PANEL_ARG_EXTENDED
+TEST(get_entry_info_rejects_index_that_would_alias_the_sentinel) {
     setup();
-    dir_entry_info_t entry;
-    memset(&entry, 0, sizeof(entry));
-    mock_set_poll_result(&entry, sizeof(entry));
-
     dir_entry_info_t got;
-    CHECK_ESP_OK(host_comm_get_entry_info(&comm, 0x12345, &got));
-
-    const mock_xfer_t *x = mock_xfer(0);
-    CHECK_EQ_HEX(x->command, PANEL_CMD_GET_ENTRY_INFO);
-    CHECK_EQ_HEX(x->argument, PANEL_ARG_EXTENDED);
-    CHECK_EQ_INT(x->write_len, 4);
-    // Index serialized big-endian.
-    uint8_t expect[4] = { 0x00, 0x01, 0x23, 0x45 };
-    CHECK_EQ_MEM(x->write_data, expect, 4);
+    CHECK_EQ_INT(host_comm_get_entry_info(&comm, 0, PANEL_ARG_EXTENDED, &got),
+                 ESP_ERR_INVALID_ARG);
+    CHECK_EQ_INT(mock_xfer_count(), 0);   // nothing put on the wire
 }
 
 TEST(select_entry_parent_encodes_minus_one_and_device) {
@@ -346,7 +357,7 @@ TEST(poll_timeout_propagates) {
     setup();
     mock_set_poll_never_ready();
     uint32_t count = 0;
-    CHECK_EQ_INT(host_comm_get_entry_count(&comm, &count), ESP_ERR_TIMEOUT);
+    CHECK_EQ_INT(host_comm_get_entry_count(&comm, 0, &count), ESP_ERR_TIMEOUT);
 }
 
 TEST(transport_error_propagates_and_stops) {
@@ -362,7 +373,7 @@ TEST(oversize_response_is_rejected) {
     uint8_t big[8] = {0};
     mock_set_poll_result(big, sizeof(big));
     uint32_t count = 0;
-    CHECK_EQ_INT(host_comm_get_entry_count(&comm, &count),
+    CHECK_EQ_INT(host_comm_get_entry_count(&comm, 0, &count),
                  ESP_ERR_INVALID_RESPONSE);
 }
 
@@ -370,21 +381,22 @@ TEST(poll_async_error_state_propagates) {
     setup();
     mock_set_poll_error();
     uint32_t count = 0;
-    CHECK_EQ_INT(host_comm_get_entry_count(&comm, &count), ESP_FAIL);
+    CHECK_EQ_INT(host_comm_get_entry_count(&comm, 0, &count), ESP_FAIL);
 }
 
 TEST(null_args_are_rejected) {
     setup();
     uint32_t count;
-    CHECK_EQ_INT(host_comm_get_entry_count(NULL, &count), ESP_ERR_INVALID_ARG);
-    CHECK_EQ_INT(host_comm_get_entry_count(&comm, NULL), ESP_ERR_INVALID_ARG);
+    CHECK_EQ_INT(host_comm_get_entry_count(NULL, 0, &count), ESP_ERR_INVALID_ARG);
+    CHECK_EQ_INT(host_comm_get_entry_count(&comm, 0, NULL), ESP_ERR_INVALID_ARG);
 }
 
 void run_host_comm_suite(void) {
     printf("host_comm:\n");
     RUN(get_entry_count_frames_command_and_parses_be32);
-    RUN(get_entry_info_small_index_uses_argument_field);
-    RUN(get_entry_info_large_index_uses_extended_be32_payload);
+    RUN(get_entry_count_carries_browse_device_in_argument);
+    RUN(get_entry_info_sends_index_in_argument_and_device_in_payload);
+    RUN(get_entry_info_rejects_index_that_would_alias_the_sentinel);
     RUN(select_entry_parent_encodes_minus_one_and_device);
     RUN(select_entry_targets_device_index_in_payload);
     RUN(image_nav_commands_carry_device_in_argument);

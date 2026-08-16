@@ -151,7 +151,7 @@ static esp_err_t host_comm_poll_async_result(host_comm_t *comm, uint32_t timeout
 
 // Directory browsing functions
 
-esp_err_t host_comm_get_entry_count(host_comm_t *comm, uint32_t *count) {
+esp_err_t host_comm_get_entry_count(host_comm_t *comm, uint16_t device_index, uint32_t *count) {
     if (!comm || !count) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -160,7 +160,7 @@ esp_err_t host_comm_get_entry_count(host_comm_t *comm, uint32_t *count) {
 
     // Start the entry count operation
     esp_err_t ret = transport_two_phase_transaction(&comm->transport,
-                                                    PANEL_CMD_GET_DIR_ENTRY_COUNT, PANEL_ARG_IGNORED,
+                                                    PANEL_CMD_GET_DIR_ENTRY_COUNT, device_index,
                                                     NULL, 0,  // No write data
                                                     NULL, 0);  // No read data
     if (ret != ESP_OK) {
@@ -185,7 +185,8 @@ esp_err_t host_comm_get_entry_count(host_comm_t *comm, uint32_t *count) {
     return ESP_OK;
 }
 
-esp_err_t host_comm_get_entry_info(host_comm_t *comm, uint32_t index, dir_entry_info_t *info) {
+esp_err_t host_comm_get_entry_info(host_comm_t *comm, uint16_t device_index, uint32_t index,
+                                   dir_entry_info_t *info) {
     if (!comm || !info) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -194,26 +195,17 @@ esp_err_t host_comm_get_entry_info(host_comm_t *comm, uint32_t index, dir_entry_
 
     ESP_LOGI(TAG, "Getting info for entry: %lu", index);
 
-    // Start the entry info operation
-    esp_err_t ret;
-    if (index <= 0xffff) {
-        // Use argument field for small indices
-        ret = transport_two_phase_transaction(&comm->transport,
-                                              PANEL_CMD_GET_ENTRY_INFO, (uint16_t)index,
-                                              NULL, 0,  // No write data
-                                              NULL, 0);  // No read data
-    } else {
-        // Use extended format for large indices
-        tx_buffer[0] = (index >> 24) & 0xFF;
-        tx_buffer[1] = (index >> 16) & 0xFF;
-        tx_buffer[2] = (index >> 8) & 0xFF;
-        tx_buffer[3] = index & 0xFF;
-
-        ret = transport_two_phase_transaction(&comm->transport,
-                                              PANEL_CMD_GET_ENTRY_INFO, PANEL_ARG_EXTENDED,
-                                              tx_buffer, 4,  // Write from static buffer
-                                              NULL, 0);  // No read data
+    // Only allow up to 65535 entries
+    if (index >= PANEL_ARG_EXTENDED) {
+        HOST_COMM_UNLOCK(comm);
+        return ESP_ERR_INVALID_ARG;
     }
+    tx_buffer[0] = (uint8_t)device_index;
+
+    esp_err_t ret = transport_two_phase_transaction(&comm->transport,
+                                                    PANEL_CMD_GET_ENTRY_INFO, (uint16_t)index,
+                                                    tx_buffer, 1,  // device only
+                                                    NULL, 0);  // No read data
 
     if (ret != ESP_OK) {
         HOST_COMM_UNLOCK(comm);
@@ -267,7 +259,7 @@ esp_err_t host_comm_select_entry(host_comm_t *comm, int32_t index, uint16_t devi
     return ret;
 }
 
-esp_err_t host_comm_get_current_path(host_comm_t *comm, char *path, size_t max_len) {
+esp_err_t host_comm_get_current_path(host_comm_t *comm, uint16_t device_index, char *path, size_t max_len) {
     if (!comm || !path || max_len == 0) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -278,7 +270,7 @@ esp_err_t host_comm_get_current_path(host_comm_t *comm, char *path, size_t max_l
 
     // Start the get path operation
     esp_err_t ret = transport_two_phase_transaction(&comm->transport,
-                                                    PANEL_CMD_GET_CURRENT_PATH, PANEL_ARG_IGNORED,
+                                                    PANEL_CMD_GET_CURRENT_PATH, device_index,
                                                     NULL, 0,  // No write data
                                                     NULL, 0);  // No read data
     if (ret != ESP_OK) {
