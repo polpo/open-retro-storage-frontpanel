@@ -2227,6 +2227,8 @@ static esp_err_t api_panel_firmware_upload_handler(httpd_req_t *req) {
         return ESP_FAIL;
     }
 
+    ota_manager_set_update_source(OTA_SOURCE_DIRECT);
+
     ESP_LOGI(TAG, "Panel firmware uploaded (%u bytes), rebooting", bytes_written);
 
     httpd_resp_set_type(req, "application/json");
