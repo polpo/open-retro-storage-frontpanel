@@ -1510,19 +1510,25 @@ async function refreshInitiator() {
 
 // Initialize the page (serialize requests to avoid overwhelming ESP32)
 document.addEventListener('DOMContentLoaded', async function() {
+    // Wait for loadSystemInfo() as it sets productName, which decides
+    // the config filename and the firmware version formatting
     await loadSystemInfo();
-    await refreshDevices();
-    // #ifdef PRODUCT_BLUESCSI
-    await refreshInitiator();
-    // #endif
-    await refreshImages();
-    await loadWiFiStatus();
-    // #ifdef PRODUCT_BLUESCSI
-    await checkAllFirmware();
-    // #else
-    await checkFirmware();
-    // #endif
-    await loadConfig();
+
+    // Other requests in parallel, except refreshImages which needs the device
+    // list from refreshDevices first
+    await Promise.all([
+        refreshDevices().then(() => refreshImages()),
+        // #ifdef PRODUCT_BLUESCSI
+        refreshInitiator(),
+        // #endif
+        loadWiFiStatus(),
+        // #ifdef PRODUCT_BLUESCSI
+        checkAllFirmware(),
+        // #else
+        checkFirmware(),
+        // #endif
+        loadConfig(),
+    ]);
 
     // Add file input change listener to set file size
     const fileInput = document.getElementById('file-input');

@@ -62,9 +62,6 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
                 s_manager->station_connected = false;
                 s_manager->state = WIFI_MANAGER_STATE_DISCONNECTED;
 
-                // Stop mDNS when disconnected
-                wifi_manager_stop_mdns(s_manager);
-
                 if (s_manager->retry_count < s_manager->config.max_retry_attempts) {
                     s_manager->retry_count++;
                     ESP_LOGI(TAG, "Retrying connection (%d/%d)", s_manager->retry_count, s_manager->config.max_retry_attempts);
@@ -90,12 +87,6 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
                 s_manager->ap_active = true;
                 s_manager->state = WIFI_MANAGER_STATE_AP_MODE;
 
-                // Start mDNS for AP mode as well
-                esp_err_t mdns_ret = wifi_manager_start_mdns(s_manager);
-                if (mdns_ret != ESP_OK) {
-                    ESP_LOGW(TAG, "Failed to start mDNS in AP mode: %s", esp_err_to_name(mdns_ret));
-                }
-
                 if (s_manager->on_ap_started) {
                     s_manager->on_ap_started(s_manager->ap_ip_addr);
                 }
@@ -107,8 +98,6 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
             case WIFI_EVENT_AP_STOP:
                 ESP_LOGI(TAG, "WiFi Access Point stopped");
                 s_manager->ap_active = false;
-                // Stop mDNS when AP stops
-                wifi_manager_stop_mdns(s_manager);
                 break;
 
             case WIFI_EVENT_AP_STACONNECTED: {
@@ -146,12 +135,6 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
                     ESP_LOGW(TAG, "Failed to save WiFi credentials: %s", esp_err_to_name(save_ret));
                 }
                 s_manager->pending_credential_save = false;
-            }
-
-            // Start mDNS when connected to WiFi
-            esp_err_t mdns_ret = wifi_manager_start_mdns(s_manager);
-            if (mdns_ret != ESP_OK) {
-                ESP_LOGW(TAG, "Failed to start mDNS: %s", esp_err_to_name(mdns_ret));
             }
 
             if (s_manager->on_connected) {
@@ -203,6 +186,12 @@ esp_err_t wifi_manager_init(wifi_manager_t *manager) {
     manager->state = WIFI_MANAGER_STATE_IDLE;
     manager->initialized = true;
 
+    // Register the mdns responder. It hooks WIFI/IP_EVENT itself
+    esp_err_t mdns_ret = wifi_manager_start_mdns(manager);
+    if (mdns_ret != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to start mDNS: %s", esp_err_to_name(mdns_ret));
+    }
+
     ESP_LOGI(TAG, "WiFi manager initialized");
 
     // Try to load saved configuration
@@ -215,6 +204,8 @@ esp_err_t wifi_manager_deinit(wifi_manager_t *manager) {
     if (!manager || !manager->initialized) {
         return ESP_ERR_INVALID_STATE;
     }
+
+    wifi_manager_stop_mdns(manager);
 
     // Stop WiFi
     esp_wifi_stop();
