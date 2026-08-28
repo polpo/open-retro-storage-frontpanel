@@ -33,7 +33,29 @@ static const char *TAG = "wifi_manager";
 
 #define WIFI_CONNECTED_BIT BIT0
 #define WIFI_FAIL_BIT BIT1
+
 #define NVS_NAMESPACE "wifi_config"
+
+#define NVS_KEY_STA_SSID "sta_ssid"
+#define NVS_KEY_STA_PASS "sta_pass"
+#define NVS_KEY_AUTO_CONN "auto_conn"
+#define NVS_KEY_AP_ENABLED "ap_enabled"
+#define NVS_KEY_CONN_TMO "conn_tmo"
+#define NVS_KEY_MAX_RETRY "max_retry"
+#define NVS_KEY_AP_SSID "ap_ssid"
+#define NVS_KEY_MDNS_HOST "mdns_host"
+
+// The single blob these settings used to be stored as, under one key.
+// Frozen in time, only used to migrate from old to new settings
+#define NVS_KEY_LEGACY_BLOB "wifi_config"
+typedef struct {
+    char ssid[32];
+    char password[64];
+    bool auto_connect;
+    bool ap_mode_enabled;
+    uint32_t connection_timeout_ms;
+    uint8_t max_retry_attempts;
+} legacy_wifi_config_t;
 
 static EventGroupHandle_t s_wifi_event_group;
 static esp_netif_t *s_sta_netif = NULL;
@@ -43,6 +65,70 @@ static wifi_mode_t s_original_mode;  // Original mode before scanning
 
 static esp_err_t wifi_manager_start_mdns(wifi_manager_t *manager);
 static esp_err_t wifi_manager_stop_mdns(wifi_manager_t *manager);
+
+void wifi_manager_default_ap_ssid(char *out, size_t len) {
+    uint8_t mac[6] = {0};
+    // Reads the efuse value directly, so this is valid before the radio starts.
+    esp_read_mac(mac, ESP_MAC_WIFI_SOFTAP);
+    snprintf(out, len, "%s-%02X%02X", WIFI_MANAGER_AP_SSID_PREFIX, mac[4], mac[5]);
+}
+
+void wifi_manager_default_mdns_hostname(char *out, size_t len) {
+    snprintf(out, len, "%s", WIFI_MANAGER_MDNS_HOSTNAME_DEFAULT);
+}
+
+bool wifi_manager_ap_ssid_is_valid(const char *ssid) {
+    size_t len = strlen(ssid);
+    return len > 0 && len < WIFI_MANAGER_SSID_MAX_LEN;
+}
+
+// Validate against RFC 1035: ASCII letters, digits and hyphens only, no leading
+// or trailing hyphen
+bool wifi_manager_mdns_hostname_is_valid(const char *hostname) {
+    size_t len = strlen(hostname);
+    if (len == 0 || len >= WIFI_MANAGER_HOSTNAME_MAX_LEN) return false;
+    if (hostname[0] == '-' || hostname[len - 1] == '-') return false;
+    for (const char *c = hostname; *c; c++) {
+        bool ok = (*c >= 'a' && *c <= 'z') || (*c >= 'A' && *c <= 'Z') ||
+                  (*c >= '0' && *c <= '9') || *c == '-';
+        if (!ok) return false;
+    }
+    return true;
+}
+
+static void set_default_settings(wifi_manager_t *manager) {
+    manager->ssid[0] = '\0';
+    manager->password[0] = '\0';
+    manager->auto_connect = false;
+    manager->ap_mode_enabled = true;
+    manager->connection_timeout_ms = 10000;
+    manager->max_retry_attempts = WIFI_MANAGER_CONNECTION_RETRY_MAX;
+    wifi_manager_default_ap_ssid(manager->ap_ssid, sizeof(manager->ap_ssid));
+    wifi_manager_default_mdns_hostname(manager->mdns_hostname, sizeof(manager->mdns_hostname));
+}
+
+static bool import_legacy_settings(nvs_handle_t handle, wifi_manager_t *manager) {
+    legacy_wifi_config_t legacy;
+    size_t size = sizeof(legacy);
+
+    if (nvs_get_blob(handle, NVS_KEY_LEGACY_BLOB, &legacy, &size) != ESP_OK ||
+        size != sizeof(legacy)) {
+        return false;
+    }
+
+    memcpy(manager->ssid, legacy.ssid, sizeof(legacy.ssid));
+    manager->ssid[sizeof(legacy.ssid)] = '\0';
+    memcpy(manager->password, legacy.password, sizeof(manager->password));
+    manager->password[sizeof(manager->password) - 1] = '\0';
+    manager->auto_connect = legacy.auto_connect;
+    manager->ap_mode_enabled = legacy.ap_mode_enabled;
+    manager->connection_timeout_ms = legacy.connection_timeout_ms;
+    manager->max_retry_attempts = legacy.max_retry_attempts;
+    // The names keep their defaults: the legacy blob had no such fields.
+
+    ESP_LOGI(TAG, "Imported WiFi settings from the pre-split layout");
+    return true;
+}
 
 static void wifi_event_handler(void* arg, esp_event_base_t event_base,
                               int32_t event_id, void* event_data) {
@@ -65,13 +151,13 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
                 s_manager->station_connected = false;
                 s_manager->state = WIFI_MANAGER_STATE_DISCONNECTED;
 
-                if (s_manager->retry_count < s_manager->config.max_retry_attempts) {
+                if (s_manager->retry_count < s_manager->max_retry_attempts) {
                     s_manager->retry_count++;
-                    ESP_LOGI(TAG, "Retrying connection (%d/%d)", s_manager->retry_count, s_manager->config.max_retry_attempts);
+                    ESP_LOGI(TAG, "Retrying connection (%d/%d)", s_manager->retry_count, s_manager->max_retry_attempts);
                     s_manager->state = WIFI_MANAGER_STATE_CONNECTING;
                     esp_wifi_connect();
                 } else {
-                    ESP_LOGE(TAG, "WiFi connection failed after %d attempts", s_manager->config.max_retry_attempts);
+                    ESP_LOGE(TAG, "WiFi connection failed after %d attempts", s_manager->max_retry_attempts);
                     s_manager->state = WIFI_MANAGER_STATE_ERROR;
                     xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);
                 }
@@ -130,8 +216,8 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
 
             // Save credentials if connect_and_save was used
             if (s_manager->pending_credential_save) {
-                s_manager->config.auto_connect = true;
-                esp_err_t save_ret = wifi_manager_save_config(s_manager);
+                s_manager->auto_connect = true;
+                esp_err_t save_ret = wifi_manager_save_settings(s_manager);
                 if (save_ret == ESP_OK) {
                     ESP_LOGI(TAG, "WiFi credentials saved for auto-reconnect");
                 } else {
@@ -177,26 +263,21 @@ esp_err_t wifi_manager_init(wifi_manager_t *manager) {
     ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL));
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL));
 
-    // Set default configuration
-    manager->config.auto_connect = false;
-    manager->config.ap_mode_enabled = true;
-    manager->config.connection_timeout_ms = 10000;
-    manager->config.max_retry_attempts = WIFI_MANAGER_CONNECTION_RETRY_MAX;
-
     // Set default AP IP address
     manager->ap_ip_addr.addr = esp_ip4addr_aton("192.168.4.1");
 
     manager->state = WIFI_MANAGER_STATE_IDLE;
     manager->initialized = true;
 
+    // Fills in defaults for anything not stored. Must run before start_mdns()
+    // which uses the hostname loaded by this
+    wifi_manager_load_settings(manager);
+
     // Register the mdns responder. It hooks WIFI/IP_EVENT itself, and logs
     // its own failures
     wifi_manager_start_mdns(manager);
 
     ESP_LOGI(TAG, "WiFi manager initialized");
-
-    // Try to load saved configuration
-    wifi_manager_load_config(manager);
 
     return ESP_OK;
 }
@@ -229,76 +310,91 @@ esp_err_t wifi_manager_deinit(wifi_manager_t *manager) {
     return ESP_OK;
 }
 
-esp_err_t wifi_manager_set_config(wifi_manager_t *manager, const wifi_manager_config_t *config) {
-    if (!manager || !config) {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    memcpy(&manager->config, config, sizeof(wifi_manager_config_t));
-    return ESP_OK;
-}
-
-esp_err_t wifi_manager_get_config(wifi_manager_t *manager, wifi_manager_config_t *config) {
-    if (!manager || !config) {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    memcpy(config, &manager->config, sizeof(wifi_manager_config_t));
-    return ESP_OK;
-}
-
-esp_err_t wifi_manager_save_config(wifi_manager_t *manager) {
+esp_err_t wifi_manager_save_settings(wifi_manager_t *manager) {
     if (!manager) {
         return ESP_ERR_INVALID_ARG;
     }
 
-    nvs_handle_t nvs_handle;
-    esp_err_t ret = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs_handle);
+    nvs_handle_t handle;
+    esp_err_t ret = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to open NVS handle: %s", esp_err_to_name(ret));
         return ret;
     }
 
-    ret = nvs_set_blob(nvs_handle, "wifi_config", &manager->config, sizeof(wifi_manager_config_t));
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to save WiFi config: %s", esp_err_to_name(ret));
-        nvs_close(nvs_handle);
-        return ret;
-    }
+    // NVS skips the write when the stored value already matches, so setting
+    // every key costs flash only for the ones that actually changed.
+    nvs_set_str(handle, NVS_KEY_STA_SSID, manager->ssid);
+    nvs_set_str(handle, NVS_KEY_STA_PASS, manager->password);
+    nvs_set_u8(handle, NVS_KEY_AUTO_CONN, manager->auto_connect);
+    nvs_set_u8(handle, NVS_KEY_AP_ENABLED, manager->ap_mode_enabled);
+    nvs_set_u32(handle, NVS_KEY_CONN_TMO, manager->connection_timeout_ms);
+    nvs_set_u8(handle, NVS_KEY_MAX_RETRY, manager->max_retry_attempts);
+    nvs_set_str(handle, NVS_KEY_AP_SSID, manager->ap_ssid);
+    nvs_set_str(handle, NVS_KEY_MDNS_HOST, manager->mdns_hostname);
 
-    ret = nvs_commit(nvs_handle);
-    nvs_close(nvs_handle);
+    ret = nvs_commit(handle);
+    nvs_close(handle);
 
     if (ret == ESP_OK) {
-        ESP_LOGI(TAG, "WiFi configuration saved");
+        ESP_LOGI(TAG, "Settings saved");
+    } else {
+        ESP_LOGE(TAG, "Failed to save settings: %s", esp_err_to_name(ret));
     }
-
     return ret;
 }
 
-esp_err_t wifi_manager_load_config(wifi_manager_t *manager) {
+esp_err_t wifi_manager_load_settings(wifi_manager_t *manager) {
     if (!manager) {
         return ESP_ERR_INVALID_ARG;
     }
 
-    nvs_handle_t nvs_handle;
-    esp_err_t ret = nvs_open(NVS_NAMESPACE, NVS_READONLY, &nvs_handle);
+    set_default_settings(manager);
+
+    nvs_handle_t handle;
+    esp_err_t ret = nvs_open(NVS_NAMESPACE, NVS_READONLY, &handle);
     if (ret != ESP_OK) {
-        ESP_LOGD(TAG, "No saved WiFi config found");
+        ESP_LOGD(TAG, "No stored settings, using defaults");
         return ret;
     }
 
-    size_t required_size = sizeof(wifi_manager_config_t);
-    ret = nvs_get_blob(nvs_handle, "wifi_config", &manager->config, &required_size);
-    nvs_close(nvs_handle);
+    size_t len = sizeof(manager->ssid);
+    bool found = (nvs_get_str(handle, NVS_KEY_STA_SSID, manager->ssid, &len) == ESP_OK);
 
-    if (ret == ESP_OK) {
-        ESP_LOGI(TAG, "WiFi configuration loaded");
-    } else {
-        ESP_LOGD(TAG, "Failed to load WiFi config: %s", esp_err_to_name(ret));
+    len = sizeof(manager->password);
+    found |= (nvs_get_str(handle, NVS_KEY_STA_PASS, manager->password, &len) == ESP_OK);
+
+    uint8_t flag;
+    if (nvs_get_u8(handle, NVS_KEY_AUTO_CONN, &flag) == ESP_OK) {
+        manager->auto_connect = flag;
+        found = true;
+    }
+    if (nvs_get_u8(handle, NVS_KEY_AP_ENABLED, &flag) == ESP_OK) {
+        manager->ap_mode_enabled = flag;
+        found = true;
     }
 
-    return ret;
+    found |= (nvs_get_u32(handle, NVS_KEY_CONN_TMO, &manager->connection_timeout_ms) == ESP_OK);
+    found |= (nvs_get_u8(handle, NVS_KEY_MAX_RETRY, &manager->max_retry_attempts) == ESP_OK);
+
+    len = sizeof(manager->ap_ssid);
+    found |= (nvs_get_str(handle, NVS_KEY_AP_SSID, manager->ap_ssid, &len) == ESP_OK);
+
+    len = sizeof(manager->mdns_hostname);
+    found |= (nvs_get_str(handle, NVS_KEY_MDNS_HOST, manager->mdns_hostname, &len) == ESP_OK);
+
+    // No key at all means this is either a fresh device or one still holding
+    // the old single blob.
+    bool imported = !found && import_legacy_settings(handle, manager);
+    nvs_close(handle);
+
+    if (imported) {
+        // Write the migrated imported settings, but leave the old one alone
+        // in case we want to downgrade
+        wifi_manager_save_settings(manager);
+    }
+
+    return (found || imported) ? ESP_OK : ESP_ERR_NVS_NOT_FOUND;
 }
 
 esp_err_t wifi_manager_clear_config(wifi_manager_t *manager) {
@@ -306,22 +402,30 @@ esp_err_t wifi_manager_clear_config(wifi_manager_t *manager) {
         return ESP_ERR_INVALID_ARG;
     }
 
-    // Clear in-memory config
-    memset(&manager->config, 0, sizeof(wifi_manager_config_t));
-    manager->config.max_retry_attempts = WIFI_MANAGER_CONNECTION_RETRY_MAX;
+    set_default_settings(manager);
 
-    // Erase from NVS
-    nvs_handle_t nvs_handle;
-    esp_err_t ret = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs_handle);
-    if (ret == ESP_OK) {
-        nvs_erase_key(nvs_handle, "wifi_config");
-        nvs_commit(nvs_handle);
-        nvs_close(nvs_handle);
-        ESP_LOGI(TAG, "WiFi configuration cleared");
-    } else {
+    nvs_handle_t handle;
+    esp_err_t ret = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle);
+    if (ret != ESP_OK) {
         ESP_LOGW(TAG, "Failed to open NVS for clearing: %s", esp_err_to_name(ret));
+        return ESP_OK;
     }
 
+    nvs_erase_key(handle, NVS_KEY_STA_SSID);
+    nvs_erase_key(handle, NVS_KEY_STA_PASS);
+    nvs_erase_key(handle, NVS_KEY_AUTO_CONN);
+    nvs_erase_key(handle, NVS_KEY_AP_ENABLED);
+    nvs_erase_key(handle, NVS_KEY_CONN_TMO);
+    nvs_erase_key(handle, NVS_KEY_MAX_RETRY);
+    nvs_erase_key(handle, NVS_KEY_AP_SSID);
+    nvs_erase_key(handle, NVS_KEY_MDNS_HOST);
+    // The old blob goes too, or the next load would import it straight back.
+    nvs_erase_key(handle, NVS_KEY_LEGACY_BLOB);
+
+    nvs_commit(handle);
+    nvs_close(handle);
+
+    ESP_LOGI(TAG, "Settings cleared");
     return ESP_OK;
 }
 
@@ -339,21 +443,24 @@ esp_err_t wifi_manager_connect(wifi_manager_t *manager, const char *ssid, const 
     }
 
     // Update configuration
-    strncpy(manager->config.ssid, ssid, WIFI_MANAGER_SSID_MAX_LEN - 1);
-    manager->config.ssid[WIFI_MANAGER_SSID_MAX_LEN - 1] = '\0';
+    strncpy(manager->ssid, ssid, WIFI_MANAGER_SSID_MAX_LEN - 1);
+    manager->ssid[WIFI_MANAGER_SSID_MAX_LEN - 1] = '\0';
 
     if (password) {
-        strncpy(manager->config.password, password, WIFI_MANAGER_PASSWORD_MAX_LEN - 1);
-        manager->config.password[WIFI_MANAGER_PASSWORD_MAX_LEN - 1] = '\0';
+        strncpy(manager->password, password, WIFI_MANAGER_PASSWORD_MAX_LEN - 1);
+        manager->password[WIFI_MANAGER_PASSWORD_MAX_LEN - 1] = '\0';
     } else {
-        manager->config.password[0] = '\0';
+        manager->password[0] = '\0';
     }
 
     // Configure WiFi
     wifi_config_t wifi_config = {0};
-    strcpy((char*)wifi_config.sta.ssid, manager->config.ssid);
+    // sta.ssid is exactly 32 bytes and need not be NUL-terminated, so a
+    // full-length SSID is copied as raw bytes rather than as a string.
+    memcpy(wifi_config.sta.ssid, manager->ssid,
+           strnlen(manager->ssid, sizeof(wifi_config.sta.ssid)));
     if (password) {
-        strcpy((char*)wifi_config.sta.password, manager->config.password);
+        strcpy((char*)wifi_config.sta.password, manager->password);
     }
     wifi_config.sta.threshold.authmode = (password && strlen(password) > 0) ? WIFI_AUTH_WPA2_PSK : WIFI_AUTH_OPEN;
 
@@ -407,8 +514,6 @@ esp_err_t wifi_manager_start_ap(wifi_manager_t *manager) {
 
     wifi_config_t wifi_ap_config = {
         .ap = {
-            .ssid = WIFI_MANAGER_AP_SSID,
-            .ssid_len = strlen(WIFI_MANAGER_AP_SSID),
             .channel = WIFI_MANAGER_AP_CHANNEL,
             .password = WIFI_MANAGER_AP_PASSWORD,
             .max_connection = WIFI_MANAGER_AP_MAX_CONNECTIONS,
@@ -419,6 +524,10 @@ esp_err_t wifi_manager_start_ap(wifi_manager_t *manager) {
         },
     };
 
+    // ap.ssid is 32 bytes with no terminator, read ssid_len bytes
+    wifi_ap_config.ap.ssid_len = strnlen(manager->ap_ssid, sizeof(wifi_ap_config.ap.ssid));
+    memcpy(wifi_ap_config.ap.ssid, manager->ap_ssid, wifi_ap_config.ap.ssid_len);
+
     if (strlen(WIFI_MANAGER_AP_PASSWORD) == 0) {
         wifi_ap_config.ap.authmode = WIFI_AUTH_OPEN;
     }
@@ -427,7 +536,7 @@ esp_err_t wifi_manager_start_ap(wifi_manager_t *manager) {
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &wifi_ap_config));
     ESP_ERROR_CHECK(esp_wifi_start());
 
-    ESP_LOGI(TAG, "WiFi AP started with SSID: %s", WIFI_MANAGER_AP_SSID);
+    ESP_LOGI(TAG, "WiFi AP started with SSID: %s", manager->ap_ssid);
 
     return ESP_OK;
 }
@@ -710,7 +819,7 @@ static esp_err_t wifi_manager_start_mdns(wifi_manager_t *manager) {
     }
 
     // Set mDNS hostname
-    ret = mdns_hostname_set(WIFI_MANAGER_MDNS_HOSTNAME);
+    ret = mdns_hostname_set(manager->mdns_hostname);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to set mDNS hostname: %s", esp_err_to_name(ret));
         mdns_free();
@@ -740,7 +849,8 @@ static esp_err_t wifi_manager_start_mdns(wifi_manager_t *manager) {
         // Don't fail for this, it's optional
     }
 
-    ESP_LOGI(TAG, "mDNS started - device available at http://%s.local", WIFI_MANAGER_MDNS_HOSTNAME);
+    ESP_LOGI(TAG, "mDNS started - device available at http://%s.local",
+             manager->mdns_hostname);
     return ESP_OK;
 }
 
@@ -752,4 +862,45 @@ static esp_err_t wifi_manager_stop_mdns(wifi_manager_t *manager) {
     mdns_free();
     ESP_LOGI(TAG, "mDNS stopped");
     return ESP_OK;
+}
+
+const char *wifi_manager_get_ap_ssid(wifi_manager_t *manager) {
+    return manager ? manager->ap_ssid : "";
+}
+
+const char *wifi_manager_get_mdns_hostname(wifi_manager_t *manager) {
+    return manager ? manager->mdns_hostname : "";
+}
+
+esp_err_t wifi_manager_set_ap_ssid(wifi_manager_t *manager, const char *ssid) {
+    if (!manager || !ssid || !wifi_manager_ap_ssid_is_valid(ssid)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    snprintf(manager->ap_ssid, sizeof(manager->ap_ssid), "%s", ssid);
+    ESP_LOGI(TAG, "AP SSID set to %s (applies on next AP start)", manager->ap_ssid);
+    // Deliberately not restarting a running AP: the client that just asked for
+    // the change is most likely connected over it.
+    return wifi_manager_save_settings(manager);
+}
+
+esp_err_t wifi_manager_set_mdns_hostname(wifi_manager_t *manager, const char *hostname) {
+    if (!manager || !hostname || !wifi_manager_mdns_hostname_is_valid(hostname)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    snprintf(manager->mdns_hostname, sizeof(manager->mdns_hostname),
+             "%s", hostname);
+
+    // Cheap to apply live: this re-probes and announces the new name without
+    // tearing the responder down, so clients pick it up within a second.
+    esp_err_t ret = mdns_hostname_set(manager->mdns_hostname);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to apply mDNS hostname: %s", esp_err_to_name(ret));
+    } else {
+        ESP_LOGI(TAG, "mDNS hostname set - device available at http://%s.local",
+                 manager->mdns_hostname);
+    }
+
+    return wifi_manager_save_settings(manager);
 }

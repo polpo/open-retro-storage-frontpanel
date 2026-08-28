@@ -731,24 +731,22 @@ static void handle_button_event(button_event_t *event) {
                                     "SSID: %s\n"
                                     "Password: %s\n"
                                     "IP: 192.168.4.1",
-                                    WIFI_MANAGER_AP_SSID, WIFI_MANAGER_AP_PASSWORD);
+                                    wifi_manager_get_ap_ssid(&wifi_manager), WIFI_MANAGER_AP_PASSWORD);
                             } else if (wifi_manager_is_connected(&wifi_manager)) {
                                 // Show client mode info
-                                wifi_manager_config_t cfg;
-                                wifi_manager_get_config(&wifi_manager, &cfg);
                                 esp_ip4_addr_t ip;
                                 if (wifi_manager_get_ip_info(&wifi_manager, &ip, NULL, NULL) == ESP_OK) {
                                     snprintf(info_text, sizeof(info_text),
                                         "Mode: Client\n"
                                         "SSID: %s\n"
                                         "IP: " IPSTR,
-                                        cfg.ssid, IP2STR(&ip));
+                                        wifi_manager.ssid, IP2STR(&ip));
                                 } else {
                                     snprintf(info_text, sizeof(info_text),
                                         "Mode: Client\n"
                                         "SSID: %s\n"
                                         "IP: Unknown",
-                                        cfg.ssid);
+                                        wifi_manager.ssid);
                                 }
                             } else {
                                 snprintf(info_text, sizeof(info_text),
@@ -769,7 +767,7 @@ static void handle_button_event(button_event_t *event) {
                                 "Connect to:\n"
                                 "SSID: %s\n"
                                 "Pass: %s",
-                                WIFI_MANAGER_AP_SSID, WIFI_MANAGER_AP_PASSWORD);
+                                wifi_manager_get_ap_ssid(&wifi_manager), WIFI_MANAGER_AP_PASSWORD);
                             info_return_screen = SCREEN_WIFI_MENU;
                             current_screen = SCREEN_INFO;
                             show_info_screen("WiFi Reset", info_text);
@@ -2651,11 +2649,9 @@ void app_main(void) {
     } else {
         ESP_LOGI(TAG, "WiFi manager initialized successfully");
 
-        wifi_manager_config_t wifi_config;
-        ret = wifi_manager_get_config(&wifi_manager, &wifi_config);
-        if (ret == ESP_OK && wifi_config.auto_connect && strlen(wifi_config.ssid) > 0) {
-            ESP_LOGI(TAG, "Auto-connecting to saved WiFi: %s", wifi_config.ssid);
-            wifi_manager_connect(&wifi_manager, wifi_config.ssid, wifi_config.password);
+        if (wifi_manager.auto_connect && strlen(wifi_manager.ssid) > 0) {
+            ESP_LOGI(TAG, "Auto-connecting to saved WiFi: %s", wifi_manager.ssid);
+            wifi_manager_connect(&wifi_manager, wifi_manager.ssid, wifi_manager.password);
         } else {
             ESP_LOGI(TAG, "Starting WiFi AP mode for configuration");
             wifi_manager_start_ap(&wifi_manager);
@@ -2682,7 +2678,8 @@ void app_main(void) {
         ESP_LOGW(TAG, "Failed to start web server: %s", esp_err_to_name(ret));
     } else {
         ESP_LOGI(TAG, "Web server started successfully");
-        ESP_LOGI(TAG, "Access web interface at: http://%s.local (when WiFi connects)", WIFI_MANAGER_MDNS_HOSTNAME);
+        ESP_LOGI(TAG, "Access web interface at: http://%s.local (when WiFi connects)",
+                 wifi_manager_get_mdns_hostname(&wifi_manager));
     }
 
     ui_update_splash_progress(&display, "Ready!", 100);

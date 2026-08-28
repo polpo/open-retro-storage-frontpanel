@@ -162,6 +162,21 @@
                     <input type="password" id="manual-password" placeholder="Password" />
                     <button onclick="connectToWiFi(document.getElementById('manual-ssid').value, document.getElementById('manual-password').value)">🔗 Connect</button>
                 </div>
+                <div style="margin-top: 15px;">
+                    <h4>Access Point Name</h4>
+                    <p style="color: #666; margin: 5px 0;">The network this panel creates when it isn't connected to WiFi. Applies the next time the access point starts.</p>
+                    <input type="text" id="setting-ap-ssid" maxlength="32" placeholder="Access point name" />
+                    <button onclick="saveApSsid()">💾 Save</button>
+                    <button onclick="resetApSsid()" class="refresh-btn">↩️ Default</button>
+                </div>
+                <div style="margin-top: 15px;">
+                    <h4>Hostname</h4>
+                    <p style="color: #666; margin: 5px 0;">The .local address this panel answers to. Give each panel its own if you have more than one on the network.</p>
+                    <input type="text" id="setting-mdns-hostname" maxlength="63" placeholder="Hostname" oninput="updateHostnamePreview()" />
+                    <button onclick="saveHostname()">💾 Save</button>
+                    <button onclick="resetHostname()" class="refresh-btn">↩️ Default</button>
+                    <p id="setting-hostname-preview" style="color: #666; margin: 5px 0;"></p>
+                </div>
             </div>
         </div>
 

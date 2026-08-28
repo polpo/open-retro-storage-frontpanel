@@ -38,13 +38,16 @@ async function apiCall(endpoint, options = {}) {
         });
 
         if (!response.ok) {
-            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+            // The panel sends the reason for a rejection as the plain-text
+            // body, which is far more useful than a generic "Bad Request".
+            const reason = (await response.text()).trim();
+            throw new Error(reason || `HTTP ${response.status}: ${response.statusText}`);
         }
 
         return await response.json();
     } catch (error) {
         console.error('API call failed:', error);
-        showStatus('error', `API Error: ${error.message}`);
+        showStatus('error', `Error: ${error.message}`);
         return null;
     }
 }
@@ -520,6 +523,75 @@ async function loadWiFiStatus() {
             toggleWiFiSection();
         }
     }
+}
+
+// Defaults reported by the panel for "Restore Defaults"
+let panelSettingDefaults = { ap_ssid: '', mdns_hostname: '' };
+
+function updateHostnamePreview() {
+    const hostname = document.getElementById('setting-mdns-hostname').value.trim();
+    const preview = document.getElementById('setting-hostname-preview');
+    preview.textContent = hostname ? `Reachable at http://${hostname}.local` : '';
+}
+
+async function loadPanelSettings() {
+    const data = await apiCall('/settings');
+    if (data) {
+        document.getElementById('setting-ap-ssid').value = data.ap_ssid || '';
+        document.getElementById('setting-mdns-hostname').value = data.mdns_hostname || '';
+        panelSettingDefaults = {
+            ap_ssid: data.default_ap_ssid || '',
+            mdns_hostname: data.default_mdns_hostname || ''
+        };
+        updateHostnamePreview();
+    }
+}
+
+// Each name has its own Save button, so a request carries only that one field.
+// The firmware leaves alone any field that isn't present, so saving one name
+// can't clobber the other.
+async function savePanelSetting(body, successMessage) {
+    showStatus('', 'Saving...');
+
+    const data = await apiCall('/settings', {
+        method: 'POST',
+        body: JSON.stringify(body)
+    });
+    if (!data) return false;
+
+    showStatus('success', successMessage);
+    return true;
+}
+
+async function saveApSsid() {
+    const apSsid = document.getElementById('setting-ap-ssid').value.trim();
+    if (!apSsid) {
+        showStatus('error', 'Access point name is required');
+        return;
+    }
+    await savePanelSetting({ ap_ssid: apSsid },
+        'Access point name saved. It applies the next time the access point starts.');
+}
+
+async function resetApSsid() {
+    document.getElementById('setting-ap-ssid').value = panelSettingDefaults.ap_ssid;
+    await saveApSsid();
+}
+
+async function saveHostname() {
+    const hostname = document.getElementById('setting-mdns-hostname').value.trim();
+    if (!hostname) {
+        showStatus('error', 'Hostname is required');
+        return;
+    }
+    if (await savePanelSetting({ mdns_hostname: hostname }, `Saved. Panel is now at http://${hostname}.local`)) {
+        updateHostnamePreview();
+    }
+}
+
+async function resetHostname() {
+    document.getElementById('setting-mdns-hostname').value = panelSettingDefaults.mdns_hostname;
+    await saveHostname();
 }
 
 async function scanWiFi() {
@@ -1535,6 +1607,7 @@ document.addEventListener('DOMContentLoaded', async function() {
             // #endif
             .then(() => refreshImages()),
         loadWiFiStatus(),
+        loadPanelSettings(),
         // #ifdef PRODUCT_BLUESCSI
         checkAllFirmware(),
         // #else

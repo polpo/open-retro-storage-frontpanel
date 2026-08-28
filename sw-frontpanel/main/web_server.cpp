@@ -50,6 +50,8 @@ static esp_err_t api_next_image_handler(httpd_req_t *req);
 static esp_err_t api_wifi_scan_handler(httpd_req_t *req);
 static esp_err_t api_wifi_connect_handler(httpd_req_t *req);
 static esp_err_t api_wifi_status_handler(httpd_req_t *req);
+static esp_err_t api_settings_get_handler(httpd_req_t *req);
+static esp_err_t api_settings_set_handler(httpd_req_t *req);
 static esp_err_t api_firmware_check_handler(httpd_req_t *req);
 static esp_err_t api_firmware_update_handler(httpd_req_t *req);
 static esp_err_t api_firmware_status_handler(httpd_req_t *req);
@@ -301,6 +303,8 @@ static const httpd_uri_t uri_handlers[] = {
     { .uri = "/api/wifi/scan", .method = HTTP_GET, .handler = api_wifi_scan_handler, .user_ctx = NULL },
     { .uri = "/api/wifi/connect", .method = HTTP_POST, .handler = api_wifi_connect_handler, .user_ctx = NULL },
     { .uri = "/api/wifi/status", .method = HTTP_GET, .handler = api_wifi_status_handler, .user_ctx = NULL },
+    { .uri = "/api/settings", .method = HTTP_GET, .handler = api_settings_get_handler, .user_ctx = NULL },
+    { .uri = "/api/settings", .method = HTTP_POST, .handler = api_settings_set_handler, .user_ctx = NULL },
     { .uri = "/api/firmware/check", .method = HTTP_GET, .handler = api_firmware_check_handler, .user_ctx = NULL },
     { .uri = "/api/firmware/update", .method = HTTP_POST, .handler = api_firmware_update_handler, .user_ctx = NULL },
     { .uri = "/api/firmware/status", .method = HTTP_GET, .handler = api_firmware_status_handler, .user_ctx = NULL },
@@ -412,7 +416,9 @@ static esp_err_t api_status_handler(httpd_req_t *req) {
     if (ret != ESP_OK) return ret;
     ret = json.write("product_full", PRODUCT_NAME_FULL);
     if (ret != ESP_OK) return ret;
-    ret = json.write("hostname", WIFI_MANAGER_MDNS_HOSTNAME);
+    ret = json.write("hostname", (g_server && g_server->interface_ctx)
+                                     ? wifi_manager_get_mdns_hostname(g_server->interface_ctx->wifi_manager)
+                                     : WIFI_MANAGER_MDNS_HOSTNAME_DEFAULT);
     if (ret != ESP_OK) return ret;
     ret = json.write("logo_url", PRODUCT_LOGO_URL);
     if (ret != ESP_OK) return ret;
@@ -1163,7 +1169,7 @@ static esp_err_t api_wifi_status_handler(httpd_req_t *req) {
 
         // Include SSID based on mode
         if (wifi->station_connected) {
-            ret = json.write("ssid", wifi->config.ssid);
+            ret = json.write("ssid", wifi->ssid);
             if (ret != ESP_OK) return ret;
 
             esp_ip4_addr_t ip;
@@ -1177,7 +1183,7 @@ static esp_err_t api_wifi_status_handler(httpd_req_t *req) {
                 if (ret != ESP_OK) return ret;
             }
         } else if (wifi->ap_active) {
-            ret = json.write("ssid", WIFI_MANAGER_AP_SSID);
+            ret = json.write("ssid", wifi_manager_get_ap_ssid(wifi));
             if (ret != ESP_OK) return ret;
 
             char ip_address[16];
@@ -1205,6 +1211,106 @@ static esp_err_t api_wifi_status_handler(httpd_req_t *req) {
         if (ret != ESP_OK) return ret;
     }
 
+    ret = json.endObject();
+    if (ret != ESP_OK) return ret;
+
+    return json.finalize();
+}
+
+// Panel identity: the AP SSID and the mDNS hostname. Both defaults are also
+// reported so the UI can show them as placeholders and offer a way back.
+static esp_err_t api_settings_get_handler(httpd_req_t *req) {
+    httpd_resp_set_type(req, "application/json");
+
+    JsonStreamWriter json(req);
+    esp_err_t ret = json.beginObject();
+    if (ret != ESP_OK) return ret;
+
+    char default_ap_ssid[WIFI_MANAGER_SSID_MAX_LEN];
+    char default_hostname[WIFI_MANAGER_HOSTNAME_MAX_LEN];
+    wifi_manager_default_ap_ssid(default_ap_ssid, sizeof(default_ap_ssid));
+    wifi_manager_default_mdns_hostname(default_hostname, sizeof(default_hostname));
+
+    wifi_manager_t *wifi = (g_server && g_server->interface_ctx) ? g_server->interface_ctx->wifi_manager : NULL;
+
+    ret = json.write("ap_ssid", wifi ? wifi_manager_get_ap_ssid(wifi) : default_ap_ssid);
+    if (ret != ESP_OK) return ret;
+    ret = json.write("mdns_hostname", wifi ? wifi_manager_get_mdns_hostname(wifi) : default_hostname);
+    if (ret != ESP_OK) return ret;
+    ret = json.write("default_ap_ssid", default_ap_ssid);
+    if (ret != ESP_OK) return ret;
+    ret = json.write("default_mdns_hostname", default_hostname);
+    if (ret != ESP_OK) return ret;
+
+    ret = json.endObject();
+    if (ret != ESP_OK) return ret;
+
+    return json.finalize();
+}
+
+static esp_err_t api_settings_set_handler(httpd_req_t *req) {
+    char content[256];
+    size_t recv_size = MIN(req->content_len, sizeof(content) - 1);
+    int recv_ret = httpd_req_recv(req, content, recv_size);
+    if (recv_ret <= 0) {
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+    content[recv_ret] = '\0';
+
+    cJSON *json_req = cJSON_Parse(content);
+    if (!json_req) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+        return ESP_FAIL;
+    }
+
+    wifi_manager_t *wifi = (g_server && g_server->interface_ctx) ? g_server->interface_ctx->wifi_manager : NULL;
+    if (!wifi) {
+        cJSON_Delete(json_req);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "WiFi manager not available");
+        return ESP_FAIL;
+    }
+
+    // Either field may be omitted to leave it alone. Both are validated up
+    // front so that rejecting one name never leaves the other already written.
+    cJSON *ap_ssid_json = cJSON_GetObjectItem(json_req, "ap_ssid");
+    cJSON *hostname_json = cJSON_GetObjectItem(json_req, "mdns_hostname");
+    const char *ap_ssid = cJSON_IsString(ap_ssid_json) ? ap_ssid_json->valuestring : NULL;
+    const char *hostname = cJSON_IsString(hostname_json) ? hostname_json->valuestring : NULL;
+
+    const char *error = NULL;
+    if (ap_ssid && !wifi_manager_ap_ssid_is_valid(ap_ssid)) {
+        error = "Invalid AP name: 1-32 bytes";
+    } else if (hostname && !wifi_manager_mdns_hostname_is_valid(hostname)) {
+        error = "Invalid hostname: letters, digits and hyphens only, max 63";
+    }
+
+    if (error) {
+        cJSON_Delete(json_req);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, error);
+        return ESP_FAIL;
+    }
+
+    if (ap_ssid) {
+        wifi_manager_set_ap_ssid(wifi, ap_ssid);
+    }
+    if (hostname) {
+        wifi_manager_set_mdns_hostname(wifi, hostname);
+    }
+
+    cJSON_Delete(json_req);
+
+    httpd_resp_set_type(req, "application/json");
+
+    JsonStreamWriter json(req);
+    esp_err_t ret = json.beginObject();
+    if (ret != ESP_OK) return ret;
+    ret = json.write("success", true);
+    if (ret != ESP_OK) return ret;
+    ret = json.write("ap_ssid", wifi_manager_get_ap_ssid(wifi));
+    if (ret != ESP_OK) return ret;
+    ret = json.write("mdns_hostname", wifi_manager_get_mdns_hostname(wifi));
+    if (ret != ESP_OK) return ret;
     ret = json.endObject();
     if (ret != ESP_OK) return ret;
 
