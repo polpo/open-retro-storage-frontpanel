@@ -22,6 +22,10 @@
 #include "esp_err.h"
 #include "driver/gpio.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define MAX_BUTTONS 8
 #define BUTTON_EVENT_QUEUE_SIZE 32
 #define ACTIVITY_EVENT_QUEUE_SIZE 10
@@ -76,9 +80,21 @@ button_event_t gpio_handler_get_last_event(void);
 bool gpio_handler_has_events(void);
 esp_err_t gpio_handler_clear_events(void);
 
+#ifdef CONFIG_PANEL_TEST_HOOKS
+// Queue a button event that no GPIO edge produced, for bench testing. Enters
+// the state machine at the same point the debounce and repeat timers do, so
+// the UI cannot tell it apart from a real press. Only CLICK and REPEAT are
+// acted on by the UI.
+esp_err_t gpio_handler_inject_event(uint8_t button_id, button_event_type_t type);
+#endif
+
 // Activity indicator functions
 esp_err_t gpio_handler_register_activity_callback(activity_event_handler_t handler);
 esp_err_t gpio_handler_configure_activity_pin(gpio_num_t gpio_num);
 esp_err_t gpio_handler_install_activity_isr(gpio_num_t gpio_num);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

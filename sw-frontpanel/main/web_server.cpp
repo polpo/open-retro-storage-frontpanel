@@ -28,6 +28,13 @@
 #include "json_stream.h"
 #include "ota_manager.h"
 #include "wifi_manager.h"
+#ifdef CONFIG_PANEL_TEST_HOOKS
+#include <strings.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "gpio_handler.h"
+#include "test_hooks.h"
+#endif
 
 static const char *TAG = "web_server";
 
@@ -59,6 +66,11 @@ static esp_err_t api_mkdir_handler(httpd_req_t *req);
 static esp_err_t api_devices_handler(httpd_req_t *req);
 static esp_err_t api_upload_handler(httpd_req_t *req);
 static esp_err_t api_download_handler(httpd_req_t *req);
+#ifdef CONFIG_PANEL_TEST_HOOKS
+static esp_err_t api_button_handler(httpd_req_t *req);
+static esp_err_t api_ui_handler(httpd_req_t *req);
+static esp_err_t api_screen_handler(httpd_req_t *req);
+#endif
 
 // Global server instance for handlers
 static web_server_t *g_server = NULL;
@@ -80,6 +92,131 @@ static uint16_t get_device_from_body(httpd_req_t *req) {
     cJSON_Delete(json);
     return result;
 }
+
+#ifdef CONFIG_PANEL_TEST_HOOKS
+// Button ids as wired in main.c: 0=UP 1=SELECT 2=DOWN 3=BACK.
+static int button_id_from_name(const char *name) {
+    if (!name) return -1;
+    if (!strcasecmp(name, "up"))     return 0;
+    if (!strcasecmp(name, "select")) return 1;
+    if (!strcasecmp(name, "down"))   return 2;
+    if (!strcasecmp(name, "back"))   return 3;
+    return -1;
+}
+
+// POST /api/button  {"button":"down","type":"click","count":1}
+// Only click and repeat exist as far as the UI is concerned; the other event
+// types the driver emits are never matched by handle_button_event().
+static esp_err_t api_button_handler(httpd_req_t *req) {
+    char buf[192];
+    if (req->content_len == 0 || req->content_len >= sizeof(buf)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body required");
+        return ESP_FAIL;
+    }
+    int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
+    if (len <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "short read");
+        return ESP_FAIL;
+    }
+    buf[len] = '\0';
+
+    cJSON *json = cJSON_Parse(buf);
+    if (!json) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad json");
+        return ESP_FAIL;
+    }
+
+    cJSON *jb = cJSON_GetObjectItem(json, "button");
+    int id = cJSON_IsString(jb) ? button_id_from_name(jb->valuestring)
+           : (cJSON_IsNumber(jb) ? jb->valueint : -1);
+
+    cJSON *jt = cJSON_GetObjectItem(json, "type");
+    button_event_type_t type = BUTTON_EVENT_CLICK;
+    if (cJSON_IsString(jt) && !strcasecmp(jt->valuestring, "repeat")) {
+        type = BUTTON_EVENT_REPEAT;
+    }
+
+    cJSON *jc = cJSON_GetObjectItem(json, "count");
+    int count = cJSON_IsNumber(jc) ? jc->valueint : 1;
+    cJSON_Delete(json);
+
+    if (id < 0 || id > 3) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "button must be up|select|down|back");
+        return ESP_FAIL;
+    }
+    if (count < 1 || count > 32) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "count must be 1..32");
+        return ESP_FAIL;
+    }
+
+    int sent = 0;
+    esp_err_t err = ESP_OK;
+    for (int i = 0; i < count; i++) {
+        err = gpio_handler_inject_event((uint8_t)id, type);
+        if (err != ESP_OK) break;
+        sent++;
+        // Let gpio_event_task drain and the UI settle between presses, so a
+        // burst behaves like a person pressing rather than a queue dump.
+        vTaskDelay(pdMS_TO_TICKS(30));
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    JsonStreamWriter jw(req);
+    jw.beginObject();
+    jw.write("success", err == ESP_OK);
+    jw.write("sent", (int)sent);
+    if (err != ESP_OK) jw.write("error", esp_err_to_name(err));
+    jw.endObject();
+    return jw.finalize();
+}
+
+// GET /api/ui - what the panel is showing right now.
+static esp_err_t api_ui_handler(httpd_req_t *req) {
+    panel_ui_state_t st;
+    panel_get_ui_state(&st);
+
+    httpd_resp_set_type(req, "application/json");
+    JsonStreamWriter jw(req);
+    jw.beginObject();
+    jw.write("screen", st.screen_name);
+    jw.write("screen_id", (int)st.screen);
+    jw.write("has_menu", st.has_menu);
+    jw.write("cursor", (uint32_t)st.cursor);
+    jw.write("count", (uint32_t)st.count);
+    jw.write("entry_index", (int)st.entry_index);
+    jw.write("selected", st.selected);
+    jw.write("display_state", st.display_state_name ? st.display_state_name : "UNKNOWN");
+    jw.endObject();
+    return jw.finalize();
+}
+
+// GET /api/screen - raw u8g2 tile buffer. Geometry rides in headers so the host
+// converter does not hardcode the panel or its rotation.
+static esp_err_t api_screen_handler(httpd_req_t *req) {
+    int tw = 0, th = 0, rot = -1;
+    uint8_t *buf = (uint8_t *)malloc(PANEL_FB_MAX_BYTES);
+    if (!buf) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "oom");
+        return ESP_FAIL;
+    }
+    size_t len = panel_get_framebuffer(buf, PANEL_FB_MAX_BYTES, &tw, &th, &rot);
+    if (len == 0) {
+        free(buf);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no framebuffer");
+        return ESP_FAIL;
+    }
+    char v[16];
+    snprintf(v, sizeof(v), "%d", tw);  httpd_resp_set_hdr(req, "X-Panel-Tile-Width", v);
+    char v2[16];
+    snprintf(v2, sizeof(v2), "%d", th); httpd_resp_set_hdr(req, "X-Panel-Tile-Height", v2);
+    char v3[16];
+    snprintf(v3, sizeof(v3), "%d", rot); httpd_resp_set_hdr(req, "X-Panel-Rotation", v3);
+    httpd_resp_set_type(req, "application/octet-stream");
+    esp_err_t ret = httpd_resp_send(req, (const char *)buf, len);
+    free(buf);
+    return ret;
+}
+#endif // CONFIG_PANEL_TEST_HOOKS
 
 // Global OTA manager instance
 static ota_manager_t g_ota_manager;
@@ -177,7 +314,12 @@ static const httpd_uri_t uri_handlers[] = {
     { .uri = "/api/mkdir", .method = HTTP_POST, .handler = api_mkdir_handler, .user_ctx = NULL },
 #endif
     { .uri = "/api/upload", .method = HTTP_POST, .handler = api_upload_handler, .user_ctx = NULL },
-    { .uri = "/api/download", .method = HTTP_GET, .handler = api_download_handler, .user_ctx = NULL }
+    { .uri = "/api/download", .method = HTTP_GET, .handler = api_download_handler, .user_ctx = NULL },
+#ifdef CONFIG_PANEL_TEST_HOOKS
+    { .uri = "/api/button", .method = HTTP_POST, .handler = api_button_handler, .user_ctx = NULL },
+    { .uri = "/api/ui", .method = HTTP_GET, .handler = api_ui_handler, .user_ctx = NULL },
+    { .uri = "/api/screen", .method = HTTP_GET, .handler = api_screen_handler, .user_ctx = NULL }
+#endif
 };
 
 static_assert(sizeof(uri_handlers) / sizeof(uri_handlers[0]) <= WEB_SERVER_MAX_HANDLERS,

@@ -13,4 +13,12 @@ if(SDKCONFIG_DEFAULTS MATCHES "bluescsi")
 else()
   set(FRONTPANEL_PRODUCT "picoide")
 endif()
-project(${FRONTPANEL_PRODUCT}-frontpanel)
+
+# A bench build carries the test hooks and must never be mistaken for, or
+# released as, the shipping image, so it gets its own name.
+if(SDKCONFIG_DEFAULTS MATCHES "bench")
+  set(FRONTPANEL_SUFFIX "-bench")
+else()
+  set(FRONTPANEL_SUFFIX "")
+endif()
+project(${FRONTPANEL_PRODUCT}-frontpanel${FRONTPANEL_SUFFIX})

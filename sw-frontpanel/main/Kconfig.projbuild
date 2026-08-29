@@ -52,4 +52,12 @@ menu "Product Configuration"
                 1 MHz I2C master (BlueSCSI v2).
     endchoice
 
+    config PANEL_TEST_HOOKS
+        bool "Enable panel test hooks"
+        default n
+        help
+            Adds /api/button, /api/ui and /api/screen so a bench harness can
+            press buttons and read back the screen, menu cursor and framebuffer.
+            Off in shipping builds: it is a remote control surface for the UI.
+
 endmenu

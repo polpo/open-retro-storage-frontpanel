@@ -40,6 +40,7 @@
 #include "driver/gpio.h"
 #include "freertos/queue.h"
 #include "nvs_flash.h"
+#include "test_hooks.h"
 
 static const char *TAG = "main";
 
@@ -161,6 +162,10 @@ static void reconnect_to_host(void);
 static bool handle_comm_error(esp_err_t err);
 static void show_info_screen(const char *title, const char *body);
 static void redraw_current_screen(void);
+#ifdef CONFIG_PANEL_TEST_HOOKS
+static void panel_publish_ui_state(void);
+static void panel_publish_framebuffer(void);
+#endif
 
 // SCREEN_INFO state. Title is always a string literal (caller-owned). Body is
 // often built on the caller's stack, so we copy it so the screen survives
@@ -936,7 +941,158 @@ static void handle_button_event(button_event_t *event) {
     if (active_menu) {
         active_menu->needs_redraw = true;
     }
+
+#ifdef CONFIG_PANEL_TEST_HOOKS
+    panel_publish_ui_state();
+#endif
 }
+
+#ifdef CONFIG_PANEL_TEST_HOOKS
+// Keep in step with screen_type_t in ui_screens.h.
+static const char *const screen_names[SCREEN_COUNT] = {
+    "SCREEN_SPLASH", "SCREEN_STATUS", "SCREEN_MAIN_MENU", "SCREEN_DISC_LIST",
+    "SCREEN_SETTINGS", "SCREEN_WIFI_MENU", "SCREEN_DISPLAY_SETTINGS",
+    "SCREEN_IDLE_MODE", "SCREEN_IDLE_TIMEOUT", "SCREEN_BLANK_TIMEOUT",
+    "SCREEN_INFO", "SCREEN_FIRMWARE_UPDATE", "SCREEN_FIRMWARE_STATUS",
+    "SCREEN_DEVICE_SELECT",
+};
+_Static_assert(sizeof(screen_names) / sizeof(screen_names[0]) == SCREEN_COUNT,
+               "screen_names is out of step with screen_type_t");
+
+// Published snapshot. menu_clear_items() free()s menu->items (menu_system.c:83)
+// and refresh_directory_list() re-adds them, so a foreign task walking the live
+// menu is a use-after-free. Only the task that owns the menus fills this in;
+// the web task reads the copy.
+static panel_ui_state_t ui_snapshot;
+static volatile uint32_t ui_snapshot_seq;   // odd while being written
+
+// MUST be called only from the task that mutates the menus (gpio_event_task via
+// handle_button_event, and refresh_directory_list on that same task).
+static void panel_publish_ui_state(void) {
+    ui_snapshot_seq++;                       // -> odd, readers retry
+    __sync_synchronize();
+
+    memset(&ui_snapshot, 0, sizeof(ui_snapshot));
+    screen_type_t screen = current_screen;
+    ui_snapshot.screen = (int)screen;
+    ui_snapshot.screen_name = (screen >= 0 && screen < SCREEN_COUNT)
+                            ? screen_names[screen] : "SCREEN_UNKNOWN";
+    ui_snapshot.entry_index = -1;
+    // A CLICK arriving while the display is not at full brightness is consumed
+    // as a wake and the action is dropped (see handle_button_event), so a test
+    // needs to see this to explain a press that "did nothing".
+    static const char *const display_state_names[] = {
+        "FULL_BRIGHTNESS", "DIMMED", "SCREENSAVER", "OFF"
+    };
+    int ds = (int)display.state;
+    ui_snapshot.display_state = ds;
+    ui_snapshot.display_state_name =
+        (ds >= 0 && ds < (int)(sizeof(display_state_names)/sizeof(display_state_names[0])))
+        ? display_state_names[ds] : "UNKNOWN";
+
+    menu_t *menu = active_menu;
+    if (menu) {
+        ui_snapshot.has_menu = true;
+        ui_snapshot.cursor = menu->selected_index;
+        ui_snapshot.count = menu->item_count;
+        menu_item_t *item = menu_get_selected_item(menu);
+        if (item) {
+            ui_snapshot.entry_index = item->entry_index;
+            strncpy(ui_snapshot.selected, item->text, sizeof(ui_snapshot.selected) - 1);
+            ui_snapshot.selected[sizeof(ui_snapshot.selected) - 1] = '\0';
+        }
+    }
+
+    __sync_synchronize();
+    ui_snapshot_seq++;                       // -> even, readers may proceed
+}
+
+void panel_get_ui_state(panel_ui_state_t *out) {
+    if (!out) {
+        return;
+    }
+    for (int attempt = 0; attempt < 4; attempt++) {
+        uint32_t before = ui_snapshot_seq;
+        if (before & 1u) {                   // publish in progress
+            vTaskDelay(pdMS_TO_TICKS(2));
+            continue;
+        }
+        __sync_synchronize();
+        *out = ui_snapshot;
+        __sync_synchronize();
+        if (ui_snapshot_seq == before) {
+            return;
+        }
+    }
+    // Never hand back a torn record; say so instead.
+    memset(out, 0, sizeof(*out));
+    out->screen_name = "SCREEN_UNKNOWN";
+    out->entry_index = -1;
+}
+
+// Shadow of the last frame actually sent to the panel. Written only by
+// display_update_task, read by the web task under the same seqlock scheme as
+// the UI snapshot.
+static uint8_t fb_shadow[PANEL_FB_MAX_BYTES];
+static volatile uint32_t fb_shadow_seq;      // odd while being written
+static size_t fb_shadow_len;
+static int fb_shadow_tw, fb_shadow_th, fb_shadow_rot = -1;
+
+static void panel_publish_framebuffer(void) {
+    u8g2_t *u8g2 = &display.u8g2;
+    const uint8_t *buf = u8g2_GetBufferPtr(u8g2);
+    if (!buf) {
+        return;
+    }
+    int w = u8g2_GetBufferTileWidth(u8g2);
+    int h = u8g2_GetBufferTileHeight(u8g2);
+    size_t n = (size_t)w * (size_t)h * 8u;
+    if (n > sizeof(fb_shadow)) {
+        n = sizeof(fb_shadow);
+    }
+
+    fb_shadow_seq++;
+    __sync_synchronize();
+    memcpy(fb_shadow, buf, n);
+    fb_shadow_len = n;
+    fb_shadow_tw = w;
+    fb_shadow_th = h;
+    // U8G2_R0..R3 as an index, so the host converter does not hardcode it.
+    fb_shadow_rot = (u8g2->cb == U8G2_R0) ? 0 :
+                    (u8g2->cb == U8G2_R1) ? 1 :
+                    (u8g2->cb == U8G2_R2) ? 2 :
+                    (u8g2->cb == U8G2_R3) ? 3 : -1;
+    __sync_synchronize();
+    fb_shadow_seq++;
+}
+
+size_t panel_get_framebuffer(uint8_t *out, size_t cap, int *tile_w, int *tile_h, int *rotation) {
+    if (!out) {
+        return 0;
+    }
+    for (int attempt = 0; attempt < 4; attempt++) {
+        uint32_t before = fb_shadow_seq;
+        if (before & 1u) {
+            vTaskDelay(pdMS_TO_TICKS(2));
+            continue;
+        }
+        __sync_synchronize();
+        size_t n = fb_shadow_len;
+        if (n == 0 || n > cap) {
+            return 0;
+        }
+        memcpy(out, fb_shadow, n);
+        if (tile_w) *tile_w = fb_shadow_tw;
+        if (tile_h) *tile_h = fb_shadow_th;
+        if (rotation) *rotation = fb_shadow_rot;
+        __sync_synchronize();
+        if (fb_shadow_seq == before) {
+            return n;
+        }
+    }
+    return 0;
+}
+#endif
 
 static void show_info_screen(const char *title, const char *body) {
     info_screen_title = title ? title : "";
@@ -1041,6 +1197,13 @@ static void display_update_task(void *pvParameters) {
             if (display.needs_update) {
                 display_manager_update(&display);
             }
+
+#ifdef CONFIG_PANEL_TEST_HOOKS
+            // Snapshot the frame that just went to the glass. /api/screen must
+            // not read the live u8g2 buffer: ui_draw_menu paints it across many
+            // calls, so a web read would tear mid-frame.
+            panel_publish_framebuffer();
+#endif
         }
 
         vTaskDelay(pdMS_TO_TICKS(33)); // 30 FPS for smooth animation
@@ -1449,6 +1612,11 @@ static esp_err_t refresh_directory_list(void) {
 
     disc_list_loaded = true;
     ESP_LOGI(TAG, "Directory list refreshed successfully");
+#ifdef CONFIG_PANEL_TEST_HOOKS
+    // The items array was freed and rebuilt above, so republish before any
+    // reader can observe the new one.
+    panel_publish_ui_state();
+#endif
     return ESP_OK;
 }
 
