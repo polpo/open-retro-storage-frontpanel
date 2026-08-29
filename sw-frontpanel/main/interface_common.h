@@ -65,6 +65,13 @@ esp_err_t interface_wifi_get_status(interface_context_t *ctx, wifi_manager_state
 // System operations
 esp_err_t interface_get_system_info(interface_context_t *ctx, system_info_t *info);
 
+// Drop the panel's cached directory listing so the browser re-reads it from
+// the main board. Any path that changes the working directory, or the contents
+// of the current one, must call this: otherwise the panel keeps showing the
+// previous directory's rows, and the entry_index it would send is resolved by
+// the main board against a different directory entirely.
+void interface_invalidate_disc_list(void);
+
 // Utility functions
 const char* interface_wifi_state_string(wifi_manager_state_t state);
 const char* interface_auth_mode_string(wifi_auth_mode_t auth_mode);

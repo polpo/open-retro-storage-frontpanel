@@ -665,6 +665,7 @@ static esp_err_t api_select_entry_handler(httpd_req_t *req) {
     if (g_server && g_server->interface_ctx) {
         esp_err_t select_ret = interface_select_entry(g_server->interface_ctx, entry_index, device_index);
         success = (select_ret == ESP_OK);
+        interface_invalidate_disc_list();
         if (!success) {
             json_ret = json_writer.write("error", esp_err_to_name(select_ret));
             if (json_ret != ESP_OK) {
@@ -1986,6 +1987,7 @@ static esp_err_t handle_file_upload(httpd_req_t *req, const char *path_prefix) {
     uint8_t upload_result;
     uint8_t file_hash[32];
     ret = host_comm_finish_file_upload(host_comm, &upload_result, file_hash);
+    interface_invalidate_disc_list();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to finish upload: %s", esp_err_to_name(ret));
         free(chunk_buffer);
@@ -2312,6 +2314,7 @@ static esp_err_t api_delete_handler(httpd_req_t *req) {
     uint8_t result_code = 0xFF;
     esp_err_t del_ret = host_comm_delete_file(g_server->interface_ctx->host_comm,
                                               path_json->valuestring, &result_code);
+    interface_invalidate_disc_list();
     cJSON_Delete(json);
 
     httpd_resp_set_type(req, "application/json");
@@ -2371,6 +2374,7 @@ static esp_err_t api_rename_handler(httpd_req_t *req) {
     esp_err_t rn_ret = host_comm_rename_file(g_server->interface_ctx->host_comm,
                                              old_json->valuestring, new_json->valuestring,
                                              &result_code);
+    interface_invalidate_disc_list();
     cJSON_Delete(json);
 
     httpd_resp_set_type(req, "application/json");
@@ -2449,6 +2453,7 @@ static esp_err_t api_create_path_op(httpd_req_t *req,
     uint8_t result_code = 0xFF;
     esp_err_t op_ret = op_fn(g_server->interface_ctx->host_comm,
                              path_json->valuestring, &result_code);
+    interface_invalidate_disc_list();
     cJSON_Delete(json);
 
     httpd_resp_set_type(req, "application/json");

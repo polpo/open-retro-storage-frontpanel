@@ -146,6 +146,13 @@ static uint8_t fw_screen_selection = 0;  // 0=Panel, 1=Main board
 static esp_err_t refresh_directory_list(void);
 static void refresh_playback_status(void);
 static void refresh_device_type(void);
+
+// Web handlers change the directory (or its contents) without going through the
+// panel's menus, so they invalidate the cache here and the browser reloads on
+// its next open.
+void interface_invalidate_disc_list(void) {
+    disc_list_loaded = false;
+}
 static void refresh_device_list(void);
 static void populate_device_menu(void);
 static void on_host_link_established(void);
