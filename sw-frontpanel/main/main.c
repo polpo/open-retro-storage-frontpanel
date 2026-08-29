@@ -1129,9 +1129,15 @@ static void status_refresh_task(void *pvParameters) {
                 poll_interval_ms = 1000;
             }
             refresh_playback_status();
-        } else if (host_comm_ready) {
+        } else if (host_comm_ready && !host_comm.initialized) {
             // Main board was unreachable at startup (e.g. held in reset).
             // Keep probing so the panel recovers once it comes online.
+            //
+            // Only while the link is actually down. Without the !initialized
+            // test this ran on every pass whenever the status screen was not
+            // showing, re-announcing a healthy link once a second and calling
+            // on_host_link_established(), which resets the menu selection to 0
+            // and drops the cached directory listing under the user.
             uint8_t device_status;
             if (host_comm_get_device_status(&host_comm, 0, &device_status) == ESP_OK) {
                 ESP_LOGI(TAG, "Main board is now responding, connection restored");
