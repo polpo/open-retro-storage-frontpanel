@@ -17,3 +17,30 @@ CONFIG_HTTPD_MAX_URI_LEN=512
 
 # OTA rollback support
 CONFIG_APP_ROLLBACK_ENABLE=y
+
+# Image size reduction. The app partition is 1.5 MB, but a smaller image also
+# means faster OTA transfers and a smaller PicoIDE bundle.
+
+# Optimize for size rather than the IDF default -Og. (~99 KB)
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+
+# Compile out assert() (~62 KB). Failures become undefined behavior instead of
+# than a logged abort, so revert this first when trying to repro issues.
+CONFIG_COMPILER_OPTIMIZATION_ASSERTIONS_DISABLE=y
+
+# Reduced-footprint printf (~25 KB). Drops float/long-long formatting not used
+# by this firmware.
+CONFIG_NEWLIB_NANO_FORMAT=y
+
+# Ship warnings and errors only; drops the INFO-level format strings (~23 KB).
+CONFIG_LOG_DEFAULT_LEVEL_WARN=y
+CONFIG_LOG_MAXIMUM_LEVEL_WARN=y
+
+# The panel is IPv4-only (mDNS and the web UI both work over IPv4). (~28 KB)
+CONFIG_LWIP_IPV6=n
+
+# No esp_err_t name table; errors log as numeric codes. (~8 KB)
+CONFIG_ESP_ERR_TO_NAME_LOOKUP=n
+
+# WPA2/3-Enterprise is not supported by the WiFi setup UI.
+CONFIG_ESP_WIFI_ENTERPRISE_SUPPORT=n
