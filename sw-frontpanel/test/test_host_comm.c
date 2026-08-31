@@ -522,6 +522,70 @@ TEST(get_device_list_accepts_an_empty_list) {
     CHECK_EQ_INT(list->device_count, 0);
 }
 
+/* ---- initiator status (BlueSCSI only) ---- */
+
+TEST(get_initiator_status_frames_command_and_copies_response) {
+    setup();
+
+    /* A 42-byte header plus two 50-byte targets, as the main board sends it. */
+    uint8_t result[sizeof(initiator_status_response_t) + 2 * sizeof(initiator_target_info_t)];
+    memset(result, 0, sizeof(result));
+    initiator_status_response_t *src = (initiator_status_response_t *)result;
+    src->phase = PANEL_INITIATOR_PHASE_IMAGING;
+    src->current_target_id = 3;
+    src->initiator_id = 7;
+    src->targets_found = 2;
+    src->speed_kbps = 1450;
+    strcpy(src->current_filename, "HD03_imaged.hda");
+    src->targets[0].scsi_id = 3;
+    src->targets[0].sectors_done = 1000;
+    src->targets[1].scsi_id = 4;
+    src->targets[1].skip_reason = PANEL_INITIATOR_SKIP_NO_SPACE;
+    mock_set_poll_result(result, sizeof(result));
+
+    uint8_t buf[sizeof(initiator_status_response_t) + 8 * sizeof(initiator_target_info_t)];
+    initiator_status_response_t *resp = (initiator_status_response_t *)buf;
+    size_t out_size = 0;
+    CHECK_ESP_OK(host_comm_get_initiator_status(&comm, resp, sizeof(buf), &out_size));
+
+    CHECK_EQ_INT(out_size, sizeof(result));
+    CHECK_EQ_HEX(resp->phase, PANEL_INITIATOR_PHASE_IMAGING);
+    CHECK_EQ_INT(resp->current_target_id, 3);
+    CHECK_EQ_INT(resp->targets_found, 2);
+    CHECK_EQ_INT(resp->speed_kbps, 1450);
+    CHECK_TRUE(strcmp(resp->current_filename, "HD03_imaged.hda") == 0);
+    CHECK_EQ_INT(resp->targets[1].skip_reason, PANEL_INITIATOR_SKIP_NO_SPACE);
+
+    const mock_xfer_t *x = mock_xfer(0);
+    CHECK_TRUE(x != NULL);
+    CHECK_EQ_HEX(x->command, PANEL_CMD_GET_INITIATOR_STATUS);
+    CHECK_EQ_HEX(x->argument, PANEL_ARG_IGNORED);
+    CHECK_EQ_INT(x->write_len, 0);
+}
+
+/* The main board defers panel commands for as long as it holds the SCSI bus,
+ * which is up to a minute while a drive spins up. The caller has to be able to
+ * tell that apart from a dead link, so the timeout must surface as such. */
+TEST(get_initiator_status_times_out_while_the_bus_is_busy) {
+    setup();
+    mock_set_poll_never_ready();
+
+    uint8_t buf[sizeof(initiator_status_response_t) + 8 * sizeof(initiator_target_info_t)];
+    size_t out_size = 12345;
+    esp_err_t ret = host_comm_get_initiator_status(&comm, (initiator_status_response_t *)buf,
+                                                   sizeof(buf), &out_size);
+    CHECK_EQ_INT(ret, ESP_ERR_TIMEOUT);
+    CHECK_EQ_INT(out_size, 12345);   /* untouched on failure */
+}
+
+TEST(get_initiator_status_rejects_a_buffer_too_small_for_the_header) {
+    setup();
+    uint8_t buf[8];
+    esp_err_t ret = host_comm_get_initiator_status(&comm, (initiator_status_response_t *)buf,
+                                                   sizeof(buf), NULL);
+    CHECK_EQ_INT(ret, ESP_ERR_INVALID_ARG);
+}
+
 void run_host_comm_suite(void) {
     printf("host_comm:\n");
     RUN(get_entry_count_frames_command_and_parses_be32);
@@ -558,4 +622,7 @@ void run_host_comm_suite(void) {
     RUN(get_device_list_frames_command);
     RUN(get_device_list_clamps_count_to_what_arrived);
     RUN(get_device_list_accepts_an_empty_list);
+    RUN(get_initiator_status_frames_command_and_copies_response);
+    RUN(get_initiator_status_times_out_while_the_bus_is_busy);
+    RUN(get_initiator_status_rejects_a_buffer_too_small_for_the_header);
 }

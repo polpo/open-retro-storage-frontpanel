@@ -1072,6 +1072,46 @@ esp_err_t host_comm_get_device_list(host_comm_t *comm, device_list_response_t *r
     return ESP_OK;
 }
 
+#ifdef CONFIG_PRODUCT_BLUESCSI
+esp_err_t host_comm_get_initiator_status(host_comm_t *comm, initiator_status_response_t *response,
+                                         size_t max_size, size_t *out_size) {
+    if (!host_comm_have_handle(comm) || !response ||
+        max_size < sizeof(initiator_status_response_t)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    HOST_COMM_LOCK(comm);
+
+    ESP_LOGD(TAG, "Getting initiator status");
+
+    esp_err_t ret = transport_two_phase_transaction(&comm->transport,
+                                                    PANEL_CMD_GET_INITIATOR_STATUS, PANEL_ARG_IGNORED,
+                                                    NULL, 0,
+                                                    NULL, 0);
+    if (ret != ESP_OK) {
+        HOST_COMM_UNLOCK(comm);
+        return ret;
+    }
+
+    uint8_t *result_data;
+    size_t result_size;
+    ret = host_comm_poll_async_result(comm, 2000, 10, max_size, &result_data, &result_size);
+    if (ret != ESP_OK) {
+        HOST_COMM_UNLOCK(comm);
+        return ret;
+    }
+
+    size_t copy_size = (result_size < max_size) ? result_size : max_size;
+    memcpy(response, result_data, copy_size);
+    if (out_size) *out_size = copy_size;
+    ESP_LOGD(TAG, "Initiator status: phase=%u, targets_found=%u",
+             response->phase, response->targets_found);
+
+    HOST_COMM_UNLOCK(comm);
+    return ESP_OK;
+}
+#endif // CONFIG_PRODUCT_BLUESCSI
+
 esp_err_t host_comm_get_command_status(host_comm_t *comm, panel_command_status_t *status) {
     if (!host_comm_have_handle(comm) || !status) {
         return ESP_ERR_INVALID_ARG;
