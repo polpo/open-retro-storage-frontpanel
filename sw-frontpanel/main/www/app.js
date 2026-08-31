@@ -83,7 +83,7 @@ async function loadSystemInfo() {
         const heading = document.getElementById('product-heading');
         if (heading) {
             if (data.logo_url && data.logo_url.length > 0) {
-                heading.innerHTML = '<img src="' + data.logo_url + '" alt="' + (data.product_name || 'Front Panel') + '" style="height: 48px;">';
+                heading.innerHTML = '<img src="' + data.logo_url + '" alt="' + (data.product_name || 'Front Panel') + '">';
             } else {
                 heading.textContent = data.product_name || 'Front Panel';
             }

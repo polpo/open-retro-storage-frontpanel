@@ -532,7 +532,7 @@ static esp_err_t api_images_handler(httpd_req_t *req) {
         }
 
         // Get loaded image status
-        loaded_image_status_t image_status = {0};
+        loaded_image_status_t image_status = {};
         bool have_image_status = false;
         if (host_comm && host_comm->link_up) {
             have_image_status = (host_comm_get_loaded_image_status(host_comm, device_index, &image_status) == ESP_OK);
@@ -1919,7 +1919,6 @@ static esp_err_t handle_file_upload(httpd_req_t *req, const char *path_prefix) {
     }
 
     // Process file data from the first chunk
-    uint32_t file_data_sent = 0;
     if (file_data_start > 0 && (uint32_t)file_data_start < (uint32_t)received) {
         size_t first_chunk_data_size = received - file_data_start;
         // Cap at actual file size (don't include trailing multipart boundary for small files)
@@ -1948,7 +1947,6 @@ static esp_err_t handle_file_upload(httpd_req_t *req, const char *path_prefix) {
             return ESP_FAIL;
         }
 
-        file_data_sent = first_chunk_data_size;
         g_upload_state.bytes_received += first_chunk_data_size;
     }
 
