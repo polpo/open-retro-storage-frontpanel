@@ -52,6 +52,11 @@ TEST(protocol_playback_status_offsets) {
     CHECK_EQ_INT(offsetof(panel_playback_status_t, device_status), 72);
     CHECK_EQ_INT(offsetof(panel_playback_status_t, alive_magic), 73);
     CHECK_EQ_INT(offsetof(panel_playback_status_t, tray_open), 74);
+    // The operating mode rides on this synchronous poll rather than the async
+    // GET_DEVICE_LIST, which an imaging board never completes. It reuses the
+    // old reserved byte, so the struct size must not move.
+    CHECK_EQ_INT(offsetof(panel_playback_status_t, operating_mode), 75);
+    CHECK_EQ_INT(offsetof(panel_playback_status_t, tray_open), 74);
 }
 
 TEST(protocol_loaded_image_status_offsets) {

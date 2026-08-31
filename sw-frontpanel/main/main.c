@@ -1372,6 +1372,8 @@ static void status_refresh_task(void *pvParameters) {
                 case PANEL_INITIATOR_PHASE_SCANNING: poll_interval_ms = 2000; break;
                 default:                             poll_interval_ms = 5000; break;
             }
+            // Also polls the mode, so leaving initiator mode is noticed here.
+            refresh_playback_status();
             refresh_initiator_status();
 #endif
         } else if (current_screen == SCREEN_STATUS && host_comm.link_up) {
@@ -1442,6 +1444,14 @@ static void refresh_playback_status(void) {
         status_needs_redraw = true;
         return;
     }
+
+#ifdef CONFIG_PRODUCT_BLUESCSI
+    // The board reports its mode on every poll. This is the only carrier that
+    // survives an imaging board: GET_DEVICE_LIST is async and never completes
+    // while the initiator is on the bus, so operating_mode would otherwise stay
+    // TARGET forever and the initiator screen would be unreachable.
+    operating_mode = current_playback_status.operating_mode;
+#endif
 
     // The main board is alive but we have no usable device list. Either the
     // command failed, or the list came back empty — which BlueSCSI reports while
@@ -2639,6 +2649,11 @@ void app_main(void) {
 
     led_stop_pulse();
 
+    // Learn the operating mode before choosing a screen. This poll is the only
+    // thing an imaging board reliably answers, so it has to happen before the
+    // branch below rather than inside the target arm.
+    refresh_playback_status();
+
 #ifdef CONFIG_PRODUCT_BLUESCSI
     if (operating_mode == PANEL_MODE_INITIATOR) {
         current_screen = SCREEN_INITIATOR_STATUS;
@@ -2651,7 +2666,6 @@ void app_main(void) {
     {
         current_screen = SCREEN_STATUS;
         active_menu = screen_menus[current_screen];
-        refresh_playback_status();
         ui_draw_status_screen(&display, current_disc_name,
                               &current_image_status,
                               &current_playback_status, disc_name_changed,
@@ -2660,6 +2674,13 @@ void app_main(void) {
         disc_name_changed = false;
         status_needs_redraw = false;
     }
+
+#ifdef CONFIG_PANEL_TEST_HOOKS
+    // The boot path sets current_screen directly rather than going through the
+    // button handler, so publish here or the first /api/ui read reports a
+    // screen of NULL - which is how the initiator screen looked untestable.
+    panel_publish_ui_state();
+#endif
 
     // Set LED based on image loaded state
     activity_event_t init_event = { .pin_state = gpio_get_level(PIN_ACT_IN) };
