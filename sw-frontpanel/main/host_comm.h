@@ -38,8 +38,9 @@ typedef panel_playback_status_t playback_status_t;
 // Host communication handle
 typedef struct {
     transport_handle_t transport;
-    SemaphoreHandle_t mutex;  // Protects transport access from concurrent tasks
-    bool initialized;
+    SemaphoreHandle_t mutex;  // Protects transport access; non-NULL means the handle is usable
+    bool initialized;         // The main board is answering. Cleared while the handle stays up,
+                              // so callers must not read it as "safe to call host_comm_*".
 } host_comm_t;
 
 // Public API

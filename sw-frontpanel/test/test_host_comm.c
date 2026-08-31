@@ -425,6 +425,30 @@ TEST(null_args_are_rejected) {
     CHECK_EQ_INT(host_comm_get_entry_count(&comm, NULL), ESP_ERR_INVALID_ARG);
 }
 
+TEST(silent_board_still_reaches_the_wire) {
+    setup();
+    // comm.initialized == false means "the main board stopped answering", not
+    // "this handle is gone". main.c's reconnect path clears it and then keeps
+    // calling here to find out when the board comes back, so the call must
+    // still go out on the wire.
+    comm.initialized = false;
+    uint8_t status_byte = PANEL_DEVICE_STATUS_LOADED;
+    mock_set_poll_result(&status_byte, 1);
+
+    uint8_t status = 0xFF;
+    CHECK_ESP_OK(host_comm_get_device_status(&comm, 0, &status));
+    CHECK_TRUE(mock_xfer(0) != NULL);
+}
+
+TEST(torn_down_handle_is_rejected) {
+    setup();
+    host_comm_deinit(&comm);
+
+    uint8_t status = 0;
+    CHECK_EQ_INT(host_comm_get_device_status(&comm, 0, &status), ESP_ERR_INVALID_ARG);
+    CHECK_TRUE(mock_xfer(0) == NULL);
+}
+
 void run_host_comm_suite(void) {
     printf("host_comm:\n");
     RUN(get_entry_count_frames_command_and_parses_be32);
@@ -455,4 +479,6 @@ void run_host_comm_suite(void) {
     RUN(oversize_response_is_rejected);
     RUN(poll_async_error_state_propagates);
     RUN(null_args_are_rejected);
+    RUN(silent_board_still_reaches_the_wire);
+    RUN(torn_down_handle_is_rejected);
 }
