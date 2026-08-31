@@ -453,6 +453,18 @@ static esp_err_t api_initiator_handler(httpd_req_t *req) {
     if (ret != ESP_OK) return ret;
     ret = json.write("targets_imaged", (int)sum->targets_imaged);
     if (ret != ESP_OK) return ret;
+    // Identity of the target in progress, so the page can say what it is
+    // working on rather than just how fast. From the summary, because the
+    // per-target table below does not arrive while the board is imaging.
+    ret = json.write("device_type", (int)sum->device_type);
+    if (ret != ESP_OK) return ret;
+    ret = json.write("vendor", sum->vendor);
+    if (ret != ESP_OK) return ret;
+    ret = json.write("product", sum->product);
+    if (ret != ESP_OK) return ret;
+    ret = json.write("size_kb",
+                     (uint32_t)((uint64_t)sum->sectorcount * sum->sectorsize / 1024));
+    if (ret != ESP_OK) return ret;
     ret = json.write("speed_kbps", (uint32_t)sum->speed_kbps);
     if (ret != ESP_OK) return ret;
     ret = json.write("filename", st->current_filename);

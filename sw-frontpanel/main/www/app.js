@@ -179,6 +179,14 @@ async function selectDevice(index) {
     await refreshImages();
 }
 
+// Size in kB as something a person reads. The main board sends kB because that
+// is what fits; nobody wants to see six digits of it.
+function formatKB(kb) {
+    if (kb >= 1024 * 1024) return (kb / 1024 / 1024).toFixed(1) + ' GB';
+    if (kb >= 1024) return (kb / 1024).toFixed(0) + ' MB';
+    return kb + ' kB';
+}
+
 // Filename portion of a path (after the last slash).
 function basename(p) {
     if (!p) return p;
@@ -1467,14 +1475,18 @@ async function refreshInitiator() {
     section.style.display = '';
     operatingMode = 1;
 
-    let head;
+    let head, sub = '';
     if (data.phase === 1) {
         head = data.current_target >= 0 && data.current_target !== 255
             ? `Scanning SCSI ID ${data.current_target}...`
             : 'Scanning the SCSI bus...';
     } else if (data.phase === 2) {
-        const rate = data.speed_kbps > 0 ? ` at ${data.speed_kbps} kB/s` : '';
-        head = `Writing ${data.filename || 'an image'}${rate}`;
+        const who = [data.vendor, data.product].filter(Boolean).join(' ').trim();
+        head = `Imaging SCSI ID ${data.current_target}` + (who ? `: ${who}` : '');
+        const parts = [`${data.progress}%`];
+        if (data.size_kb > 0) parts.push(`of ${formatKB(data.size_kb)}`);
+        if (data.speed_kbps > 0) parts.push(`at ${data.speed_kbps} kB/s`);
+        sub = parts.join(' ');
     } else if (data.phase === 3) {
         const n = data.targets_imaged;
         head = `Finished. ${n} drive${n === 1 ? '' : 's'} imaged.`;
@@ -1487,7 +1499,8 @@ async function refreshInitiator() {
     const rows = (data.targets || []).map(initiatorTargetRow).join('');
     document.getElementById('initiator-body').innerHTML =
         `<div class="status">${head}</div>` +
-        (rows || '<div class="status">No drives found yet.</div>');
+        (sub ? `<div class="status">${sub}</div>` : '') +
+        (rows || (data.phase === 2 ? '' : '<div class="status">No drives found yet.</div>'));
 
     // Keep polling while there is still something to watch
     if (data.phase === 1 || data.phase === 2) {

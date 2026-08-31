@@ -1033,6 +1033,14 @@ esp_err_t ui_draw_initiator_screen(display_manager_t *display,
                     display_manager_draw_text(display, 126 - w, 20, speed);
                 }
 
+                // Say what the drive is, not just how fast it is going.
+                char who[24];
+                char vend[9];
+                initiator_trim(vend, sizeof(vend), summary->vendor, 8);
+                snprintf(who, sizeof(who), "%s %s",
+                         initiator_device_type_str(summary->device_type), vend);
+                display_manager_draw_text(display, 2, 20, who);
+
                 display_manager_draw_frame(display, 2, 24, 124, 10);
                 if (summary->progress > 0) {
                     display_manager_draw_box(display, 4, 26, (summary->progress * 120) / 100, 6);
@@ -1043,6 +1051,16 @@ esp_err_t ui_draw_initiator_screen(display_manager_t *display,
                 display_manager_set_draw_color(display, 2);
                 display_manager_draw_text(display, 64 - pw / 2, 32, pct);
                 display_manager_set_draw_color(display, 1);
+
+                if (summary->sectorcount > 0 && summary->sectorsize > 0) {
+                    char done_str[12], total_str[12], size_line[32];
+                    uint64_t total = (uint64_t)summary->sectorcount * summary->sectorsize;
+                    format_size(done_str, sizeof(done_str),
+                                total * summary->progress / 100);
+                    format_size(total_str, sizeof(total_str), total);
+                    snprintf(size_line, sizeof(size_line), "%s / %s", done_str, total_str);
+                    display_manager_draw_text(display, 2, 46, size_line);
+                }
                 break;
             }
 

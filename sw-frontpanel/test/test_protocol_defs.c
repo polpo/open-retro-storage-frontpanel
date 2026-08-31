@@ -27,7 +27,9 @@ TEST(protocol_struct_sizes) {
     CHECK_EQ_INT(sizeof(panel_firmware_info_t), 49);
     CHECK_EQ_INT(sizeof(panel_playback_status_t), 75);
     // One mode per response: the initiator's own state is its own struct.
-    CHECK_EQ_INT(sizeof(panel_initiator_summary_t), 10);
+    // Carries the current target's identity as well as the run's progress,
+    // because the async per-target table never arrives while imaging.
+    CHECK_EQ_INT(sizeof(panel_initiator_summary_t), 45);
     CHECK_EQ_INT(sizeof(dir_entry_info_t), 68);
     CHECK_EQ_INT(sizeof(device_summary_t), 68);
     // NOTE: header comment says "212 bytes"; real packed size is 216
@@ -66,6 +68,11 @@ TEST(protocol_playback_status_offsets) {
     CHECK_EQ_INT(offsetof(panel_initiator_summary_t, operating_mode), 2);
     CHECK_EQ_INT(offsetof(panel_initiator_summary_t, phase), 3);
     CHECK_EQ_INT(offsetof(panel_initiator_summary_t, speed_kbps), 8);
+    CHECK_EQ_INT(offsetof(panel_initiator_summary_t, device_type), 10);
+    CHECK_EQ_INT(offsetof(panel_initiator_summary_t, sectorcount), 11);
+    CHECK_EQ_INT(offsetof(panel_initiator_summary_t, sectorsize), 15);
+    CHECK_EQ_INT(offsetof(panel_initiator_summary_t, vendor), 19);
+    CHECK_EQ_INT(offsetof(panel_initiator_summary_t, product), 28);
     CHECK_EQ_HEX(PANEL_CMD_GET_INITIATOR_SUMMARY, 0x87);
     // A read command, so the main board answers it in its ISR rather than
     // deferring it to a main loop an imaging board does not reach.

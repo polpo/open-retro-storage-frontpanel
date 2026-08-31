@@ -1373,9 +1373,14 @@ static void status_refresh_task(void *pvParameters) {
             // Screen off: no need to poll at all
             poll_interval_ms = 0;
 #ifdef CONFIG_PRODUCT_BLUESCSI
-        } else if (operating_mode == PANEL_MODE_INITIATOR && host_comm.link_up) {
+        } else if ((operating_mode == PANEL_MODE_INITIATOR ||
+                    current_screen == SCREEN_INITIATOR_STATUS) && host_comm.link_up) {
             // Not gated on the current screen: the web UI wants fresh progress
-            // even while the OLED is showing a menu.
+            // even while the OLED is showing a menu. The screen is checked as
+            // well as the mode so that a panel which reached the initiator
+            // screen keeps polling even if it has since read TARGET back - it
+            // would otherwise match no arm of this chain, stop polling, and be
+            // unable to ever learn the mode again.
             switch (initiator_status->phase) {
                 case PANEL_INITIATOR_PHASE_IMAGING:  poll_interval_ms = 500;  break;
                 case PANEL_INITIATOR_PHASE_SCANNING: poll_interval_ms = 2000; break;
