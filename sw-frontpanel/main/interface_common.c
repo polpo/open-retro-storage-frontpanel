@@ -31,7 +31,7 @@ esp_err_t interface_get_entry_list(interface_context_t *ctx, dir_entry_info_t *e
 
     *entry_count = 0;
 
-    if (!ctx->host_comm || !ctx->host_comm->initialized) {
+    if (!ctx->host_comm || !ctx->host_comm->link_up) {
         ESP_LOGW(TAG, "Host communication not available");
         return ESP_ERR_INVALID_STATE;
     }
@@ -72,7 +72,7 @@ esp_err_t interface_select_entry(interface_context_t *ctx, int32_t entry_index, 
         return ESP_ERR_INVALID_ARG;
     }
 
-    if (!ctx->host_comm || !ctx->host_comm->initialized) {
+    if (!ctx->host_comm || !ctx->host_comm->link_up) {
         ESP_LOGW(TAG, "Host communication not available");
         return ESP_ERR_INVALID_STATE;
     }
@@ -96,7 +96,7 @@ esp_err_t interface_eject_image(interface_context_t *ctx, uint16_t device_index)
         return ESP_ERR_INVALID_ARG;
     }
 
-    if (!ctx->host_comm || !ctx->host_comm->initialized) {
+    if (!ctx->host_comm || !ctx->host_comm->link_up) {
         ESP_LOGW(TAG, "Host communication not available");
         return ESP_ERR_INVALID_STATE;
     }
@@ -116,7 +116,7 @@ esp_err_t interface_get_current_image(interface_context_t *ctx, uint16_t device_
         return ESP_ERR_INVALID_ARG;
     }
 
-    if (!ctx->host_comm || !ctx->host_comm->initialized) {
+    if (!ctx->host_comm || !ctx->host_comm->link_up) {
         strncpy(image_name, "No image loaded", max_len - 1);
         image_name[max_len - 1] = '\0';
         return ESP_OK;
@@ -140,7 +140,7 @@ esp_err_t interface_get_device_list(interface_context_t *ctx, device_list_respon
         return ESP_ERR_INVALID_ARG;
     }
 
-    if (!ctx->host_comm || !ctx->host_comm->initialized) {
+    if (!ctx->host_comm || !ctx->host_comm->link_up) {
         ESP_LOGW(TAG, "Host communication not available");
         return ESP_ERR_INVALID_STATE;
     }
@@ -260,7 +260,7 @@ esp_err_t interface_get_system_info(interface_context_t *ctx, system_info_t *inf
     fw_version_format_panel(info->panel_firmware_version,
                             sizeof(info->panel_firmware_version),
                             ota_manager_get_current_version());
-    if (ctx->host_comm && ctx->host_comm->initialized) {
+    if (ctx->host_comm && ctx->host_comm->link_up) {
         rp2350_fw_status_t fw_status;
         if (host_comm_get_rp2350_fw_status(ctx->host_comm, &fw_status) == ESP_OK) {
             fw_version_format_mainboard(info->main_firmware_version,
@@ -272,7 +272,7 @@ esp_err_t interface_get_system_info(interface_context_t *ctx, system_info_t *inf
     // Host communication info
     if (ctx->host_comm) {
         info->transport_name = host_comm_get_transport_name(ctx->host_comm);
-        info->host_connected = ctx->host_comm->initialized;
+        info->host_connected = ctx->host_comm->link_up;
     } else {
         info->transport_name = "None";
         info->host_connected = false;

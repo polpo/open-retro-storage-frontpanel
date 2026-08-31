@@ -32,15 +32,7 @@ static void format_semver(char *buf, size_t buf_size, uint32_t version) {
 }
 
 void fw_version_format_panel(char *buf, size_t buf_size, uint32_t version) {
-#ifdef CONFIG_PRODUCT_BLUESCSI
-    // BlueSCSI panel version is packed as 0x00MMmmpp (no prerelease byte).
-    uint8_t major = (version >> 16) & 0xff;
-    uint8_t minor = (version >> 8) & 0xff;
-    uint8_t patch = version & 0xff;
-    snprintf(buf, buf_size, "%u.%u.%u", major, minor, patch);
-#else
     format_semver(buf, buf_size, version);
-#endif
 }
 
 void fw_version_format_mainboard(char *buf, size_t buf_size, uint32_t version) {

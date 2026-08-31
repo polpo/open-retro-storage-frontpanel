@@ -40,6 +40,11 @@ typedef struct menu_item {
     void *callback_context;
     struct menu_item *submenu;
     bool selectable;
+    // Payload for callers that need a stable value per row that survives skipped
+    // or reordered source entries. The disc browser stores the host's real
+    // directory-entry index here (-1 = parent dir) so selection never depends on
+    // the menu row position. Zero for menus that don't use it.
+    int32_t entry_index;
 } menu_item_t;
 
 typedef struct {

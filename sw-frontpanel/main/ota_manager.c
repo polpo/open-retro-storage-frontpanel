@@ -101,25 +101,6 @@ static uint32_t parse_version_string(const char* version_str) {
     if (!version_str) {
         return 0x00000000; // Default v0.0.0
     }
-#ifdef CONFIG_PRODUCT_BLUESCSI
-    // Encoding is 0x00MMmmpp
-    uint32_t major, minor, patch;
-
-    // Try to parse major.minor.patch format
-    int parsed = sscanf(version_str, "%lu.%lu.%lu", &major, &minor, &patch);
-    if (parsed < 3) {
-        ESP_LOGW(TAG, "Failed to parse version string '%s', using default", version_str);
-        return 0x00000000;
-    }
-
-    // Validate version components (reasonable limits)
-    if (major > 255 || minor > 255 || patch > 255) {
-        ESP_LOGW(TAG, "Version components out of range: %lu.%lu.%lu, using default", major, minor, patch);
-        return 0x00000000;
-    }
-
-    return (major << 16) | (minor << 8) | patch;
-#else
     // Encoding is 0xMMmmppPP: the low byte PP is 0xFF for a final release, or
     // 0-254 for a "-preN" prerelease (which sorts below the matching final).
 
@@ -138,7 +119,6 @@ static uint32_t parse_version_string(const char* version_str) {
 
     return ((uint32_t)(major & 0xFF) << 24) | ((uint32_t)(minor & 0xFF) << 16) |
            ((uint32_t)(patch & 0xFF) << 8) | (uint32_t)(pre & 0xFF);
-#endif
 }
 
 

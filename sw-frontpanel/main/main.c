@@ -27,6 +27,7 @@
 #include "display_manager.h"
 #include "menu_system.h"
 #include "host_comm.h"  // Modular transport layer (I2C/SPI)
+#include "host_link.h"  // Per-transport config + persisted transport type
 #include "transport_config.h" // Transport configuration
 #include "ui_screens.h"
 #include "led_driver.h"
@@ -39,6 +40,7 @@
 #include "driver/gpio.h"
 #include "freertos/queue.h"
 #include "nvs_flash.h"
+#include "test_hooks.h"
 
 static const char *TAG = "main";
 
@@ -47,6 +49,19 @@ static const char *TAG = "main";
 // probe keeps trying afterward so the panel recovers whenever it appears.
 #define HOST_COMM_STARTUP_TIMEOUT_MS  20000
 #define HOST_COMM_RETRY_INTERVAL_MS   500
+
+#ifdef CONFIG_HOST_TRANSPORT_AUTO
+// Auto-detect: give the NVS-saved transport this much of the startup window
+// to itself before alternating both transports (covers a panel moved between
+// board types without probing the other bus on every normal boot).
+#define HOST_LINK_SAVED_EXCLUSIVE_MS  10000
+// Background probe cadence once boot detection has given up. Backs off from
+// MIN to MAX: every probe installs and removes a bus driver, and the SPI one
+// shares SPI2_HOST with the OLED, so a panel left with no main board attached
+// must not churn the display's bus once a second forever.
+#define HOST_LINK_PROBE_MIN_MS        1000
+#define HOST_LINK_PROBE_MAX_MS        30000
+#endif
 
 // OLED startup recovery. When the panel is powered only from the host (no USB),
 // the +3V3 rail ramps slowly enough that the display's hardware reset (LM809)
@@ -85,6 +100,11 @@ static menu_t* screen_menus[SCREEN_COUNT] = {
 };
 static host_comm_t host_comm;
 static bool host_comm_ready = false;  // True once the transport layer is up (host_comm_init succeeded)
+#ifdef CONFIG_HOST_TRANSPORT_AUTO
+static bool auto_link_pending = false;  // Boot detection found no main board; keep probing in the background
+static host_comm_t probe_comm;  // Scratch handle for background probes; the shared host_comm
+                                // (and its mutex) must never be torn down once handlers can see it
+#endif
 static wifi_manager_t wifi_manager;
 static web_server_t web_server;
 static interface_context_t interface_ctx;
@@ -126,8 +146,16 @@ static uint8_t fw_screen_selection = 0;  // 0=Panel, 1=Main board
 static esp_err_t refresh_directory_list(void);
 static void refresh_playback_status(void);
 static void refresh_device_type(void);
+
+// Web handlers change the directory (or its contents) without going through the
+// panel's menus, so they invalidate the cache here and the browser reloads on
+// its next open.
+void interface_invalidate_disc_list(void) {
+    disc_list_loaded = false;
+}
 static void refresh_device_list(void);
 static void populate_device_menu(void);
+static void on_host_link_established(void);
 static const char* get_active_device_label(void);
 static void check_firmware_status(void);
 static void draw_firmware_status_screen(void);
@@ -141,6 +169,10 @@ static void reconnect_to_host(void);
 static bool handle_comm_error(esp_err_t err);
 static void show_info_screen(const char *title, const char *body);
 static void redraw_current_screen(void);
+#ifdef CONFIG_PANEL_TEST_HOOKS
+static void panel_publish_ui_state(void);
+static void panel_publish_framebuffer(void);
+#endif
 
 // SCREEN_INFO state. Title is always a string literal (caller-owned). Body is
 // often built on the caller's stack, so we copy it so the screen survives
@@ -364,7 +396,7 @@ static void handle_button_event(button_event_t *event) {
             switch (event->button_id) {
                 case 0: // Up button (North) - Previous image
                     if (event->type == BUTTON_EVENT_CLICK) {
-                        if (host_comm.initialized && current_image_status.image_loaded) {
+                        if (host_comm.link_up && current_image_status.image_loaded) {
                             esp_err_t ret = host_comm_select_prev_image(&host_comm, active_device_index);
                             if (ret == ESP_OK) {
                                 refresh_playback_status();
@@ -379,7 +411,7 @@ static void handle_button_event(button_event_t *event) {
                     break;
                 case 2: // Down button (South) - Next image
                     if (event->type == BUTTON_EVENT_CLICK) {
-                        if (host_comm.initialized && current_image_status.image_loaded) {
+                        if (host_comm.link_up && current_image_status.image_loaded) {
                             esp_err_t ret = host_comm_select_next_image(&host_comm, active_device_index);
                             if (ret == ESP_OK) {
                                 refresh_playback_status();
@@ -389,7 +421,7 @@ static void handle_button_event(button_event_t *event) {
                     break;
                 case 3: // Back button (West) - Eject (ATAPI only)
                     if (event->type == BUTTON_EVENT_CLICK) {
-                        if (current_device_type != PANEL_DEVICE_TYPE_IDE && host_comm.initialized) {
+                        if (current_device_type != PANEL_DEVICE_TYPE_IDE && host_comm.link_up) {
                             // Show inverted icon as eject feedback
                             ui_draw_status_screen(&display, current_disc_name,
                                                   &current_image_status,
@@ -433,7 +465,7 @@ static void handle_button_event(button_event_t *event) {
                             current_screen = SCREEN_DEVICE_SELECT;
                         } else if (selected == offset + 0) { // "Select Image"
                             // Refresh directory list before showing it
-                            if (!disc_list_loaded && host_comm.initialized) {
+                            if (!disc_list_loaded && host_comm.link_up) {
                                 ESP_LOGI(TAG, "Loading directory list...");
                                 refresh_directory_list();
                             }
@@ -454,7 +486,7 @@ static void handle_button_event(button_event_t *event) {
                                 current_screen = SCREEN_INFO;
                                 show_info_screen("Not Available",
                                     "Eject is not available\nin IDE mode.\n\nUse Select Image to\nchoose a different\nhard disk image.");
-                            } else if (host_comm.initialized) {
+                            } else if (host_comm.link_up) {
                                 // Show inverted icon as eject feedback
                                 ui_draw_status_screen(&display, current_disc_name,
                                                       &current_image_status,
@@ -479,7 +511,7 @@ static void handle_button_event(button_event_t *event) {
                             current_screen = SCREEN_INFO;
                             const esp_app_desc_t* info_app_desc = esp_app_get_description();
                             char main_ver_str[20] = "N/A";
-                            if (host_comm.initialized) {
+                            if (host_comm.link_up) {
                                 rp2350_fw_status_t fw_status;
                                 if (host_comm_get_rp2350_fw_status(&host_comm, &fw_status) == ESP_OK) {
                                     fw_version_format_mainboard(main_ver_str, sizeof(main_ver_str), fw_status.current_version);
@@ -492,7 +524,7 @@ static void handle_button_event(button_event_t *event) {
                                      info_app_desc->version,
                                      main_ver_str,
                                      host_comm_get_transport_name(&host_comm),
-                                     host_comm.initialized ? "Connected" : "Disconnected");
+                                     host_comm.link_up ? "Connected" : "Disconnected");
                             show_info_screen("System Info", info_text);
                         }
                     }
@@ -525,10 +557,13 @@ static void handle_button_event(button_event_t *event) {
                         if (selected_item) {
                             ESP_LOGI(TAG, "Selected entry: %s (menu index %lu)", selected_item->text, selected);
                             // Send command to host device
-                            if (host_comm.initialized) {
-                                // First menu item is ".." (parent dir = index -1)
-                                // Other items are entries (index 0, 1, 2...)
-                                int32_t entry_index = (selected == 0) ? -1 : (int32_t)(selected - 1);
+                            if (host_comm.link_up) {
+                                // Use the host's real entry index recorded on the
+                                // row (-1 = parent dir). Deriving it from the menu
+                                // position breaks whenever the host list contains
+                                // entries we skip (its own "..") — that desync
+                                // loaded the entry above the one selected.
+                                int32_t entry_index = selected_item->entry_index;
 
                                 // Check if this is directory navigation (".." or "[directory]")
                                 bool is_directory = (selected == 0) || (selected_item->text[0] == '[');
@@ -913,7 +948,158 @@ static void handle_button_event(button_event_t *event) {
     if (active_menu) {
         active_menu->needs_redraw = true;
     }
+
+#ifdef CONFIG_PANEL_TEST_HOOKS
+    panel_publish_ui_state();
+#endif
 }
+
+#ifdef CONFIG_PANEL_TEST_HOOKS
+// Keep in step with screen_type_t in ui_screens.h.
+static const char *const screen_names[SCREEN_COUNT] = {
+    "SCREEN_SPLASH", "SCREEN_STATUS", "SCREEN_MAIN_MENU", "SCREEN_DISC_LIST",
+    "SCREEN_SETTINGS", "SCREEN_WIFI_MENU", "SCREEN_DISPLAY_SETTINGS",
+    "SCREEN_IDLE_MODE", "SCREEN_IDLE_TIMEOUT", "SCREEN_BLANK_TIMEOUT",
+    "SCREEN_INFO", "SCREEN_FIRMWARE_UPDATE", "SCREEN_FIRMWARE_STATUS",
+    "SCREEN_DEVICE_SELECT",
+};
+_Static_assert(sizeof(screen_names) / sizeof(screen_names[0]) == SCREEN_COUNT,
+               "screen_names is out of step with screen_type_t");
+
+// Published snapshot. menu_clear_items() free()s menu->items (menu_system.c:83)
+// and refresh_directory_list() re-adds them, so a foreign task walking the live
+// menu is a use-after-free. Only the task that owns the menus fills this in;
+// the web task reads the copy.
+static panel_ui_state_t ui_snapshot;
+static volatile uint32_t ui_snapshot_seq;   // odd while being written
+
+// MUST be called only from the task that mutates the menus (gpio_event_task via
+// handle_button_event, and refresh_directory_list on that same task).
+static void panel_publish_ui_state(void) {
+    ui_snapshot_seq++;                       // -> odd, readers retry
+    __sync_synchronize();
+
+    memset(&ui_snapshot, 0, sizeof(ui_snapshot));
+    screen_type_t screen = current_screen;
+    ui_snapshot.screen = (int)screen;
+    ui_snapshot.screen_name = (screen >= 0 && screen < SCREEN_COUNT)
+                            ? screen_names[screen] : "SCREEN_UNKNOWN";
+    ui_snapshot.entry_index = -1;
+    // A CLICK arriving while the display is not at full brightness is consumed
+    // as a wake and the action is dropped (see handle_button_event), so a test
+    // needs to see this to explain a press that "did nothing".
+    static const char *const display_state_names[] = {
+        "FULL_BRIGHTNESS", "DIMMED", "SCREENSAVER", "OFF"
+    };
+    int ds = (int)display.state;
+    ui_snapshot.display_state = ds;
+    ui_snapshot.display_state_name =
+        (ds >= 0 && ds < (int)(sizeof(display_state_names)/sizeof(display_state_names[0])))
+        ? display_state_names[ds] : "UNKNOWN";
+
+    menu_t *menu = active_menu;
+    if (menu) {
+        ui_snapshot.has_menu = true;
+        ui_snapshot.cursor = menu->selected_index;
+        ui_snapshot.count = menu->item_count;
+        menu_item_t *item = menu_get_selected_item(menu);
+        if (item) {
+            ui_snapshot.entry_index = item->entry_index;
+            strncpy(ui_snapshot.selected, item->text, sizeof(ui_snapshot.selected) - 1);
+            ui_snapshot.selected[sizeof(ui_snapshot.selected) - 1] = '\0';
+        }
+    }
+
+    __sync_synchronize();
+    ui_snapshot_seq++;                       // -> even, readers may proceed
+}
+
+void panel_get_ui_state(panel_ui_state_t *out) {
+    if (!out) {
+        return;
+    }
+    for (int attempt = 0; attempt < 4; attempt++) {
+        uint32_t before = ui_snapshot_seq;
+        if (before & 1u) {                   // publish in progress
+            vTaskDelay(pdMS_TO_TICKS(2));
+            continue;
+        }
+        __sync_synchronize();
+        *out = ui_snapshot;
+        __sync_synchronize();
+        if (ui_snapshot_seq == before) {
+            return;
+        }
+    }
+    // Never hand back a torn record; say so instead.
+    memset(out, 0, sizeof(*out));
+    out->screen_name = "SCREEN_UNKNOWN";
+    out->entry_index = -1;
+}
+
+// Shadow of the last frame actually sent to the panel. Written only by
+// display_update_task, read by the web task under the same seqlock scheme as
+// the UI snapshot.
+static uint8_t fb_shadow[PANEL_FB_MAX_BYTES];
+static volatile uint32_t fb_shadow_seq;      // odd while being written
+static size_t fb_shadow_len;
+static int fb_shadow_tw, fb_shadow_th, fb_shadow_rot = -1;
+
+static void panel_publish_framebuffer(void) {
+    u8g2_t *u8g2 = &display.u8g2;
+    const uint8_t *buf = u8g2_GetBufferPtr(u8g2);
+    if (!buf) {
+        return;
+    }
+    int w = u8g2_GetBufferTileWidth(u8g2);
+    int h = u8g2_GetBufferTileHeight(u8g2);
+    size_t n = (size_t)w * (size_t)h * 8u;
+    if (n > sizeof(fb_shadow)) {
+        n = sizeof(fb_shadow);
+    }
+
+    fb_shadow_seq++;
+    __sync_synchronize();
+    memcpy(fb_shadow, buf, n);
+    fb_shadow_len = n;
+    fb_shadow_tw = w;
+    fb_shadow_th = h;
+    // U8G2_R0..R3 as an index, so the host converter does not hardcode it.
+    fb_shadow_rot = (u8g2->cb == U8G2_R0) ? 0 :
+                    (u8g2->cb == U8G2_R1) ? 1 :
+                    (u8g2->cb == U8G2_R2) ? 2 :
+                    (u8g2->cb == U8G2_R3) ? 3 : -1;
+    __sync_synchronize();
+    fb_shadow_seq++;
+}
+
+size_t panel_get_framebuffer(uint8_t *out, size_t cap, int *tile_w, int *tile_h, int *rotation) {
+    if (!out) {
+        return 0;
+    }
+    for (int attempt = 0; attempt < 4; attempt++) {
+        uint32_t before = fb_shadow_seq;
+        if (before & 1u) {
+            vTaskDelay(pdMS_TO_TICKS(2));
+            continue;
+        }
+        __sync_synchronize();
+        size_t n = fb_shadow_len;
+        if (n == 0 || n > cap) {
+            return 0;
+        }
+        memcpy(out, fb_shadow, n);
+        if (tile_w) *tile_w = fb_shadow_tw;
+        if (tile_h) *tile_h = fb_shadow_th;
+        if (rotation) *rotation = fb_shadow_rot;
+        __sync_synchronize();
+        if (fb_shadow_seq == before) {
+            return n;
+        }
+    }
+    return 0;
+}
+#endif
 
 static void show_info_screen(const char *title, const char *body) {
     info_screen_title = title ? title : "";
@@ -1018,6 +1204,13 @@ static void display_update_task(void *pvParameters) {
             if (display.needs_update) {
                 display_manager_update(&display);
             }
+
+#ifdef CONFIG_PANEL_TEST_HOOKS
+            // Snapshot the frame that just went to the glass. /api/screen must
+            // not read the live u8g2 buffer: ui_draw_menu paints it across many
+            // calls, so a web read would tear mid-frame.
+            panel_publish_framebuffer();
+#endif
         }
 
         vTaskDelay(pdMS_TO_TICKS(33)); // 30 FPS for smooth animation
@@ -1026,14 +1219,74 @@ static void display_update_task(void *pvParameters) {
 
 // Status screen refresh task - updates playback data from host, and
 // reconnects to the main board if it was unreachable at startup
+#ifdef CONFIG_HOST_TRANSPORT_AUTO
+// One alternating probe for a main board, using the scratch handle. The shared
+// host_comm is only ever brought up on success — web handlers may already hold
+// it, so it must never be torn down here. Returns true once the link is up.
+static bool auto_link_probe_once(void) {
+    static transport_type_t next_type = TRANSPORT_TYPE_I2C;
+    bool established = false;
+
+    transport_config_t cfg;
+    host_link_build_config(next_type, &cfg);
+    if (host_comm_init(&probe_comm, &cfg) == ESP_OK) {
+        bool alive = host_comm_probe_alive(&probe_comm, 0) == ESP_OK &&
+                     host_comm_probe_alive(&probe_comm, 0) == ESP_OK;
+        host_comm_deinit(&probe_comm);
+        if (alive && host_comm_init(&host_comm, &cfg) == ESP_OK) {
+            ESP_LOGI(TAG, "Main board found on %s transport, connection established",
+                     host_comm_get_transport_name(&host_comm));
+            auto_link_pending = false;
+            host_comm_ready = true;
+            host_link_save_type(next_type);
+            on_host_link_established();
+            established = true;
+        }
+    }
+
+    next_type = (next_type == TRANSPORT_TYPE_SPI) ? TRANSPORT_TYPE_I2C
+                                                  : TRANSPORT_TYPE_SPI;
+    return established;
+}
+#endif
+
 static void status_refresh_task(void *pvParameters) {
+#ifdef CONFIG_HOST_TRANSPORT_AUTO
+    uint32_t probe_backoff_ms = HOST_LINK_PROBE_MIN_MS;
+    int32_t  probe_due_in_ms = 0;   // probe on the first pass
+#endif
     while (1) {
         uint32_t poll_interval_ms = 1000;
+
+#ifdef CONFIG_HOST_TRANSPORT_AUTO
+        // Runs BEFORE the display-state gate: a blanked screen must not stop the
+        // panel from noticing a main board powered on later, and idle blanking
+        // is on by default. Backs off because each probe installs and removes a
+        // bus driver — the SPI one on SPI2_HOST, shared with the OLED — and
+        // doing that every second forever on a panel with no board attached is
+        // both pointless and contention on a live display bus.
+        if (auto_link_pending) {
+            if (probe_due_in_ms <= 0) {
+                if (auto_link_probe_once()) {
+                    probe_backoff_ms = HOST_LINK_PROBE_MIN_MS;
+                } else if (probe_backoff_ms < HOST_LINK_PROBE_MAX_MS) {
+                    probe_backoff_ms *= 2;
+                    if (probe_backoff_ms > HOST_LINK_PROBE_MAX_MS) {
+                        probe_backoff_ms = HOST_LINK_PROBE_MAX_MS;
+                    }
+                }
+                probe_due_in_ms = (int32_t)probe_backoff_ms;
+            }
+        } else {
+            probe_backoff_ms = HOST_LINK_PROBE_MIN_MS;
+            probe_due_in_ms = 0;
+        }
+#endif
 
         if (display.state == DISPLAY_STATE_OFF) {
             // Screen off: no need to poll at all
             poll_interval_ms = 0;
-        } else if (current_screen == SCREEN_STATUS && host_comm.initialized) {
+        } else if (current_screen == SCREEN_STATUS && host_comm.link_up) {
             if (current_device_type == PANEL_DEVICE_TYPE_IDE ||
                 current_device_type == PANEL_DEVICE_TYPE_SCSI) {
                 // HDD: image can only change via web UI, poll infrequently
@@ -1046,19 +1299,32 @@ static void status_refresh_task(void *pvParameters) {
                 poll_interval_ms = 1000;
             }
             refresh_playback_status();
-        } else if (host_comm_ready) {
+        } else if (host_comm_ready && !host_comm.link_up) {
             // Main board was unreachable at startup (e.g. held in reset).
             // Keep probing so the panel recovers once it comes online.
+            //
+            // Only while the link is actually down. Without the !link_up
+            // test this ran on every pass whenever the status screen was not
+            // showing, re-announcing a healthy link once a second and calling
+            // on_host_link_established(), which resets the menu selection to 0
+            // and drops the cached directory listing under the user.
             uint8_t device_status;
             if (host_comm_get_device_status(&host_comm, 0, &device_status) == ESP_OK) {
                 ESP_LOGI(TAG, "Main board is now responding, connection restored");
-                host_comm.initialized = true;
-                disc_list_loaded = false;   // Force directory reload when next opened
-                status_needs_redraw = true; // Refresh the status screen
+                host_comm.link_up = true;
+                on_host_link_established();
             }
         }
 
-        vTaskDelay(pdMS_TO_TICKS(poll_interval_ms ? poll_interval_ms : 10000));
+        uint32_t delay_ms = poll_interval_ms ? poll_interval_ms : 10000;
+#ifdef CONFIG_HOST_TRANSPORT_AUTO
+        // Never sleep past the next probe, and charge the sleep against it.
+        if (auto_link_pending && (uint32_t)probe_due_in_ms < delay_ms) {
+            delay_ms = (probe_due_in_ms > 100) ? (uint32_t)probe_due_in_ms : 100;
+        }
+        probe_due_in_ms -= (int32_t)delay_ms;
+#endif
+        vTaskDelay(pdMS_TO_TICKS(delay_ms));
     }
 }
 
@@ -1071,7 +1337,7 @@ static void refresh_playback_status(void) {
     // The playback status poll doubles as the liveness probe by checking for
     // PANEL_ALIVE_MAGIC. Poll the active device so the disc name, playback
     // state, and device status all describe the same device.
-    esp_err_t ret = host_comm.initialized
+    esp_err_t ret = host_comm.link_up
         ? host_comm_get_playback_status(&host_comm, active_device_index, &current_playback_status)
         : ESP_FAIL;
     if (ret != ESP_OK ||
@@ -1142,7 +1408,7 @@ static void refresh_playback_status(void) {
 
 // Function to refresh device type from host
 static void refresh_device_type(void) {
-    if (!host_comm.initialized) {
+    if (!host_comm.link_up) {
         return;
     }
 
@@ -1157,7 +1423,7 @@ static void refresh_device_type(void) {
 
 // Function to refresh device list from host
 static void refresh_device_list(void) {
-    if (!host_comm.initialized) {
+    if (!host_comm.link_up) {
         return;
     }
 
@@ -1253,10 +1519,39 @@ static const char* get_active_device_label(void) {
     return NULL;
 }
 
+// Bring the UI into sync with a main board that has just answered. Boot-time
+// detection did this inline, so a board that appeared LATER (the normal case for
+// a USB-powered panel) came up half-initialized: no device list, so the
+// device-select screen stayed inert, and current_device_type stuck at its
+// default of ATAPI, giving CD affordances and CD poll cadence on an HDD-only
+// board. Called from every path that establishes the link.
+static void on_host_link_established(void) {
+    refresh_device_type();
+    refresh_device_list();
+    select_default_device();
+
+    if (device_count > 1) {
+        menu_set_items(&main_menu, main_menu_items_multi,
+                       sizeof(main_menu_items_multi) / sizeof(main_menu_items_multi[0]));
+        ESP_LOGI(TAG, "Multi-device mode: %u devices", device_count);
+    }
+
+    disc_list_loaded = false;   // Force directory reload when next opened
+    status_needs_redraw = true; // Refresh the status screen
+}
+
+// Record the host directory-entry index on the most recently added menu row.
+// menu_add_item() has no field for caller payload, so we set it after the fact.
+static void set_last_menu_entry_index(menu_t *menu, int32_t entry_index) {
+    if (menu && menu->items && menu->item_count > 0) {
+        menu->items[menu->item_count - 1].entry_index = entry_index;
+    }
+}
+
 // Function to refresh directory entry list from host
 static esp_err_t refresh_directory_list(void) {
-    if (!host_comm.initialized) {
-        ESP_LOGW(TAG, "Host comm not initialized");
+    if (!host_comm.link_up) {
+        ESP_LOGW(TAG, "Main board not answering");
         return ESP_ERR_INVALID_STATE;
     }
 
@@ -1270,6 +1565,9 @@ static esp_err_t refresh_directory_list(void) {
         ESP_LOGW(TAG, "Failed to get entry count: %s", esp_err_to_name(ret));
         // Add fallback message
         menu_add_item(&disc_menu, "No entries available", MENU_ACTION_SELECT, NULL, NULL);
+        // Selecting this row still sends SELECT_ENTRY; without an explicit -1 it
+        // would send the default 0 and load a real image the user never picked.
+        set_last_menu_entry_index(&disc_menu, -1);
         return ret;
     }
 
@@ -1277,13 +1575,19 @@ static esp_err_t refresh_directory_list(void) {
 
     if (entry_count == 0) {
         menu_add_item(&disc_menu, "Empty directory", MENU_ACTION_SELECT, NULL, NULL);
+        set_last_menu_entry_index(&disc_menu, -1);
         return ESP_OK;
     }
 
-    // Add ".." entry to go to parent directory
+    // Add ".." entry to go to parent directory (host parent-dir sentinel)
     menu_add_item(&disc_menu, "..", MENU_ACTION_SELECT, NULL, NULL);
+    set_last_menu_entry_index(&disc_menu, -1);
 
-    // Get info for each entry (directories and files)
+    // Get info for each entry (directories and files). The host's real entry
+    // index is recorded on each menu row: the host injects its own ".." at
+    // index 0 in every non-root directory (and we skip it, since we add our
+    // own above), so the menu row no longer lines up 1:1 with the host index.
+    // Selection must send the recorded index, not the row position.
     for (uint32_t i = 0; i < entry_count && i < MENU_MAX_ITEMS - 1; i++) {
         dir_entry_info_t entry_info;
         ESP_LOGI(TAG, "Requesting entry info for index %lu", i);
@@ -1303,16 +1607,23 @@ static esp_err_t refresh_directory_list(void) {
 
             ESP_LOGI(TAG, "Entry %lu: %s (type=%u)", i, entry_info.name, entry_info.entry_type);
             menu_add_item(&disc_menu, display_name, MENU_ACTION_SELECT, NULL, NULL);
+            set_last_menu_entry_index(&disc_menu, (int32_t)i);
         } else {
             ESP_LOGW(TAG, "Failed to get info for entry %lu: %s", i, esp_err_to_name(ret));
             char fallback_name[32];
             snprintf(fallback_name, sizeof(fallback_name), "Entry %lu (error)", i);
             menu_add_item(&disc_menu, fallback_name, MENU_ACTION_SELECT, NULL, NULL);
+            set_last_menu_entry_index(&disc_menu, (int32_t)i);
         }
     }
 
     disc_list_loaded = true;
     ESP_LOGI(TAG, "Directory list refreshed successfully");
+#ifdef CONFIG_PANEL_TEST_HOOKS
+    // The items array was freed and rebuilt above, so republish before any
+    // reader can observe the new one.
+    panel_publish_ui_state();
+#endif
     return ESP_OK;
 }
 
@@ -1333,7 +1644,7 @@ static void reconnect_to_host(void) {
     esp_err_t ret = refresh_directory_list();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to re-enumerate after reconnect: %s", esp_err_to_name(ret));
-        host_comm.initialized = false;
+        host_comm.link_up = false;
     }
 }
 
@@ -1351,7 +1662,7 @@ static bool handle_comm_error(esp_err_t err) {
         case ESP_ERR_INVALID_RESPONSE:
         case ESP_FAIL:
             reconnect_to_host();
-            return host_comm.initialized;
+            return host_comm.link_up;
         default:
             return false;
     }
@@ -1621,8 +1932,8 @@ static void check_firmware_status(void) {
     memset(&panel_fw_info, 0, sizeof(panel_fw_info));
     memset(&rp2350_fw_status, 0, sizeof(rp2350_fw_status));
 
-    if (!host_comm.initialized) {
-        ESP_LOGW(TAG, "Host communication not initialized");
+    if (!host_comm.link_up) {
+        ESP_LOGW(TAG, "Main board not answering");
         show_info_screen("Error", "Host not connected");
         display_manager_update(&display);
         return;
@@ -1766,7 +2077,7 @@ static void host_comm_task(void *pvParameters) {
     vTaskDelay(pdMS_TO_TICKS(2000));
     
     while (1) {
-        if (host_comm.initialized) {
+        if (host_comm.link_up) {
             // Periodically check host status
             host_status_t status;
             esp_err_t ret = host_comm_get_status(&host_comm, &status);
@@ -1788,6 +2099,94 @@ static void host_comm_task(void *pvParameters) {
     }
 }
 #endif
+
+// Bring up the host link and verify a live main board is answering, retrying
+// within the startup window (some systems hold the board in reset for several
+// seconds after power-on). Forced-transport builds init the compile-time
+// transport and probe it. AUTO builds (BlueSCSI) probe with alive-magic
+// validation — an absent SPI host "answers" reads with floating-bus garbage —
+// giving the NVS-saved transport the first part of the window to itself, then
+// alternating both; the winner is persisted. On ESP_OK the shared host_comm is
+// up and verified; on failure host_comm_ready reflects whether it is up at all.
+static esp_err_t establish_host_link(void) {
+#ifdef CONFIG_HOST_TRANSPORT_AUTO
+    transport_type_t saved_type = TRANSPORT_TYPE_SPI;
+    bool have_saved = host_link_load_type(&saved_type);
+    // Without a saved type, try I2C first: an absent I2C slave NACKs
+    // immediately, while an absent SPI host needs the magic check to reject it.
+    transport_type_t current = have_saved ? saved_type : TRANSPORT_TYPE_I2C;
+    ESP_LOGI(TAG, "Detecting host transport (saved: %s)",
+             !have_saved ? "none" : (saved_type == TRANSPORT_TYPE_I2C ? "I2C" : "SPI"));
+
+    uint32_t start_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
+    while (1) {
+        transport_config_t cfg;
+        host_link_build_config(current, &cfg);
+        // Probe on the scratch handle, never the shared one: host_comm_deinit()
+        // deletes host_comm.mutex and leaves it NULL, and the web server is
+        // started even when detection times out. Tearing down the shared handle
+        // here left every host_comm_* caller locking a NULL semaphore. Same
+        // discipline as status_refresh_task's background probe.
+        if (host_comm_init(&probe_comm, &cfg) == ESP_OK) {
+            // Probe twice: a floating SPI bus could clock in one
+            // valid-looking alive magic by chance.
+            bool alive = host_comm_probe_alive(&probe_comm, 0) == ESP_OK &&
+                         host_comm_probe_alive(&probe_comm, 0) == ESP_OK;
+            host_comm_deinit(&probe_comm);
+            if (alive && host_comm_init(&host_comm, &cfg) == ESP_OK) {
+                host_comm_ready = true;
+                ESP_LOGI(TAG, "Main board found on %s transport",
+                         host_comm_get_transport_name(&host_comm));
+                if (!have_saved || current != saved_type) {
+                    host_link_save_type(current);
+                }
+                return ESP_OK;
+            }
+        }
+
+        uint32_t elapsed = xTaskGetTickCount() * portTICK_PERIOD_MS - start_ms;
+        if (elapsed >= HOST_COMM_STARTUP_TIMEOUT_MS) {
+            return ESP_ERR_TIMEOUT;
+        }
+        if (!have_saved || elapsed >= HOST_LINK_SAVED_EXCLUSIVE_MS) {
+            current = (current == TRANSPORT_TYPE_SPI) ? TRANSPORT_TYPE_I2C
+                                                      : TRANSPORT_TYPE_SPI;
+        }
+        ui_update_splash_progress(&display, "Wait for main board", 60);
+        vTaskDelay(pdMS_TO_TICKS(HOST_COMM_RETRY_INTERVAL_MS));
+    }
+#else
+    transport_config_t transport_cfg;
+#ifdef CONFIG_HOST_TRANSPORT_I2C
+    host_link_build_config(TRANSPORT_TYPE_I2C, &transport_cfg);
+#else
+    host_link_build_config(TRANSPORT_TYPE_SPI, &transport_cfg);
+#endif
+
+    esp_err_t ret = host_comm_init(&host_comm, &transport_cfg);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to initialize host comm: %s", esp_err_to_name(ret));
+        return ret;
+    }
+    host_comm_ready = true;
+    ESP_LOGI(TAG, "Host comm initialized successfully using %s",
+             host_comm_get_transport_name(&host_comm));
+
+    uint8_t test_status;
+    esp_err_t comm_ret = host_comm_get_device_status(&host_comm, 0, &test_status);
+    if (comm_ret != ESP_OK) {
+        ESP_LOGW(TAG, "Main board not responding, waiting for it to leave reset...");
+        uint32_t start_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
+        while (comm_ret != ESP_OK &&
+               (xTaskGetTickCount() * portTICK_PERIOD_MS - start_ms) < HOST_COMM_STARTUP_TIMEOUT_MS) {
+            ui_update_splash_progress(&display, "Wait for main board", 60);
+            vTaskDelay(pdMS_TO_TICKS(HOST_COMM_RETRY_INTERVAL_MS));
+            comm_ret = host_comm_get_device_status(&host_comm, 0, &test_status);
+        }
+    }
+    return comm_ret;
+#endif
+}
 
 void app_main(void) {
     ESP_LOGI(TAG, "%s Starting...", PRODUCT_NAME_FULL);
@@ -1947,44 +2346,23 @@ void app_main(void) {
 
     display_manager_set_off_state_callback(&display, on_display_off_state_change, NULL);
 
-    transport_config_t transport_cfg = {
-        .device_addr = HOST_DEVICE_ADDR,
-        .sda_miso = PIN_SDA,
-        .scl_clk = PIN_SCL,
-        .cs = PIN_HOST_CS,
-        .mosi = PIN_SPI_MOSI,
-        .clock_speed = HOST_CLOCK_SPEED,
-        .timeout_ms = HOST_TIMEOUT_MS,
-    };
-
     ui_update_splash_progress(&display, "Establish comms...", 55);
     ESP_LOGI(TAG, "Waiting %d ms for main board startup...", HOST_STARTUP_DELAY_MS);
     vTaskDelay(pdMS_TO_TICKS(HOST_STARTUP_DELAY_MS));
-    ret = host_comm_init(&host_comm, &transport_cfg);
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "Failed to initialize host comm: %s", esp_err_to_name(ret));
-    } else {
-        host_comm_ready = true;
-        ESP_LOGI(TAG, "Host comm initialized successfully using %s",
-                 host_comm_get_transport_name(&host_comm));
 
-        // Probe for the main board. Some systems hold it in reset for several
-        // seconds after power-on, so keep retrying for a bounded window
-        // instead of giving up on the first failure.
-        uint8_t test_status;
-        esp_err_t comm_ret = host_comm_get_device_status(&host_comm, 0, &test_status);
-        if (comm_ret != ESP_OK) {
-            ESP_LOGW(TAG, "Main board not responding, waiting for it to leave reset...");
-            uint32_t start_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
-            while (comm_ret != ESP_OK &&
-                   (xTaskGetTickCount() * portTICK_PERIOD_MS - start_ms) < HOST_COMM_STARTUP_TIMEOUT_MS) {
-                ui_update_splash_progress(&display, "Wait for main board", 60);
-                vTaskDelay(pdMS_TO_TICKS(HOST_COMM_RETRY_INTERVAL_MS));
-                comm_ret = host_comm_get_device_status(&host_comm, 0, &test_status);
-            }
-        }
-
-        if (comm_ret != ESP_OK) {
+    esp_err_t comm_ret = establish_host_link();
+    {
+#ifdef CONFIG_HOST_TRANSPORT_AUTO
+        // Detection exhausted the window with no live board on either
+        // transport; keep probing from status_refresh_task.
+        bool board_missing = (comm_ret != ESP_OK);
+        auto_link_pending = board_missing;
+#else
+        // Transport up but board silent. (If host_comm_init itself failed,
+        // there is nothing to probe and no blink, as before.)
+        bool board_missing = (comm_ret != ESP_OK) && host_comm_ready;
+#endif
+        if (board_missing) {
             ESP_LOGE(TAG, "Failed to communicate with main board: %s", esp_err_to_name(comm_ret));
             led_stop_pulse();
 
@@ -1995,8 +2373,11 @@ void app_main(void) {
                 vTaskDelay(pdMS_TO_TICKS(200));
             }
 
-            host_comm.initialized = false;
-        } else {
+            if (host_comm_ready) {
+                host_comm.link_up = false;
+            }
+        }
+        if (comm_ret == ESP_OK) {
             ESP_LOGI(TAG, "Communication with main board verified");
 
             // Get and display main board firmware version

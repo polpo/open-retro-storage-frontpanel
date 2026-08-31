@@ -368,6 +368,29 @@ esp_err_t gpio_handler_clear_events(void) {
     return ESP_OK;
 }
 
+#ifdef CONFIG_PANEL_TEST_HOOKS
+// Same enqueue the debounce, long-press and repeat timers do, so the event is
+// dispatched from gpio_event_task and handle_button_event keeps its usual task
+// context. Calling the handler directly from the web task would run its
+// blocking host transactions on the wrong task.
+esp_err_t gpio_handler_inject_event(uint8_t button_id, button_event_type_t type) {
+    if (event_queue == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (button_id >= MAX_BUTTONS) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    button_event_t event = {
+        .button_id = button_id,
+        .type = type,
+        .timestamp = esp_timer_get_time() / 1000
+    };
+    // Report a full queue rather than dropping silently, so a test that sends
+    // faster than the UI drains fails instead of under-counting presses.
+    return xQueueSend(event_queue, &event, 0) == pdTRUE ? ESP_OK : ESP_ERR_NO_MEM;
+}
+#endif
+
 // Activity LED handler - sets LED color based on activity pin state
 static void activity_led_handler(activity_event_t *event) {
     if (!event) return;

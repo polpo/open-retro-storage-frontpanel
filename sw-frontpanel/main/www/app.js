@@ -510,13 +510,19 @@ let mainboardUpdateCheckTimer = null;
 // Format version number for display
 function formatVersion(version, isDateBased) {
     if (version === 0) return 'Unknown';
-    const major = (version >> 16) & 0xFF;
-    const minor = (version >> 8) & 0xFF;
-    const patch = version & 0xFF;
     if (isDateBased) {
-        return `v${2000 + major}.${String(minor).padStart(2, '0')}.${String(patch).padStart(2, '0')}`;
+        // Main board date version packed as 0x00YYMMDD
+        const year = (version >> 16) & 0xFF;
+        const month = (version >> 8) & 0xFF;
+        const day = version & 0xFF;
+        return `v${2000 + year}.${String(month).padStart(2, '0')}.${String(day).padStart(2, '0')}`;
     }
-    return `v${major}.${minor}.${patch}`;
+    // Semver packed as 0xMMmmppPP; low byte 0xFF = final release, else -preN
+    const major = (version >>> 24) & 0xFF;
+    const minor = (version >> 16) & 0xFF;
+    const patch = (version >> 8) & 0xFF;
+    const pre = version & 0xFF;
+    return `v${major}.${minor}.${patch}` + (pre === 0xFF ? '' : `-pre${pre}`);
 }
 
 async function checkAllFirmware() {
