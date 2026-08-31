@@ -460,6 +460,68 @@ TEST(torn_down_handle_is_rejected) {
     CHECK_TRUE(mock_xfer(0) == NULL);
 }
 
+// --- Device list -------------------------------------------------------------
+
+TEST(get_device_list_frames_command) {
+    setup();
+    struct __attribute__((packed)) {
+        device_list_response_t header;
+        device_summary_t devices[2];
+    } reply;
+    memset(&reply, 0, sizeof(reply));
+    reply.header.device_count = 2;
+    reply.header.max_devices = 8;
+    reply.devices[0].device_index = 0;
+    reply.devices[0].device_type = PANEL_DEV_CATEGORY_FIXED;
+    reply.devices[1].device_index = 3;
+    reply.devices[1].device_type = PANEL_DEV_CATEGORY_OPTICAL;
+    mock_set_poll_result(&reply, sizeof(reply));
+
+    uint8_t buf[sizeof(reply)];
+    device_list_response_t *list = (device_list_response_t *)buf;
+    CHECK_ESP_OK(host_comm_get_device_list(&comm, list, sizeof(buf)));
+    CHECK_EQ_INT(list->device_count, 2);
+    CHECK_EQ_INT(list->devices[1].device_index, 3);
+    CHECK_EQ_INT(list->devices[1].device_type, PANEL_DEV_CATEGORY_OPTICAL);
+
+    const mock_xfer_t *x = mock_xfer(0);
+    CHECK_TRUE(x != NULL);
+    CHECK_EQ_HEX(x->command, PANEL_CMD_GET_DEVICE_LIST);
+    CHECK_EQ_INT(x->write_len, 0);
+}
+
+// Callers walk devices[] up to device_count, so a reply claiming more devices
+// than it carries must not be taken at its word.
+TEST(get_device_list_clamps_count_to_what_arrived) {
+    setup();
+    struct __attribute__((packed)) {
+        device_list_response_t header;
+        device_summary_t devices[2];
+    } reply;
+    memset(&reply, 0, sizeof(reply));
+    reply.header.device_count = 200;   // lies: only two summaries follow
+    reply.header.max_devices = 8;
+    mock_set_poll_result(&reply, sizeof(reply));
+
+    uint8_t buf[sizeof(reply)];
+    device_list_response_t *list = (device_list_response_t *)buf;
+    CHECK_ESP_OK(host_comm_get_device_list(&comm, list, sizeof(buf)));
+    CHECK_EQ_INT(list->device_count, 2);
+}
+
+// A header with no summaries at all is what BlueSCSI sends in initiator mode.
+TEST(get_device_list_accepts_an_empty_list) {
+    setup();
+    device_list_response_t reply;
+    memset(&reply, 0, sizeof(reply));
+    mock_set_poll_result(&reply, sizeof(reply));
+
+    uint8_t buf[sizeof(device_list_response_t) + 4 * sizeof(device_summary_t)];
+    device_list_response_t *list = (device_list_response_t *)buf;
+    CHECK_ESP_OK(host_comm_get_device_list(&comm, list, sizeof(buf)));
+    CHECK_EQ_INT(list->device_count, 0);
+}
+
 void run_host_comm_suite(void) {
     printf("host_comm:\n");
     RUN(get_entry_count_frames_command_and_parses_be32);
@@ -493,4 +555,7 @@ void run_host_comm_suite(void) {
     RUN(null_args_are_rejected);
     RUN(silent_board_still_reaches_the_wire);
     RUN(torn_down_handle_is_rejected);
+    RUN(get_device_list_frames_command);
+    RUN(get_device_list_clamps_count_to_what_arrived);
+    RUN(get_device_list_accepts_an_empty_list);
 }

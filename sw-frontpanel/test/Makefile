@@ -28,13 +28,14 @@ WARN_SUT  := -Wall -Wextra -Wno-unused-variable
 BIN := runtests
 
 # Firmware sources under test (real code, compiled host-side, lenient warnings).
-SUT_OBJS := $(BUILD)/host_comm.o $(BUILD)/transport.o
+SUT_OBJS := $(BUILD)/host_comm.o $(BUILD)/transport.o $(BUILD)/panel_policy.o
 
 # Test scaffolding (strict warnings).
 TEST_OBJS := \
 	$(BUILD)/test_main.o \
 	$(BUILD)/test_protocol_defs.o \
 	$(BUILD)/test_host_comm.o \
+	$(BUILD)/test_panel_policy.o \
 	$(BUILD)/mock_transport.o \
 	$(BUILD)/esp_rom_crc.o
 
@@ -52,6 +53,8 @@ $(BUILD):
 $(BUILD)/host_comm.o: $(MAIN)/host_comm.c | $(BUILD)
 	$(CC) $(COMMON) $(WARN_SUT) -c $< -o $@
 $(BUILD)/transport.o: $(MAIN)/transport.c | $(BUILD)
+	$(CC) $(COMMON) $(WARN_SUT) -c $< -o $@
+$(BUILD)/panel_policy.o: $(MAIN)/panel_policy.c | $(BUILD)
 	$(CC) $(COMMON) $(WARN_SUT) -c $< -o $@
 
 # Test + stub objects (strict).

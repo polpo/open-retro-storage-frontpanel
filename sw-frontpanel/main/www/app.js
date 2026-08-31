@@ -128,15 +128,13 @@ async function refreshDevices() {
         if (devices.length > 0 && !(deviceIndexInitialized && listed(activeDeviceIndex))) {
             activeDeviceIndex = listed(data.active_device) ? data.active_device : devices[0].index;
             deviceIndexInitialized = true;
-        } else if (devices.length === 0) {
-            deviceIndexInitialized = false;
         }
         renderDeviceSelector();
     }
 }
 
 // S2S device types that support eject
-const EJECTABLE_TYPES = [1, 2, 3, 4, 7]; // removable, optical, floppy, MO, ZIP
+const EJECTABLE_TYPES = [1, 2, 3, 4, 5, 7]; // removable, optical, floppy, MO, tape, ZIP
 const DEVICE_STATUS_TRAY_OPEN = 6; // PANEL_DEVICE_STATUS_TRAY_OPEN
 
 function renderDeviceSelector() {
@@ -204,17 +202,28 @@ function renderFileModButtons(entry, filePath) {
 }
 // #endif
 
-// The current device every request acts on. The value of null means we don't
-// have a device list yet, which tells the caller to wait until we have a list.
+// The current device every request acts on. null means we have no device list
+// yet, so commands that act on a device have nothing to act on.
 function currentDevice() {
     return deviceIndexInitialized ? activeDeviceIndex : null;
 }
 
+// Reload the device strip and the listing together. The Refresh button uses this
+// so an empty device list has a way to recover once devices reappear.
+async function refreshAll() {
+    await refreshDevices();
+    await refreshImages();
+}
+
 async function refreshImages() {
+    // Browsing is a read, so it does not need a device we do not have — the
+    // panel answers with its own selection and we adopt it.
     const device = currentDevice();
-    if (device === null) return;
-    const data = await apiCall(`/images?device=${device}`);
+    const data = await apiCall(device === null ? '/images' : `/images?device=${device}`);
     if (data) {
+        if (device === null && typeof data.device === 'number') {
+            activeDeviceIndex = data.device;
+        }
         currentPath = data.current_path || "/";
         currentImage = data.current_image;
 
@@ -286,12 +295,11 @@ async function refreshImages() {
 
 async function selectEntry(index) {
     const body = { index: index };
-    const device = currentDevice();
-    if (device === null) {
-        showStatus('error', 'No device selected yet');
+    if (devices.length === 0) {
+        showStatus('error', 'No devices found.');
         return;
     }
-    body.device = device;
+    body.device = activeDeviceIndex;
     const data = await apiCall('/select_entry', {
         method: 'POST',
         body: JSON.stringify(body)
@@ -321,12 +329,11 @@ async function ejectDevice(deviceIndex) {
 
 async function ejectImage() {
     const body = {};
-    const device = currentDevice();
-    if (device === null) {
-        showStatus('error', 'No device selected yet');
+    if (devices.length === 0) {
+        showStatus('error', 'No devices found.');
         return;
     }
-    body.device = device;
+    body.device = activeDeviceIndex;
     const data = await apiCall('/eject_image', {
         method: 'POST',
         body: JSON.stringify(body)
@@ -415,12 +422,11 @@ async function createDir() {
 
 async function prevImage() {
     const body = {};
-    const device = currentDevice();
-    if (device === null) {
-        showStatus('error', 'No device selected yet');
+    if (devices.length === 0) {
+        showStatus('error', 'No devices found.');
         return;
     }
-    body.device = device;
+    body.device = activeDeviceIndex;
     const data = await apiCall('/prev_image', {
         method: 'POST',
         body: JSON.stringify(body)
@@ -434,12 +440,11 @@ async function prevImage() {
 
 async function nextImage() {
     const body = {};
-    const device = currentDevice();
-    if (device === null) {
-        showStatus('error', 'No device selected yet');
+    if (devices.length === 0) {
+        showStatus('error', 'No devices found.');
         return;
     }
-    body.device = device;
+    body.device = activeDeviceIndex;
     const data = await apiCall('/next_image', {
         method: 'POST',
         body: JSON.stringify(body)

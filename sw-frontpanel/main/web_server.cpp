@@ -75,7 +75,7 @@ static esp_err_t api_screen_handler(httpd_req_t *req);
 // Global server instance for handlers
 static web_server_t *g_server = NULL;
 
-// Helper: extract device index from the JSON body. Every request that operates on 
+// Helper: extract device index from the JSON body. Every request that operates on
 // a device should include it in the body, so if there is not one, return false.
 static bool get_device_from_body(httpd_req_t *req, uint16_t *device_index) {
     if (req->content_len == 0 || req->content_len > 256) return false;
@@ -501,6 +501,27 @@ private:
 static esp_err_t api_images_handler(httpd_req_t *req) {
     httpd_resp_set_type(req, "application/json");
 
+    // The ?device= query parameter names the device this listing is for.
+    // On BlueSCSI: used for the device's loaded image status
+    // On PicoIDE: loaded image status, per-device browse dir, extension filter
+    //
+    // Unlike the commands that act on a device, a listing is a read and can fall
+    // back to the panel's own selection — the same value /api/devices reports as
+    // active_device. A client that has no device list yet (BlueSCSI reports none
+    // while imaging in initiator mode) can still browse the card, and adopts the
+    // echoed index for its next request.
+    uint16_t device_index = (g_server && g_server->interface_ctx)
+        ? g_server->interface_ctx->active_device_index : 0;
+    {
+        char query[64];
+        char device_str[8];
+        if (httpd_req_get_url_query_len(req) > 0 &&
+            httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK &&
+            httpd_query_key_value(query, "device", device_str, sizeof(device_str)) == ESP_OK) {
+            device_index = (uint16_t)atoi(device_str);
+        }
+    }
+
     JsonStreamWriter json(req);
     esp_err_t ret = json.beginObject();
     if (ret != ESP_OK) return ret;
@@ -508,22 +529,8 @@ static esp_err_t api_images_handler(httpd_req_t *req) {
     if (g_server && g_server->interface_ctx) {
         host_comm_t *host_comm = g_server->interface_ctx->host_comm;
 
-        // The ?device= query parameter names the device this listing is for.
-        // On BlueSCSI: used for device's loaded image status
-        // On PicoIDE: loaded image status, per-device browse dir, extension filter
-        uint16_t device_index;
-        {
-            size_t query_len = httpd_req_get_url_query_len(req);
-            char query[64];
-            char device_str[8];
-            if (query_len == 0 || query_len >= sizeof(query) ||
-                httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK ||
-                httpd_query_key_value(query, "device", device_str, sizeof(device_str)) != ESP_OK) {
-                httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing device");
-                return ESP_FAIL;
-            }
-            device_index = (uint16_t)atoi(device_str);
-        }
+        ret = json.write("device", (int)device_index);
+        if (ret != ESP_OK) return ret;
 
         // Get current path
         char current_path[256] = "/";

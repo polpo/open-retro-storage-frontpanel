@@ -1055,6 +1055,17 @@ esp_err_t host_comm_get_device_list(host_comm_t *comm, device_list_response_t *r
     // Copy result to caller's buffer
     size_t copy_size = (result_size < max_size) ? result_size : max_size;
     memcpy(response, result_data, copy_size);
+
+    // Callers iterate devices[] up to device_count. A truncated or garbled reply
+    // would walk off the end, so clamp the count to what actually arrived.
+    size_t capacity = (copy_size > sizeof(device_list_response_t))
+        ? (copy_size - sizeof(device_list_response_t)) / sizeof(device_summary_t) : 0;
+    if (response->device_count > capacity) {
+        ESP_LOGW(TAG, "Device list truncated: %u of %u devices fit",
+                 (unsigned)capacity, response->device_count);
+        response->device_count = (uint8_t)capacity;
+    }
+
     ESP_LOGI(TAG, "Device list: %u devices (max %u)", response->device_count, response->max_devices);
 
     HOST_COMM_UNLOCK(comm);

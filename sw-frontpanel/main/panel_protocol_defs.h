@@ -264,6 +264,7 @@ typedef struct __attribute__((packed)) {
 #define PANEL_DEV_CATEGORY_OPTICAL   0x02
 #define PANEL_DEV_CATEGORY_FLOPPY    0x03
 #define PANEL_DEV_CATEGORY_MO        0x04
+#define PANEL_DEV_CATEGORY_SEQUENTIAL 0x05
 #define PANEL_DEV_CATEGORY_ZIP       0x07
 
 // Device summary (68 bytes)
