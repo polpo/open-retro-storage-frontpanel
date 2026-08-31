@@ -884,3 +884,297 @@ bool ui_animate_status_screen(display_manager_t *display) {
     display_manager_request_update(display);
     return true;
 }
+
+#ifdef CONFIG_PRODUCT_BLUESCSI
+/* ============================================================
+ * Initiator (disk imaging) mode
+ * ============================================================ */
+
+static const char* initiator_device_type_str(uint8_t device_type) {
+    switch (device_type) {
+        case 0x00: return "HD";
+        case 0x05: return "CD";
+        case 0x07: return "MO";
+        default:   return "??";
+    }
+}
+
+/* Human-readable size. Everything is cast to unsigned long long because
+ * `long` is 32-bit on the ESP32 and these are 64-bit byte counts. */
+static void format_size(char *buf, size_t buf_size, uint64_t bytes) {
+    const uint64_t gib = (uint64_t)1024 * 1024 * 1024;
+    if (bytes >= gib) {
+        snprintf(buf, buf_size, "%llu.%llu GB",
+                 (unsigned long long)(bytes / gib),
+                 (unsigned long long)((bytes % gib) * 10 / gib));
+    } else if (bytes >= 1024 * 1024) {
+        snprintf(buf, buf_size, "%llu MB", (unsigned long long)(bytes / (1024 * 1024)));
+    } else {
+        snprintf(buf, buf_size, "%llu KB", (unsigned long long)(bytes / 1024));
+    }
+}
+
+static const char* sense_key_name(uint8_t key) {
+    switch (key) {
+        case 0x00: return "No Sense";
+        case 0x01: return "Recovered Error";
+        case 0x02: return "Not Ready";
+        case 0x03: return "Medium Error";
+        case 0x04: return "Hardware Error";
+        case 0x05: return "Illegal Request";
+        case 0x06: return "Unit Attention";
+        case 0x07: return "Data Protect";
+        default:   return "Other Error";
+    }
+}
+
+/* Why the initiator gave up on a drive, short enough for one 21-char line */
+static const char* initiator_skip_reason_str(uint8_t reason) {
+    switch (reason) {
+        case PANEL_INITIATOR_SKIP_TOO_LARGE_FAT32: return "Over 4GB, needs exFAT";
+        case PANEL_INITIATOR_SKIP_UNSUPPORTED:     return "Not a disk";
+        case PANEL_INITIATOR_SKIP_FILE_EXISTS:     return "Image already exists";
+        case PANEL_INITIATOR_SKIP_TOO_MANY:        return "Too many copies";
+        case PANEL_INITIATOR_SKIP_NO_SPACE:        return "SD card full";
+        default:                                   return NULL;
+    }
+}
+
+/* Trim the INQUIRY field's trailing spaces into a caller-owned buffer */
+static void initiator_trim(char *dst, size_t dst_size, const char *src, size_t src_len) {
+    size_t n = (src_len < dst_size - 1) ? src_len : dst_size - 1;
+    memcpy(dst, src, n);
+    dst[n] = '\0';
+    for (int i = (int)n - 1; i >= 0 && dst[i] == ' '; i--) dst[i] = '\0';
+}
+
+/* A long image name is truncated from the left so the extension stays visible */
+static void initiator_fit_filename(char *dst, size_t dst_size, const char *name, int max_chars) {
+    int len = (int)strlen(name);
+    if (len <= max_chars) {
+        snprintf(dst, dst_size, "%s", name);
+    } else {
+        snprintf(dst, dst_size, "\xe2\x80\xa6%s", name + (len - max_chars + 1));
+    }
+}
+
+esp_err_t ui_draw_initiator_screen(display_manager_t *display,
+                                   const initiator_status_response_t *status,
+                                   int target_count) {
+    if (!display || !status) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    display_manager_clear(display);
+    display_manager_set_font(display, u8g2_font_6x10_tf);
+
+    switch (status->phase) {
+        case PANEL_INITIATOR_PHASE_SCANNING: {
+            display_manager_draw_box(display, 0, 0, 128, 10);
+            display_manager_set_draw_color(display, 0);
+            display_manager_draw_text(display, 2, 8, "BlueSCSI Initiator");
+            display_manager_set_draw_color(display, 1);
+
+            if (status->current_target_id != 0xFF) {
+                char scan_line[24];
+                snprintf(scan_line, sizeof(scan_line), "Scanning ID %u...",
+                         status->current_target_id);
+                display_manager_draw_text(display, 2, 20, scan_line);
+            } else {
+                display_manager_draw_text(display, 2, 20, "Scanning SCSI bus...");
+            }
+
+            int y = 32;
+            for (int i = 0; i < target_count && y < 64; i++) {
+                char vendor[9];
+                initiator_trim(vendor, sizeof(vendor), status->targets[i].vendor, 8);
+
+                char line[32];
+                snprintf(line, sizeof(line), "ID%u:%s %s",
+                         status->targets[i].scsi_id,
+                         initiator_device_type_str(status->targets[i].device_type),
+                         vendor);
+                display_manager_draw_text(display, 2, y, line);
+                y += 10;
+            }
+
+            if (target_count == 0) {
+                display_manager_draw_text(display, 2, 32, "No drives found yet");
+            }
+            break;
+        }
+
+        case PANEL_INITIATOR_PHASE_IMAGING: {
+            const initiator_target_info_t *current = NULL;
+            for (int i = 0; i < target_count; i++) {
+                if (status->targets[i].scsi_id == status->current_target_id) {
+                    current = &status->targets[i];
+                    break;
+                }
+            }
+
+            if (!current) {
+                display_manager_draw_text(display, 2, 20, "Imaging...");
+                break;
+            }
+
+            char title[28];
+            snprintf(title, sizeof(title), "Imaging SCSI ID %u", current->scsi_id);
+            display_manager_draw_box(display, 0, 0, 128, 10);
+            display_manager_set_draw_color(display, 0);
+            display_manager_draw_text(display, 2, 8, title);
+            display_manager_set_draw_color(display, 1);
+
+            /* Drive on the left, current rate on the right */
+            char vendor[9];
+            initiator_trim(vendor, sizeof(vendor), current->vendor, 8);
+            char device_line[24];
+            snprintf(device_line, sizeof(device_line), "%s %s",
+                     initiator_device_type_str(current->device_type), vendor);
+            display_manager_draw_text(display, 2, 20, device_line);
+
+            if (status->speed_kbps > 0) {
+                char speed[12];
+                snprintf(speed, sizeof(speed), "%u kB/s", status->speed_kbps);
+                uint16_t w = u8g2_GetStrWidth(&display->u8g2, speed);
+                display_manager_draw_text(display, 126 - w, 20, speed);
+            }
+
+            uint8_t progress = 0;
+            if (current->sectorcount > 0) {
+                progress = (uint8_t)(100ULL * current->sectors_done / current->sectorcount);
+            }
+
+            display_manager_draw_frame(display, 2, 24, 124, 10);
+            if (progress > 0) {
+                display_manager_draw_box(display, 4, 26, (progress * 120) / 100, 6);
+            }
+
+            char pct[6];
+            snprintf(pct, sizeof(pct), "%u%%", progress);
+            uint16_t pct_width = u8g2_GetStrWidth(&display->u8g2, pct);
+            display_manager_set_draw_color(display, 2);   /* XOR over the bar */
+            display_manager_draw_text(display, 64 - pct_width / 2, 32, pct);
+            display_manager_set_draw_color(display, 1);
+
+            char done_str[12], total_str[12], size_line[32];
+            format_size(done_str, sizeof(done_str),
+                        (uint64_t)current->sectors_done * current->sectorsize);
+            format_size(total_str, sizeof(total_str),
+                        (uint64_t)current->sectorcount * current->sectorsize);
+            snprintf(size_line, sizeof(size_line), "%s / %s", done_str, total_str);
+            display_manager_draw_text(display, 2, 46, size_line);
+
+            /* Bad sectors matter more than the name once there are any */
+            if (current->bad_sector_count > 0) {
+                char bad_line[24];
+                snprintf(bad_line, sizeof(bad_line), "Bad sectors: %lu",
+                         (unsigned long)current->bad_sector_count);
+                display_manager_draw_text(display, 2, 56, bad_line);
+            } else if (status->current_filename[0]) {
+                char name_line[24];
+                initiator_fit_filename(name_line, sizeof(name_line),
+                                       status->current_filename, 21);
+                display_manager_draw_text(display, 2, 56, name_line);
+            }
+            break;
+        }
+
+        case PANEL_INITIATOR_PHASE_COMPLETE: {
+            display_manager_draw_box(display, 0, 0, 128, 10);
+            display_manager_set_draw_color(display, 0);
+            display_manager_draw_text(display, 2, 8, "Imaging Complete");
+            display_manager_set_draw_color(display, 1);
+
+            char summary[24];
+            snprintf(summary, sizeof(summary), "%u drive%s imaged",
+                     status->targets_imaged,
+                     status->targets_imaged == 1 ? "" : "s");
+            display_manager_draw_text(display, 2, 20, summary);
+
+            int y = 32;
+            for (int i = 0; i < target_count && y < 64; i++) {
+                const initiator_target_info_t *t = &status->targets[i];
+                char line[40];
+
+                if (t->status == PANEL_INITIATOR_TARGET_ERROR) {
+                    const char *why = initiator_skip_reason_str(t->skip_reason);
+                    snprintf(line, sizeof(line), "ID%u: %s", t->scsi_id,
+                             why ? why : "Failed");
+                } else if (t->status == PANEL_INITIATOR_TARGET_DONE) {
+                    char size_str[12];
+                    format_size(size_str, sizeof(size_str),
+                                (uint64_t)t->sectorcount * t->sectorsize);
+                    if (t->bad_sector_count > 0) {
+                        snprintf(line, sizeof(line), "ID%u:%s %s %lubd",
+                                 t->scsi_id, initiator_device_type_str(t->device_type),
+                                 size_str, (unsigned long)t->bad_sector_count);
+                    } else {
+                        snprintf(line, sizeof(line), "ID%u:%s %s OK",
+                                 t->scsi_id, initiator_device_type_str(t->device_type),
+                                 size_str);
+                    }
+                } else {
+                    continue;
+                }
+
+                display_manager_draw_text(display, 2, y, line);
+                y += 10;
+            }
+
+            if (target_count == 0) {
+                display_manager_draw_text(display, 2, 32, "No drives found");
+            }
+            break;
+        }
+
+        case PANEL_INITIATOR_PHASE_ERROR: {
+            display_manager_draw_box(display, 0, 0, 128, 10);
+            display_manager_set_draw_color(display, 0);
+            display_manager_draw_text(display, 2, 8, "Imaging Error");
+            display_manager_set_draw_color(display, 1);
+
+            const initiator_target_info_t *err = NULL;
+            for (int i = 0; i < target_count; i++) {
+                if (status->targets[i].status == PANEL_INITIATOR_TARGET_ERROR) {
+                    err = &status->targets[i];
+                    break;
+                }
+            }
+
+            if (!err) {
+                display_manager_draw_text(display, 2, 24, "No SD card");
+                break;
+            }
+
+            char id_line[24];
+            snprintf(id_line, sizeof(id_line), "SCSI ID %u", err->scsi_id);
+            display_manager_draw_text(display, 2, 22, id_line);
+
+            const char *why = initiator_skip_reason_str(err->skip_reason);
+            if (why) {
+                display_manager_draw_text(display, 2, 34, why);
+            } else {
+                char sense_line[24];
+                snprintf(sense_line, sizeof(sense_line), "Sense: %02X/%02X/%02X",
+                         err->sense_key, err->asc, err->ascq);
+                display_manager_draw_text(display, 2, 34, sense_line);
+                display_manager_draw_text(display, 2, 46, sense_key_name(err->sense_key));
+            }
+            break;
+        }
+
+        default: {
+            display_manager_draw_box(display, 0, 0, 128, 10);
+            display_manager_set_draw_color(display, 0);
+            display_manager_draw_text(display, 2, 8, "BlueSCSI Initiator");
+            display_manager_set_draw_color(display, 1);
+            display_manager_draw_text(display, 2, 24, "Starting up...");
+            break;
+        }
+    }
+
+    display_manager_request_update(display);
+    return ESP_OK;
+}
+#endif /* CONFIG_PRODUCT_BLUESCSI */
