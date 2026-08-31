@@ -42,15 +42,20 @@
 #define PANEL_CMD_ASYNC_FLAG          0x40  // Bit 6 indicates async operation
 
 // Write commands (bit 7 = 0, bit 6 = 1 for async)
-#define PANEL_CMD_GET_DIR_ENTRY_COUNT  0x42  // Get count of entries in current directory (async)
-#define PANEL_CMD_GET_ENTRY_INFO       0x43  // Get info for entry at index (async, arg: index)
-#define PANEL_CMD_SELECT_ENTRY         0x44  // Select entry by index: -1 (0xFFFF)=parent dir, >=0=select entry (async, arg: signed 16-bit index)
-#define PANEL_CMD_GET_CURRENT_PATH     0x45  // Get current directory path (async)
+//
+// The directory browsing commands carry the device index of the device being
+// browsed, in the argument where it is free and in a 1-byte payload where it is
+// not. Boards like PicoIDE keep a browse directory and file filter per device;
+// boards with one browse directory shared by all devices (BlueSCSI) ignore it.
+#define PANEL_CMD_GET_DIR_ENTRY_COUNT  0x42  // Get count of entries in current directory (async, arg: device index)
+#define PANEL_CMD_GET_ENTRY_INFO       0x43  // Get info for entry at index (async, arg: entry index, payload: 1 byte device index)
+#define PANEL_CMD_SELECT_ENTRY         0x44  // Select entry by index: -1 (0xFFFF)=parent dir, >=0=select entry (async, arg: signed 16-bit index, payload: 1 byte device index)
+#define PANEL_CMD_GET_CURRENT_PATH     0x45  // Get current directory path (async, arg: device index)
 #define PANEL_CMD_GET_DEVICE_LIST      0x46  // Get list of all configured devices (async)
-#define PANEL_CMD_EJECT_IMAGE          0x47  // Unload current image (async)
-#define PANEL_CMD_GET_LOADED_IMAGE_STATUS 0x48  // Get status of currently loaded image (async)
-#define PANEL_CMD_SELECT_PREV_IMAGE    0x49  // Load previous image in current directory (async)
-#define PANEL_CMD_SELECT_NEXT_IMAGE    0x4A  // Load next image in current directory (async)
+#define PANEL_CMD_EJECT_IMAGE          0x47  // Unload current image (async, arg: device index)
+#define PANEL_CMD_GET_LOADED_IMAGE_STATUS 0x48  // Get status of currently loaded image (async, arg: device index)
+#define PANEL_CMD_SELECT_PREV_IMAGE    0x49  // Load previous image in current directory (async, arg: device index)
+#define PANEL_CMD_SELECT_NEXT_IMAGE    0x4A  // Load next image in current directory (async, arg: device index)
 #define PANEL_CMD_SELECT_IMAGE_BY_NAME 0x4B  // Load image by filename (async, payload: null-terminated filename)
 #define PANEL_CMD_CHECK_FIRMWARE       0x50  // Check for firmware update (async)
 #define PANEL_CMD_START_FIRMWARE_READ  0x51  // Start firmware read (async, arg: chunk index)
