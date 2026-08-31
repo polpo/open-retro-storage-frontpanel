@@ -73,6 +73,13 @@ esp_err_t host_comm_get_playback_status(host_comm_t *comm, uint16_t device_index
 // Validated liveness probe: fetches playback status and checks it carries
 // PANEL_ALIVE_MAGIC. ESP_ERR_INVALID_RESPONSE if the transaction completed but
 // no live main board answered (e.g. reading a floating SPI bus).
+#ifdef CONFIG_PRODUCT_BLUESCSI
+// Synchronous initiator progress. Unlike host_comm_get_initiator_status(), the
+// main board answers this from its ISR, so it works while the board is imaging.
+esp_err_t host_comm_get_initiator_summary(host_comm_t *comm,
+                                          panel_initiator_summary_t *summary);
+#endif
+
 esp_err_t host_comm_probe_alive(host_comm_t *comm, uint16_t device_index);
 
 // Device list

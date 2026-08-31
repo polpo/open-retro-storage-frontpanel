@@ -162,7 +162,7 @@ TEST(get_playback_status_reads_full_struct) {
     setup();
     panel_playback_status_t pb;
     memset(&pb, 0, sizeof(pb));
-    pb.disc_inserted = 1;
+    pb.flags = PANEL_PB_DISC_INSERTED;
     pb.disc_type = PANEL_DISC_TYPE_AUDIO;
     pb.alive_magic = PANEL_ALIVE_MAGIC;
     strcpy(pb.disc_name, "Dark Side");

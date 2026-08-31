@@ -208,9 +208,17 @@ static initiator_status_response_t *initiator_status =
     (initiator_status_response_t *)initiator_status_buffer;
 static int  initiator_target_count = 0;
 static bool initiator_status_needs_redraw = true;
+// Progress of the run, from PANEL_CMD_GET_INITIATOR_SUMMARY. That is a
+// synchronous read the main board answers from its ISR, so it arrives while the
+// board is imaging - which is exactly when the async GET_INITIATOR_STATUS, and
+// so the per-target detail, does not.
+static panel_initiator_summary_t initiator_summary;
 static void refresh_initiator_status(void);
 
 bool panel_in_initiator_mode(void) { return operating_mode == PANEL_MODE_INITIATOR; }
+const panel_initiator_summary_t *panel_get_initiator_summary(void) {
+    return &initiator_summary;
+}
 const initiator_status_response_t *panel_get_initiator_status(int *target_count) {
     if (target_count) *target_count = initiator_target_count;
     return initiator_status;
@@ -249,7 +257,7 @@ static rgb_color_t compute_led_state_color(bool *is_activity) {
         default:
             break;
     }
-    if (!current_playback_status.disc_inserted) {
+    if (!(current_playback_status.flags & PANEL_PB_DISC_INSERTED)) {
         return COLOR_ORANGE;  // No image loaded
     }
     if (last_activity_event.pin_state) {
@@ -1248,7 +1256,8 @@ static void display_update_task(void *pvParameters) {
             } else if (current_screen == SCREEN_INITIATOR_STATUS) {
                 if (screen_changed || initiator_status_needs_redraw) {
                     ui_draw_initiator_screen(&display, initiator_status,
-                                             initiator_target_count);
+                                             initiator_target_count,
+                                             &initiator_summary);
                     initiator_status_needs_redraw = false;
                 }
 #endif
@@ -1381,7 +1390,7 @@ static void status_refresh_task(void *pvParameters) {
                 current_device_type == PANEL_DEVICE_TYPE_SCSI) {
                 // HDD: image can only change via web UI, poll infrequently
                 poll_interval_ms = 5000;
-            } else if (!current_playback_status.is_playing) {
+            } else if (!(current_playback_status.flags & PANEL_PB_PLAYING)) {
                 // ATAPI with no audio playing: poll less frequently
                 poll_interval_ms = 5000;
             } else {
@@ -1450,7 +1459,26 @@ static void refresh_playback_status(void) {
     // survives an imaging board: GET_DEVICE_LIST is async and never completes
     // while the initiator is on the bus, so operating_mode would otherwise stay
     // TARGET forever and the initiator screen would be unreachable.
+    uint8_t prev_mode = operating_mode;
     operating_mode = current_playback_status.operating_mode;
+
+    // The boot path picks a screen once. A board that changes mode under a live
+    // panel - finishing an imaging run, or being rebooted into one - has to move
+    // the panel with it, or the display sits on a screen for the wrong mode.
+    // Only from the two status screens, so a user in a menu is left alone.
+    if (operating_mode != prev_mode) {
+        if (operating_mode == PANEL_MODE_INITIATOR && current_screen == SCREEN_STATUS) {
+            current_screen = SCREEN_INITIATOR_STATUS;
+            active_menu = NULL;
+            initiator_status_needs_redraw = true;
+        } else if (operating_mode == PANEL_MODE_TARGET &&
+                   current_screen == SCREEN_INITIATOR_STATUS) {
+            current_screen = SCREEN_STATUS;
+            active_menu = screen_menus[current_screen];
+            status_needs_redraw = true;
+        }
+    }
+
 #endif
 
     // The main board is alive but we have no usable device list. Either the
@@ -1535,6 +1563,14 @@ static void refresh_device_type(void) {
 static void refresh_initiator_status(void) {
     if (!host_comm.link_up) {
         return;
+    }
+
+    // The summary always answers, so take it first and redraw from it. The
+    // per-target detail below is a bonus that only arrives between bus
+    // transfers; the screen must not depend on it.
+    if (host_comm_get_initiator_summary(&host_comm, &initiator_summary) == ESP_OK) {
+        operating_mode = initiator_summary.operating_mode;
+        initiator_status_needs_redraw = true;
     }
 
     size_t size = 0;
@@ -2659,7 +2695,8 @@ void app_main(void) {
         current_screen = SCREEN_INITIATOR_STATUS;
         active_menu = NULL;
         refresh_initiator_status();
-        ui_draw_initiator_screen(&display, initiator_status, initiator_target_count);
+        ui_draw_initiator_screen(&display, initiator_status, initiator_target_count,
+                                 &initiator_summary);
         initiator_status_needs_redraw = false;
     } else
 #endif

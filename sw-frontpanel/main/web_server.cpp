@@ -434,19 +434,26 @@ static esp_err_t api_initiator_handler(httpd_req_t *req) {
         return json.finalize();
     }
 
-    ret = json.write("phase", (int)st->phase);
+    // Progress comes from the synchronous summary, which is current even while
+    // the board is imaging. The per-target list below comes from the async
+    // status and may be older.
+    const panel_initiator_summary_t *sum = panel_get_initiator_summary();
+
+    ret = json.write("phase", (int)sum->phase);
     if (ret != ESP_OK) return ret;
-    ret = json.write("phase_name", initiator_phase_name(st->phase));
+    ret = json.write("phase_name", initiator_phase_name(sum->phase));
+    if (ret != ESP_OK) return ret;
+    ret = json.write("progress", (int)sum->progress);
     if (ret != ESP_OK) return ret;
     ret = json.write("initiator_id", (int)st->initiator_id);
     if (ret != ESP_OK) return ret;
-    ret = json.write("current_target", (int)st->current_target_id);
+    ret = json.write("current_target", (int)sum->current_target);
     if (ret != ESP_OK) return ret;
-    ret = json.write("targets_found", (int)st->targets_found);
+    ret = json.write("targets_found", (int)sum->targets_found);
     if (ret != ESP_OK) return ret;
-    ret = json.write("targets_imaged", (int)st->targets_imaged);
+    ret = json.write("targets_imaged", (int)sum->targets_imaged);
     if (ret != ESP_OK) return ret;
-    ret = json.write("speed_kbps", (uint32_t)st->speed_kbps);
+    ret = json.write("speed_kbps", (uint32_t)sum->speed_kbps);
     if (ret != ESP_OK) return ret;
     ret = json.write("filename", st->current_filename);
     if (ret != ESP_OK) return ret;

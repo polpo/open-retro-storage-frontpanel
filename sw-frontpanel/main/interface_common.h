@@ -61,6 +61,10 @@ esp_err_t interface_get_device_list(interface_context_t *ctx, device_list_respon
 // status; readers get the cached copy rather than issuing their own
 // transaction and contending for the host_comm mutex.
 bool panel_in_initiator_mode(void);
+// The run's progress, from the synchronous summary command. Always current.
+const panel_initiator_summary_t *panel_get_initiator_summary(void);
+// Per-target detail, from the async command. Best-effort: an imaging board may
+// not have answered it for a while.
 const initiator_status_response_t *panel_get_initiator_status(int *target_count);
 #endif
 

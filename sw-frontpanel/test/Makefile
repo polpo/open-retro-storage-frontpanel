@@ -20,7 +20,11 @@ BUILD   := obj
 # an optimization level; -Og keeps debuggability while satisfying it.
 # CONFIG_PRODUCT_BLUESCSI so the initiator-status code in host_comm.c is
 # actually compiled here; nothing in host_comm.c is PicoIDE-only.
-COMMON    := -std=c11 -g -Og -I. -Istubs -I$(MAIN) -DCONFIG_PRODUCT_BLUESCSI
+COMMON    := -std=c11 -g -Og -I. -Istubs -I$(MAIN)
+# Regenerate .d files alongside each .o so a header change rebuilds what uses
+# it. Without this a shared-struct edit left stale objects linking against two
+# different layouts, and the suite failed on a size that was already correct.
+DEPFLAGS  := -MMD -MP -DCONFIG_PRODUCT_BLUESCSI
 WARN_TEST := -Wall -Wextra -Werror
 # Keep -Wformat on (some toolchains force -Werror=format-security, which needs
 # it); firmware uses literal format strings so that's satisfied. %lu/uint32_t
@@ -53,17 +57,17 @@ $(BUILD):
 
 # Firmware objects (lenient).
 $(BUILD)/host_comm.o: $(MAIN)/host_comm.c | $(BUILD)
-	$(CC) $(COMMON) $(WARN_SUT) -c $< -o $@
+	$(CC) $(COMMON) $(DEPFLAGS) $(WARN_SUT) -c $< -o $@
 $(BUILD)/transport.o: $(MAIN)/transport.c | $(BUILD)
-	$(CC) $(COMMON) $(WARN_SUT) -c $< -o $@
+	$(CC) $(COMMON) $(DEPFLAGS) $(WARN_SUT) -c $< -o $@
 $(BUILD)/panel_policy.o: $(MAIN)/panel_policy.c | $(BUILD)
-	$(CC) $(COMMON) $(WARN_SUT) -c $< -o $@
+	$(CC) $(COMMON) $(DEPFLAGS) $(WARN_SUT) -c $< -o $@
 
 # Test + stub objects (strict).
 $(BUILD)/%.o: %.c | $(BUILD)
-	$(CC) $(COMMON) $(WARN_TEST) -c $< -o $@
+	$(CC) $(COMMON) $(DEPFLAGS) $(WARN_TEST) -c $< -o $@
 $(BUILD)/esp_rom_crc.o: stubs/esp_rom_crc.c | $(BUILD)
-	$(CC) $(COMMON) $(WARN_TEST) -c $< -o $@
+	$(CC) $(COMMON) $(DEPFLAGS) $(WARN_TEST) -c $< -o $@
 
 $(BIN): $(OBJS)
 	$(CC) $(COMMON) $(OBJS) -o $(BIN)
@@ -73,3 +77,5 @@ test: $(BIN)
 
 clean:
 	rm -rf $(BUILD) $(BIN)
+
+-include $(OBJS:.o=.d)

@@ -674,7 +674,7 @@ esp_err_t ui_draw_status_screen(display_manager_t *display, const char *disc_nam
 
     display_manager_clear(display);
 
-    bool has_disc = (disc_name && disc_name[0] && playback_status && playback_status->disc_inserted);
+    bool has_disc = (disc_name && disc_name[0] && playback_status && (playback_status->flags & PANEL_PB_DISC_INSERTED));
 
     // === TOP BAR: Directory name + position indicator (inverted) ===
     display_manager_set_font(display, u8g2_font_6x10_tf);
@@ -734,7 +734,7 @@ esp_err_t ui_draw_status_screen(display_manager_t *display, const char *disc_nam
 #ifdef CONFIG_PRODUCT_BLUESCSI
     const char *title = has_disc ? disc_name : "No Image Loaded";
 #else
-    // Prefer any supplied disc_name even when disc_inserted is false: the main
+    // Prefer any supplied disc_name even without PANEL_PB_DISC_INSERTED: the main
     // board uses this field to surface SD error strings like "No SD card" or
     // "Wrong-mode card" when no image is mountable
     const char *title = (disc_name && disc_name[0]) ? disc_name : "No Image Loaded";
@@ -755,7 +755,7 @@ esp_err_t ui_draw_status_screen(display_manager_t *display, const char *disc_nam
     // Optical tray open (disc ejected): show a clear banner instead of the normal
     // playback area. The title above still shows the disc queued for next insert,
     // so the user knows to load another disc or press eject again to close.
-    if (playback_status && playback_status->tray_open) {
+    if (playback_status && (playback_status->flags & PANEL_PB_TRAY_OPEN)) {
         display_manager_set_font(display, u8g2_font_6x10_tf);
         display_manager_draw_box(display, 0, 42, 128, 22);
         display_manager_set_draw_color(display, 0);
@@ -817,7 +817,7 @@ esp_err_t ui_draw_status_screen(display_manager_t *display, const char *disc_nam
         display_manager_draw_glyph(display, 40, y, 0xe016);
 
         // Show track and time if playing or paused
-        if (playback_status->is_playing ||
+        if ((playback_status->flags & PANEL_PB_PLAYING) ||
             playback_status->audio_status == PANEL_AUDIO_STATUS_PAUSED) {
             char track_line[32];
             display_manager_set_font(display, u8g2_font_6x10_tf);
@@ -960,15 +960,16 @@ static void initiator_fit_filename(char *dst, size_t dst_size, const char *name,
 
 esp_err_t ui_draw_initiator_screen(display_manager_t *display,
                                    const initiator_status_response_t *status,
-                                   int target_count) {
-    if (!display || !status) {
+                                   int target_count,
+                                   const panel_initiator_summary_t *summary) {
+    if (!display || !status || !summary) {
         return ESP_ERR_INVALID_ARG;
     }
 
     display_manager_clear(display);
     display_manager_set_font(display, u8g2_font_6x10_tf);
 
-    switch (status->phase) {
+    switch (summary->phase) {
         case PANEL_INITIATOR_PHASE_SCANNING: {
             display_manager_draw_box(display, 0, 0, 128, 10);
             display_manager_set_draw_color(display, 0);
@@ -1014,7 +1015,34 @@ esp_err_t ui_draw_initiator_screen(display_manager_t *display,
             }
 
             if (!current) {
-                display_manager_draw_text(display, 2, 20, "Imaging...");
+                // No per-target detail: GET_INITIATOR_STATUS is async and an
+                // imaging board cannot complete it. Draw from the summary the
+                // status poll carries, which is all this screen really needs.
+                char title[28];
+                snprintf(title, sizeof(title), "Imaging SCSI ID %u",
+                         summary->current_target);
+                display_manager_draw_box(display, 0, 0, 128, 10);
+                display_manager_set_draw_color(display, 0);
+                display_manager_draw_text(display, 2, 8, title);
+                display_manager_set_draw_color(display, 1);
+
+                if (summary->speed_kbps > 0) {
+                    char speed[12];
+                    snprintf(speed, sizeof(speed), "%u kB/s", summary->speed_kbps);
+                    uint16_t w = u8g2_GetStrWidth(&display->u8g2, speed);
+                    display_manager_draw_text(display, 126 - w, 20, speed);
+                }
+
+                display_manager_draw_frame(display, 2, 24, 124, 10);
+                if (summary->progress > 0) {
+                    display_manager_draw_box(display, 4, 26, (summary->progress * 120) / 100, 6);
+                }
+                char pct[6];
+                snprintf(pct, sizeof(pct), "%u%%", summary->progress);
+                uint16_t pw = u8g2_GetStrWidth(&display->u8g2, pct);
+                display_manager_set_draw_color(display, 2);
+                display_manager_draw_text(display, 64 - pw / 2, 32, pct);
+                display_manager_set_draw_color(display, 1);
                 break;
             }
 

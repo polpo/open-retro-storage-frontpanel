@@ -25,7 +25,9 @@ TEST(protocol_struct_sizes) {
     // 4+4+32+1+8 = 49. sizeof() is the authoritative ABI (both sides compile
     // the same struct); the prose comment is stale. Pin the real size.
     CHECK_EQ_INT(sizeof(panel_firmware_info_t), 49);
-    CHECK_EQ_INT(sizeof(panel_playback_status_t), 76);
+    CHECK_EQ_INT(sizeof(panel_playback_status_t), 75);
+    // One mode per response: the initiator's own state is its own struct.
+    CHECK_EQ_INT(sizeof(panel_initiator_summary_t), 10);
     CHECK_EQ_INT(sizeof(dir_entry_info_t), 68);
     CHECK_EQ_INT(sizeof(device_summary_t), 68);
     // NOTE: header comment says "212 bytes"; real packed size is 216
@@ -47,16 +49,39 @@ TEST(protocol_header_is_packed) {
 }
 
 TEST(protocol_playback_status_offsets) {
-    CHECK_EQ_INT(offsetof(panel_playback_status_t, disc_inserted), 0);
-    CHECK_EQ_INT(offsetof(panel_playback_status_t, disc_name), 8);
-    CHECK_EQ_INT(offsetof(panel_playback_status_t, device_status), 72);
-    CHECK_EQ_INT(offsetof(panel_playback_status_t, alive_magic), 73);
-    CHECK_EQ_INT(offsetof(panel_playback_status_t, tray_open), 74);
+    // alive_magic is first on purpose: a reader built against a different
+    // layout still finds it, so a version skew reads as "wrong protocol"
+    // rather than as a dead board.
+    CHECK_EQ_INT(offsetof(panel_playback_status_t, alive_magic), 0);
+    CHECK_EQ_INT(offsetof(panel_playback_status_t, protocol_version), 1);
+    CHECK_EQ_INT(offsetof(panel_playback_status_t, flags), 2);
+    CHECK_EQ_INT(offsetof(panel_playback_status_t, operating_mode), 6);
+    CHECK_EQ_INT(offsetof(panel_playback_status_t, disc_name), 11);
+
+    // The summary leads with the same three metadata bytes as the playback
+    // status, so a panel polling only this one still sees liveness, protocol
+    // version and a mode change back to target.
+    CHECK_EQ_INT(offsetof(panel_initiator_summary_t, alive_magic), 0);
+    CHECK_EQ_INT(offsetof(panel_initiator_summary_t, protocol_version), 1);
+    CHECK_EQ_INT(offsetof(panel_initiator_summary_t, operating_mode), 2);
+    CHECK_EQ_INT(offsetof(panel_initiator_summary_t, phase), 3);
+    CHECK_EQ_INT(offsetof(panel_initiator_summary_t, speed_kbps), 8);
+    CHECK_EQ_HEX(PANEL_CMD_GET_INITIATOR_SUMMARY, 0x87);
+    // A read command, so the main board answers it in its ISR rather than
+    // deferring it to a main loop an imaging board does not reach.
+    CHECK_TRUE(PANEL_CMD_IS_READ(PANEL_CMD_GET_INITIATOR_SUMMARY));
+    CHECK_TRUE(!PANEL_CMD_IS_ASYNC(PANEL_CMD_GET_INITIATOR_SUMMARY));
+    CHECK_TRUE(PANEL_CMD_IS_ASYNC(PANEL_CMD_GET_INITIATOR_STATUS));
+
+    // Flags are single bits and KNOWN must cover exactly the defined ones.
+    CHECK_EQ_HEX(PANEL_PB_DISC_INSERTED, 0x01);
+    CHECK_EQ_HEX(PANEL_PB_PLAYING, 0x02);
+    CHECK_EQ_HEX(PANEL_PB_TRAY_OPEN, 0x04);
+    CHECK_EQ_HEX(PANEL_PB_FLAGS_KNOWN,
+                 PANEL_PB_DISC_INSERTED | PANEL_PB_PLAYING | PANEL_PB_TRAY_OPEN);
     // The operating mode rides on this synchronous poll rather than the async
     // GET_DEVICE_LIST, which an imaging board never completes. It reuses the
     // old reserved byte, so the struct size must not move.
-    CHECK_EQ_INT(offsetof(panel_playback_status_t, operating_mode), 75);
-    CHECK_EQ_INT(offsetof(panel_playback_status_t, tray_open), 74);
 }
 
 TEST(protocol_loaded_image_status_offsets) {

@@ -55,7 +55,8 @@ esp_err_t ui_draw_status_bar(display_manager_t *display, const char *status);
 // status->targets[], taken from the response's targets_found.
 esp_err_t ui_draw_initiator_screen(display_manager_t *display,
                                    const initiator_status_response_t *status,
-                                   int target_count);
+                                   int target_count,
+                                   const panel_initiator_summary_t *summary);
 #endif
 esp_err_t ui_draw_info_screen(display_manager_t *display, const char *title, const char *info);
 esp_err_t ui_draw_firmware_update(display_manager_t *display, const char *status, uint8_t progress);
