@@ -41,6 +41,16 @@ static const char *TAG = "host_comm";
 alignas(4) static uint8_t tx_buffer[PANEL_PROTOCOL_MAX_PAYLOAD];
 alignas(4) static uint8_t rx_buffer[PANEL_PROTOCOL_MAX_PAYLOAD];
 
+// A live handle is one with a mutex: host_comm_init() creates it and
+// host_comm_deinit() deletes it and leaves it NULL. That is the only thing the
+// entry points below need to check before locking. comm->link_up answers a
+// different question - whether the main board is answering - and main.c clears
+// it while the handle stays up, so the reconnect path can keep calling through
+// this API to find out when the board comes back.
+static inline bool host_comm_have_handle(const host_comm_t *comm) {
+    return comm && comm->mutex;
+}
+
 esp_err_t host_comm_init(host_comm_t *comm, const transport_config_t *config) {
     if (!comm || !config) {
         return ESP_ERR_INVALID_ARG;
@@ -62,7 +72,7 @@ esp_err_t host_comm_init(host_comm_t *comm, const transport_config_t *config) {
         return ret;
     }
 
-    comm->initialized = true;
+    comm->link_up = true;
 
     ESP_LOGI(TAG, "Host communication initialized using %s transport (device addr: 0x%02X)",
              transport_get_name(&comm->transport), config->device_addr);
@@ -71,29 +81,29 @@ esp_err_t host_comm_init(host_comm_t *comm, const transport_config_t *config) {
 }
 
 esp_err_t host_comm_deinit(host_comm_t *comm) {
-    if (!comm || !comm->initialized) {
+    if (!host_comm_have_handle(comm)) {
         return ESP_ERR_INVALID_STATE;
     }
 
+    // Tear the handle down even if the transport driver complains: bailing out
+    // early used to leave the mutex live, and the next host_comm_init()
+    // overwrote comm->mutex, leaking one semaphore per attempt.
     esp_err_t ret = transport_deinit(&comm->transport);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to deinitialize transport: %s", esp_err_to_name(ret));
-        return ret;
     }
 
-    if (comm->mutex) {
-        vSemaphoreDelete(comm->mutex);
-        comm->mutex = NULL;
-    }
+    vSemaphoreDelete(comm->mutex);
+    comm->mutex = NULL;
 
-    comm->initialized = false;
+    comm->link_up = false;
     ESP_LOGI(TAG, "Host communication deinitialized");
 
-    return ESP_OK;
+    return ret;
 }
 
 const char* host_comm_get_transport_name(host_comm_t *comm) {
-    if (!comm || !comm->initialized) {
+    if (!host_comm_have_handle(comm)) {
         return "Not initialized";
     }
     return transport_get_name(&comm->transport);
@@ -102,7 +112,7 @@ const char* host_comm_get_transport_name(host_comm_t *comm) {
 // Helper function to poll for async operation completion and retrieve result
 static esp_err_t host_comm_poll_async_result(host_comm_t *comm, uint32_t timeout_ms, uint32_t poll_interval_ms,
                                              size_t expected_size, uint8_t **result_data, size_t *actual_size) {
-    if (!comm) {
+    if (!host_comm_have_handle(comm)) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -152,7 +162,7 @@ static esp_err_t host_comm_poll_async_result(host_comm_t *comm, uint32_t timeout
 // Directory browsing functions
 
 esp_err_t host_comm_get_entry_count(host_comm_t *comm, uint16_t device_index, uint32_t *count) {
-    if (!comm || !count) {
+    if (!host_comm_have_handle(comm) || !count) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -187,7 +197,7 @@ esp_err_t host_comm_get_entry_count(host_comm_t *comm, uint16_t device_index, ui
 
 esp_err_t host_comm_get_entry_info(host_comm_t *comm, uint16_t device_index, uint32_t index,
                                    dir_entry_info_t *info) {
-    if (!comm || !info) {
+    if (!host_comm_have_handle(comm) || !info) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -230,7 +240,7 @@ esp_err_t host_comm_get_entry_info(host_comm_t *comm, uint16_t device_index, uin
 }
 
 esp_err_t host_comm_select_entry(host_comm_t *comm, int32_t index, uint16_t device_index) {
-    if (!comm) {
+    if (!host_comm_have_handle(comm)) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -260,7 +270,7 @@ esp_err_t host_comm_select_entry(host_comm_t *comm, int32_t index, uint16_t devi
 }
 
 esp_err_t host_comm_get_current_path(host_comm_t *comm, uint16_t device_index, char *path, size_t max_len) {
-    if (!comm || !path || max_len == 0) {
+    if (!host_comm_have_handle(comm) || !path || max_len == 0) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -302,7 +312,7 @@ esp_err_t host_comm_get_current_path(host_comm_t *comm, uint16_t device_index, c
 // Image management functions
 
 esp_err_t host_comm_select_prev_image(host_comm_t *comm, uint16_t device_index) {
-    if (!comm) {
+    if (!host_comm_have_handle(comm)) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -326,7 +336,7 @@ esp_err_t host_comm_select_prev_image(host_comm_t *comm, uint16_t device_index) 
 }
 
 esp_err_t host_comm_select_next_image(host_comm_t *comm, uint16_t device_index) {
-    if (!comm) {
+    if (!host_comm_have_handle(comm)) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -350,7 +360,7 @@ esp_err_t host_comm_select_next_image(host_comm_t *comm, uint16_t device_index) 
 }
 
 esp_err_t host_comm_eject_image(host_comm_t *comm, uint16_t device_index) {
-    if (!comm) {
+    if (!host_comm_have_handle(comm)) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -374,7 +384,7 @@ esp_err_t host_comm_eject_image(host_comm_t *comm, uint16_t device_index) {
 }
 
 esp_err_t host_comm_get_loaded_image_status(host_comm_t *comm, uint16_t device_index, loaded_image_status_t *status) {
-    if (!comm || !status) {
+    if (!host_comm_have_handle(comm) || !status) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -412,7 +422,7 @@ esp_err_t host_comm_get_loaded_image_status(host_comm_t *comm, uint16_t device_i
 // Status functions
 
 esp_err_t host_comm_get_device_status(host_comm_t *comm, uint16_t device_index, uint8_t *status) {
-    if (!comm || !status) {
+    if (!host_comm_have_handle(comm) || !status) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -434,7 +444,7 @@ esp_err_t host_comm_get_device_status(host_comm_t *comm, uint16_t device_index, 
 }
 
 esp_err_t host_comm_get_playback_status(host_comm_t *comm, uint16_t device_index, playback_status_t *status) {
-    if (!comm || !status) {
+    if (!host_comm_have_handle(comm) || !status) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -455,8 +465,48 @@ esp_err_t host_comm_get_playback_status(host_comm_t *comm, uint16_t device_index
     return ret;
 }
 
+esp_err_t host_comm_probe_alive(host_comm_t *comm, uint16_t device_index) {
+    playback_status_t status;
+    esp_err_t ret = host_comm_get_playback_status(comm, device_index, &status);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+    // A transaction that "succeeds" is not proof of a live host: SPI reads
+    // from an absent host return ESP_OK with whatever the floating MISO line
+    // clocked in. Only the alive magic confirms a main board answered.
+    if (status.alive_magic != PANEL_ALIVE_MAGIC) {
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+
+    // The magic alone is one byte at a fixed offset, and repeating the read is
+    // NOT an independent sample — a floating input settles to a level set by
+    // leakage and coupling, so a bus that clocks in a uniform 0xA5 reproduces it
+    // every time. Reject a response whose bytes are all identical, which is the
+    // shape undriven and stuck-bus reads actually take. A live board never
+    // matches: its boolean fields cannot all equal 0xA5.
+    const uint8_t *raw = (const uint8_t *)&status;
+    bool uniform = true;
+    for (size_t i = 1; i < sizeof(status); i++) {
+        if (raw[i] != raw[0]) {
+            uniform = false;
+            break;
+        }
+    }
+    if (uniform) {
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+
+    // Cross-check a second, independently-constrained field: these are booleans
+    // written by the main board, so anything else means we are reading noise.
+    if (status.disc_inserted > 1 || status.is_playing > 1 || status.tray_open > 1) {
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+
+    return ESP_OK;
+}
+
 esp_err_t host_comm_check_firmware(host_comm_t *comm, panel_firmware_info_t *info) {
-    if (!comm || !comm->initialized || !info) {
+    if (!host_comm_have_handle(comm) || !info) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -502,7 +552,7 @@ esp_err_t host_comm_check_firmware(host_comm_t *comm, panel_firmware_info_t *inf
 
 esp_err_t host_comm_read_firmware_chunk(host_comm_t *comm, uint32_t offset,
                                         uint8_t *buffer, size_t size) {
-    if (!comm || !comm->initialized || !buffer || size == 0) {
+    if (!host_comm_have_handle(comm) || !buffer || size == 0) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -557,7 +607,7 @@ esp_err_t host_comm_read_firmware_chunk(host_comm_t *comm, uint32_t offset,
 }
 
 esp_err_t host_comm_start_file_upload(host_comm_t *comm, const char *filename, uint32_t file_size) {
-    if (!comm || !comm->initialized || !filename) {
+    if (!host_comm_have_handle(comm) || !filename) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -609,7 +659,7 @@ esp_err_t host_comm_start_file_upload(host_comm_t *comm, const char *filename, u
 }
 
 esp_err_t host_comm_write_file_chunk(host_comm_t *comm, const uint8_t *data, size_t size) {
-    if (!comm || !comm->initialized || !data || size == 0) {
+    if (!host_comm_have_handle(comm) || !data || size == 0) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -655,7 +705,7 @@ esp_err_t host_comm_write_file_chunk(host_comm_t *comm, const uint8_t *data, siz
 }
 
 esp_err_t host_comm_finish_file_upload(host_comm_t *comm, uint8_t *result_code, uint8_t *file_hash) {
-    if (!comm || !comm->initialized) {
+    if (!host_comm_have_handle(comm)) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -717,7 +767,7 @@ esp_err_t host_comm_finish_file_upload(host_comm_t *comm, uint8_t *result_code, 
 }
 
 esp_err_t host_comm_start_file_download(host_comm_t *comm, const char *filename, uint32_t *file_size) {
-    if (!comm || !comm->initialized || !filename || !file_size) {
+    if (!host_comm_have_handle(comm) || !filename || !file_size) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -781,7 +831,7 @@ esp_err_t host_comm_start_file_download(host_comm_t *comm, const char *filename,
 }
 
 esp_err_t host_comm_read_file_chunk(host_comm_t *comm, uint32_t chunk_index, uint8_t *buffer, size_t *bytes_read) {
-    if (!comm || !comm->initialized || !buffer || !bytes_read) {
+    if (!host_comm_have_handle(comm) || !buffer || !bytes_read) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -827,7 +877,7 @@ esp_err_t host_comm_read_file_chunk(host_comm_t *comm, uint32_t chunk_index, uin
 static esp_err_t host_comm_path_op(host_comm_t *comm, uint8_t command,
                                    const char *path, const char *path2,
                                    uint8_t *result_code) {
-    if (!comm || !comm->initialized || !path || !result_code) {
+    if (!host_comm_have_handle(comm) || !path || !result_code) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -907,7 +957,7 @@ esp_err_t host_comm_mkdir(host_comm_t *comm, const char *path, uint8_t *result_c
 }
 
 esp_err_t host_comm_get_rp2350_fw_status(host_comm_t *comm, rp2350_fw_status_t *status) {
-    if (!comm || !comm->initialized || !status) {
+    if (!host_comm_have_handle(comm) || !status) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -947,7 +997,7 @@ esp_err_t host_comm_get_rp2350_fw_status(host_comm_t *comm, rp2350_fw_status_t *
 }
 
 esp_err_t host_comm_start_rp2350_update(host_comm_t *comm) {
-    if (!comm || !comm->initialized) {
+    if (!host_comm_have_handle(comm)) {
         return ESP_ERR_INVALID_STATE;
     }
 
@@ -975,7 +1025,7 @@ esp_err_t host_comm_start_rp2350_update(host_comm_t *comm) {
 }
 
 esp_err_t host_comm_get_device_list(host_comm_t *comm, device_list_response_t *response, size_t max_size) {
-    if (!comm || !response || max_size < sizeof(device_list_response_t)) {
+    if (!host_comm_have_handle(comm) || !response || max_size < sizeof(device_list_response_t)) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -1012,7 +1062,7 @@ esp_err_t host_comm_get_device_list(host_comm_t *comm, device_list_response_t *r
 }
 
 esp_err_t host_comm_get_command_status(host_comm_t *comm, panel_command_status_t *status) {
-    if (!comm || !comm->initialized || !status) {
+    if (!host_comm_have_handle(comm) || !status) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -1028,7 +1078,7 @@ esp_err_t host_comm_get_command_status(host_comm_t *comm, panel_command_status_t
 }
 
 esp_err_t host_comm_reset(host_comm_t *comm) {
-    if (!comm || !comm->initialized) {
+    if (!host_comm_have_handle(comm)) {
         return ESP_ERR_INVALID_STATE;
     }
 

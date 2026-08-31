@@ -16,10 +16,8 @@ jobs:
         product:
           - name: picoide
             sdkconfig_extra: sdkconfig.defaults.picoide
-          - name: bluescsi-ultra
+          - name: bluescsi
             sdkconfig_extra: sdkconfig.defaults.bluescsi
-          - name: bluescsi-v2
-            sdkconfig_extra: sdkconfig.defaults.bluescsi;sdkconfig.defaults.i2c
     env:
       OUTPUT_DIR: ${{github.workspace}}/binaries
     steps:
@@ -88,7 +86,6 @@ jobs:
           body_path: release-body.md
           files: |
             */picoide-frontpanel.bin
-            */bluescsi-ultra-frontpanel.bin
-            */bluescsi-v2-frontpanel.bin
+            */bluescsi-frontpanel.bin
           draft: true
           prerelease: ${{ steps.relinfo.outputs.prerelease }}

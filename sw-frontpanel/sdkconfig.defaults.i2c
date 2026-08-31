@@ -1,4 +1,0 @@
-# Transport overlay: I2C host link (BlueSCSI v2).
-# Layer on top of sdkconfig.defaults.bluescsi:
-#   -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.bluescsi;sdkconfig.defaults.i2c"
-CONFIG_HOST_TRANSPORT_I2C=y

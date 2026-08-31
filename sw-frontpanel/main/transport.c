@@ -25,14 +25,16 @@ extern const transport_ops_t transport_i2c_ops;
 extern const transport_ops_t transport_spi_ops;
 
 // Factory function to get the appropriate transport implementation
-const transport_ops_t* transport_get_ops(void) {
-#ifdef TRANSPORT_USE_SPI
-    ESP_LOGI(TAG, "Using SPI transport");
-    return &transport_spi_ops;
-#else
-    ESP_LOGI(TAG, "Using I2C transport");
-    return &transport_i2c_ops;
-#endif
+const transport_ops_t* transport_get_ops(transport_type_t type) {
+    switch (type) {
+    case TRANSPORT_TYPE_SPI:
+        return &transport_spi_ops;
+    case TRANSPORT_TYPE_I2C:
+        return &transport_i2c_ops;
+    default:
+        ESP_LOGE(TAG, "Unknown transport type %d", (int)type);
+        return NULL;
+    }
 }
 
 // Public API implementation
@@ -48,7 +50,7 @@ esp_err_t transport_init(transport_handle_t *handle, const transport_config_t *c
     memcpy(&handle->config, config, sizeof(transport_config_t));
     
     // Get appropriate transport operations
-    handle->ops = transport_get_ops();
+    handle->ops = transport_get_ops(config->type);
     
     if (!handle->ops) {
         ESP_LOGE(TAG, "Failed to get transport operations");

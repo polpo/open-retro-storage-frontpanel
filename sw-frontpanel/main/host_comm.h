@@ -38,8 +38,9 @@ typedef panel_playback_status_t playback_status_t;
 // Host communication handle
 typedef struct {
     transport_handle_t transport;
-    SemaphoreHandle_t mutex;  // Protects transport access from concurrent tasks
-    bool initialized;
+    SemaphoreHandle_t mutex;  // Protects transport access; non-NULL means the handle is usable
+    bool link_up;             // The main board is answering. Cleared while the handle stays up,
+                              // so callers must not read it as "safe to call host_comm_*".
 } host_comm_t;
 
 // Public API
@@ -65,6 +66,11 @@ esp_err_t host_comm_get_loaded_image_status(host_comm_t *comm, uint16_t device_i
 // Status functions (device_index selects target device, 0 for default/single device)
 esp_err_t host_comm_get_device_status(host_comm_t *comm, uint16_t device_index, uint8_t *status);
 esp_err_t host_comm_get_playback_status(host_comm_t *comm, uint16_t device_index, playback_status_t *status);
+
+// Validated liveness probe: fetches playback status and checks it carries
+// PANEL_ALIVE_MAGIC. ESP_ERR_INVALID_RESPONSE if the transaction completed but
+// no live main board answered (e.g. reading a floating SPI bus).
+esp_err_t host_comm_probe_alive(host_comm_t *comm, uint16_t device_index);
 
 // Device list
 esp_err_t host_comm_get_device_list(host_comm_t *comm, device_list_response_t *response, size_t max_size);

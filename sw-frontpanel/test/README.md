@@ -33,9 +33,9 @@ No dependencies beyond a C11 host compiler and `make`. Also run in CI as the
 ## How the seam works
 
 `host_comm` reaches hardware only through the `transport_ops_t` vtable. The real
-`transport.c` factory (`transport_get_ops`) returns `transport_spi_ops` /
-`transport_i2c_ops` — symbols that `mock_transport.c` supplies here instead of
-the real SPI/I2C drivers. So calls route through production code and land in a
+`transport.c` factory (`transport_get_ops(transport_type_t)`) returns
+`transport_spi_ops` / `transport_i2c_ops` — symbols that `mock_transport.c`
+supplies here instead of the real SPI/I2C drivers. So calls route through production code and land in a
 mock that records each transaction and replays scripted responses. See
 `mock_transport.h` for the scripting API (`mock_set_poll_result`,
 `mock_set_xfer_error`, `mock_last_xfer`, …).

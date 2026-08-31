@@ -5,9 +5,11 @@ The front-panel firmware targets the ESP32-C3 and is built with ESP-IDF
 selected at configure time via ESP-IDF `sdkconfig` defaults. There is no
 interactive `menuconfig` step required to pick the product.
 
-The **host transport** (SPI vs I2C) is a separate, orthogonal `sdkconfig`
-dimension layered on top of the product. BlueSCSI ships two transport flavors:
-SPI for **Ultra / Ultra Wide** and I2C for **v2**. PicoIDE is always SPI.
+The **host transport** (SPI vs I2C) is detected at runtime on BlueSCSI: one
+binary covers **v2** (I2C) and **Ultra / Ultra Wide** (SPI), and the panel
+remembers the last transport a live main board answered on in NVS. PicoIDE is
+always SPI. For debugging, `menuconfig` can force a single transport
+(`HOST_TRANSPORT` choice).
 
 ## Development environment
 
@@ -29,39 +31,30 @@ and run the same `idf.py` commands.
 The product is chosen by layering a per-product defaults file on top of the
 common `sdkconfig.defaults`:
 
-| Product / transport     | Defaults files                                         | Firmware output               |
-| ----------------------- | ------------------------------------------------------ | ----------------------------- |
-| PicoIDE                 | `sdkconfig.defaults.picoide`                           | `picoide-frontpanel.bin`      |
-| BlueSCSI Ultra (SPI)    | `sdkconfig.defaults.bluescsi`                          | `bluescsi-ultra-frontpanel.bin`     |
-| BlueSCSI v2 (I2C)       | `sdkconfig.defaults.bluescsi` + `sdkconfig.defaults.i2c` | `bluescsi-v2-frontpanel.bin`  |
+| Product                          | Defaults files                 | Firmware output           |
+| -------------------------------- | ------------------------------ | ------------------------- |
+| PicoIDE                          | `sdkconfig.defaults.picoide`   | `picoide-frontpanel.bin`  |
+| BlueSCSI (v2 / Ultra, one image) | `sdkconfig.defaults.bluescsi`  | `bluescsi-frontpanel.bin` |
 
-Build each variant into its **own build directory** (`-B build-<product>`) with
+Build each product into its **own build directory** (`-B build-<product>`) with
 its **own `sdkconfig`** (`-DSDKCONFIG=build-<product>/sdkconfig`). Both flags are
 required to keep the products isolated — see the warning below.
 
-### BlueSCSI Ultra (SPI)
+> Note: builds prior to the unified BlueSCSI image used
+> `build-bluescsi-ultra` / `build-bluescsi-v2` directories. Those pin the old
+> transport symbols in their `sdkconfig` — don't reuse them; build into a fresh
+> `build-bluescsi`.
+
+### BlueSCSI
 
 ```bash
-idf.py -B build-bluescsi-ultra \
-  -DSDKCONFIG=build-bluescsi-ultra/sdkconfig \
+idf.py -B build-bluescsi \
+  -DSDKCONFIG=build-bluescsi/sdkconfig \
   -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.bluescsi" \
   build
 ```
 
-Output: `build-bluescsi-ultra/bluescsi-ultra-frontpanel.bin`
-
-### BlueSCSI v2 (I2C)
-
-Same product as Ultra, with the I2C transport overlay added:
-
-```bash
-idf.py -B build-bluescsi-v2 \
-  -DSDKCONFIG=build-bluescsi-v2/sdkconfig \
-  -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.bluescsi;sdkconfig.defaults.i2c" \
-  build
-```
-
-Output: `build-bluescsi-v2/bluescsi-v2-frontpanel.bin`
+Output: `build-bluescsi/bluescsi-frontpanel.bin`
 
 ### PicoIDE
 
@@ -79,7 +72,7 @@ Output: `build-picoide/picoide-frontpanel.bin`
 Replace the port to match your board (e.g. `/dev/ttyACM0`, `/dev/ttyUSB0`):
 
 ```bash
-idf.py -B build-bluescsi-ultra -p /dev/ttyACM0 flash monitor   # BlueSCSI Ultra
+idf.py -B build-bluescsi -p /dev/ttyACM0 flash monitor   # BlueSCSI
 idf.py -B build-picoide  -p /dev/ttyACM0 flash monitor   # PicoIDE
 ```
 
@@ -89,8 +82,8 @@ UART. Exit the monitor with `Ctrl-]`.
 ## Cleaning
 
 ```bash
-idf.py -B build-bluescsi-ultra fullclean    # clean one product's build dir
-rm -rf build-bluescsi-ultra build-picoide   # or just remove the dirs
+idf.py -B build-bluescsi fullclean    # clean one product's build dir
+rm -rf build-bluescsi build-picoide   # or just remove the dirs
 ```
 
 Run `fullclean` if you change ESP-IDF versions — a build directory configured
