@@ -18,7 +18,9 @@ BUILD   := obj
 
 # -Og: some toolchains (e.g. Nix gcc) inject _FORTIFY_SOURCE, which requires
 # an optimization level; -Og keeps debuggability while satisfying it.
-COMMON    := -std=c11 -g -Og -I. -Istubs -I$(MAIN)
+# CONFIG_PRODUCT_BLUESCSI so the initiator-status code in host_comm.c is
+# actually compiled here; nothing in host_comm.c is PicoIDE-only.
+COMMON    := -std=c11 -g -Og -I. -Istubs -I$(MAIN) -DCONFIG_PRODUCT_BLUESCSI
 WARN_TEST := -Wall -Wextra -Werror
 # Keep -Wformat on (some toolchains force -Werror=format-security, which needs
 # it); firmware uses literal format strings so that's satisfied. %lu/uint32_t
