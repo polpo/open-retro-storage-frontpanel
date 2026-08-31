@@ -510,7 +510,7 @@ static esp_err_t api_images_handler(httpd_req_t *req) {
 
         // Get current path
         char current_path[256] = "/";
-        if (host_comm && host_comm->initialized) {
+        if (host_comm && host_comm->link_up) {
             host_comm_get_current_path(host_comm, current_path, sizeof(current_path));
         }
         ret = json.write("current_path", current_path);
@@ -534,7 +534,7 @@ static esp_err_t api_images_handler(httpd_req_t *req) {
         // Get loaded image status
         loaded_image_status_t image_status = {0};
         bool have_image_status = false;
-        if (host_comm && host_comm->initialized) {
+        if (host_comm && host_comm->link_up) {
             have_image_status = (host_comm_get_loaded_image_status(host_comm, device_index, &image_status) == ESP_OK);
         }
 
@@ -563,7 +563,7 @@ static esp_err_t api_images_handler(httpd_req_t *req) {
 
         // Stream entries one at a time to avoid stack overflow
         uint32_t entry_count = 0;
-        if (host_comm && host_comm->initialized) {
+        if (host_comm && host_comm->link_up) {
             host_comm_get_entry_count(host_comm, &entry_count);
         }
 

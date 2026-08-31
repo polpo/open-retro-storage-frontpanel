@@ -396,7 +396,7 @@ static void handle_button_event(button_event_t *event) {
             switch (event->button_id) {
                 case 0: // Up button (North) - Previous image
                     if (event->type == BUTTON_EVENT_CLICK) {
-                        if (host_comm.initialized && current_image_status.image_loaded) {
+                        if (host_comm.link_up && current_image_status.image_loaded) {
                             esp_err_t ret = host_comm_select_prev_image(&host_comm, active_device_index);
                             if (ret == ESP_OK) {
                                 refresh_playback_status();
@@ -411,7 +411,7 @@ static void handle_button_event(button_event_t *event) {
                     break;
                 case 2: // Down button (South) - Next image
                     if (event->type == BUTTON_EVENT_CLICK) {
-                        if (host_comm.initialized && current_image_status.image_loaded) {
+                        if (host_comm.link_up && current_image_status.image_loaded) {
                             esp_err_t ret = host_comm_select_next_image(&host_comm, active_device_index);
                             if (ret == ESP_OK) {
                                 refresh_playback_status();
@@ -421,7 +421,7 @@ static void handle_button_event(button_event_t *event) {
                     break;
                 case 3: // Back button (West) - Eject (ATAPI only)
                     if (event->type == BUTTON_EVENT_CLICK) {
-                        if (current_device_type != PANEL_DEVICE_TYPE_IDE && host_comm.initialized) {
+                        if (current_device_type != PANEL_DEVICE_TYPE_IDE && host_comm.link_up) {
                             // Show inverted icon as eject feedback
                             ui_draw_status_screen(&display, current_disc_name,
                                                   &current_image_status,
@@ -465,7 +465,7 @@ static void handle_button_event(button_event_t *event) {
                             current_screen = SCREEN_DEVICE_SELECT;
                         } else if (selected == offset + 0) { // "Select Image"
                             // Refresh directory list before showing it
-                            if (!disc_list_loaded && host_comm.initialized) {
+                            if (!disc_list_loaded && host_comm.link_up) {
                                 ESP_LOGI(TAG, "Loading directory list...");
                                 refresh_directory_list();
                             }
@@ -486,7 +486,7 @@ static void handle_button_event(button_event_t *event) {
                                 current_screen = SCREEN_INFO;
                                 show_info_screen("Not Available",
                                     "Eject is not available\nin IDE mode.\n\nUse Select Image to\nchoose a different\nhard disk image.");
-                            } else if (host_comm.initialized) {
+                            } else if (host_comm.link_up) {
                                 // Show inverted icon as eject feedback
                                 ui_draw_status_screen(&display, current_disc_name,
                                                       &current_image_status,
@@ -511,7 +511,7 @@ static void handle_button_event(button_event_t *event) {
                             current_screen = SCREEN_INFO;
                             const esp_app_desc_t* info_app_desc = esp_app_get_description();
                             char main_ver_str[20] = "N/A";
-                            if (host_comm.initialized) {
+                            if (host_comm.link_up) {
                                 rp2350_fw_status_t fw_status;
                                 if (host_comm_get_rp2350_fw_status(&host_comm, &fw_status) == ESP_OK) {
                                     fw_version_format_mainboard(main_ver_str, sizeof(main_ver_str), fw_status.current_version);
@@ -524,7 +524,7 @@ static void handle_button_event(button_event_t *event) {
                                      info_app_desc->version,
                                      main_ver_str,
                                      host_comm_get_transport_name(&host_comm),
-                                     host_comm.initialized ? "Connected" : "Disconnected");
+                                     host_comm.link_up ? "Connected" : "Disconnected");
                             show_info_screen("System Info", info_text);
                         }
                     }
@@ -557,7 +557,7 @@ static void handle_button_event(button_event_t *event) {
                         if (selected_item) {
                             ESP_LOGI(TAG, "Selected entry: %s (menu index %lu)", selected_item->text, selected);
                             // Send command to host device
-                            if (host_comm.initialized) {
+                            if (host_comm.link_up) {
                                 // Use the host's real entry index recorded on the
                                 // row (-1 = parent dir). Deriving it from the menu
                                 // position breaks whenever the host list contains
@@ -1286,7 +1286,7 @@ static void status_refresh_task(void *pvParameters) {
         if (display.state == DISPLAY_STATE_OFF) {
             // Screen off: no need to poll at all
             poll_interval_ms = 0;
-        } else if (current_screen == SCREEN_STATUS && host_comm.initialized) {
+        } else if (current_screen == SCREEN_STATUS && host_comm.link_up) {
             if (current_device_type == PANEL_DEVICE_TYPE_IDE ||
                 current_device_type == PANEL_DEVICE_TYPE_SCSI) {
                 // HDD: image can only change via web UI, poll infrequently
@@ -1299,11 +1299,11 @@ static void status_refresh_task(void *pvParameters) {
                 poll_interval_ms = 1000;
             }
             refresh_playback_status();
-        } else if (host_comm_ready && !host_comm.initialized) {
+        } else if (host_comm_ready && !host_comm.link_up) {
             // Main board was unreachable at startup (e.g. held in reset).
             // Keep probing so the panel recovers once it comes online.
             //
-            // Only while the link is actually down. Without the !initialized
+            // Only while the link is actually down. Without the !link_up
             // test this ran on every pass whenever the status screen was not
             // showing, re-announcing a healthy link once a second and calling
             // on_host_link_established(), which resets the menu selection to 0
@@ -1311,7 +1311,7 @@ static void status_refresh_task(void *pvParameters) {
             uint8_t device_status;
             if (host_comm_get_device_status(&host_comm, 0, &device_status) == ESP_OK) {
                 ESP_LOGI(TAG, "Main board is now responding, connection restored");
-                host_comm.initialized = true;
+                host_comm.link_up = true;
                 on_host_link_established();
             }
         }
@@ -1337,7 +1337,7 @@ static void refresh_playback_status(void) {
     // The playback status poll doubles as the liveness probe by checking for
     // PANEL_ALIVE_MAGIC. Poll the active device so the disc name, playback
     // state, and device status all describe the same device.
-    esp_err_t ret = host_comm.initialized
+    esp_err_t ret = host_comm.link_up
         ? host_comm_get_playback_status(&host_comm, active_device_index, &current_playback_status)
         : ESP_FAIL;
     if (ret != ESP_OK ||
@@ -1408,7 +1408,7 @@ static void refresh_playback_status(void) {
 
 // Function to refresh device type from host
 static void refresh_device_type(void) {
-    if (!host_comm.initialized) {
+    if (!host_comm.link_up) {
         return;
     }
 
@@ -1423,7 +1423,7 @@ static void refresh_device_type(void) {
 
 // Function to refresh device list from host
 static void refresh_device_list(void) {
-    if (!host_comm.initialized) {
+    if (!host_comm.link_up) {
         return;
     }
 
@@ -1550,8 +1550,8 @@ static void set_last_menu_entry_index(menu_t *menu, int32_t entry_index) {
 
 // Function to refresh directory entry list from host
 static esp_err_t refresh_directory_list(void) {
-    if (!host_comm.initialized) {
-        ESP_LOGW(TAG, "Host comm not initialized");
+    if (!host_comm.link_up) {
+        ESP_LOGW(TAG, "Main board not answering");
         return ESP_ERR_INVALID_STATE;
     }
 
@@ -1644,7 +1644,7 @@ static void reconnect_to_host(void) {
     esp_err_t ret = refresh_directory_list();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to re-enumerate after reconnect: %s", esp_err_to_name(ret));
-        host_comm.initialized = false;
+        host_comm.link_up = false;
     }
 }
 
@@ -1662,7 +1662,7 @@ static bool handle_comm_error(esp_err_t err) {
         case ESP_ERR_INVALID_RESPONSE:
         case ESP_FAIL:
             reconnect_to_host();
-            return host_comm.initialized;
+            return host_comm.link_up;
         default:
             return false;
     }
@@ -1932,8 +1932,8 @@ static void check_firmware_status(void) {
     memset(&panel_fw_info, 0, sizeof(panel_fw_info));
     memset(&rp2350_fw_status, 0, sizeof(rp2350_fw_status));
 
-    if (!host_comm.initialized) {
-        ESP_LOGW(TAG, "Host communication not initialized");
+    if (!host_comm.link_up) {
+        ESP_LOGW(TAG, "Main board not answering");
         show_info_screen("Error", "Host not connected");
         display_manager_update(&display);
         return;
@@ -2077,7 +2077,7 @@ static void host_comm_task(void *pvParameters) {
     vTaskDelay(pdMS_TO_TICKS(2000));
     
     while (1) {
-        if (host_comm.initialized) {
+        if (host_comm.link_up) {
             // Periodically check host status
             host_status_t status;
             esp_err_t ret = host_comm_get_status(&host_comm, &status);
@@ -2374,7 +2374,7 @@ void app_main(void) {
             }
 
             if (host_comm_ready) {
-                host_comm.initialized = false;
+                host_comm.link_up = false;
             }
         }
         if (comm_ret == ESP_OK) {

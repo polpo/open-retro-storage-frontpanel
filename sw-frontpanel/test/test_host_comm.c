@@ -427,11 +427,11 @@ TEST(null_args_are_rejected) {
 
 TEST(silent_board_still_reaches_the_wire) {
     setup();
-    // comm.initialized == false means "the main board stopped answering", not
+    // comm.link_up == false means "the main board stopped answering", not
     // "this handle is gone". main.c's reconnect path clears it and then keeps
     // calling here to find out when the board comes back, so the call must
     // still go out on the wire.
-    comm.initialized = false;
+    comm.link_up = false;
     uint8_t status_byte = PANEL_DEVICE_STATUS_LOADED;
     mock_set_poll_result(&status_byte, 1);
 

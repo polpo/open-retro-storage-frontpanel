@@ -43,7 +43,7 @@ alignas(4) static uint8_t rx_buffer[PANEL_PROTOCOL_MAX_PAYLOAD];
 
 // A live handle is one with a mutex: host_comm_init() creates it and
 // host_comm_deinit() deletes it and leaves it NULL. That is the only thing the
-// entry points below need to check before locking. comm->initialized answers a
+// entry points below need to check before locking. comm->link_up answers a
 // different question - whether the main board is answering - and main.c clears
 // it while the handle stays up, so the reconnect path can keep calling through
 // this API to find out when the board comes back.
@@ -72,7 +72,7 @@ esp_err_t host_comm_init(host_comm_t *comm, const transport_config_t *config) {
         return ret;
     }
 
-    comm->initialized = true;
+    comm->link_up = true;
 
     ESP_LOGI(TAG, "Host communication initialized using %s transport (device addr: 0x%02X)",
              transport_get_name(&comm->transport), config->device_addr);
@@ -96,7 +96,7 @@ esp_err_t host_comm_deinit(host_comm_t *comm) {
     vSemaphoreDelete(comm->mutex);
     comm->mutex = NULL;
 
-    comm->initialized = false;
+    comm->link_up = false;
     ESP_LOGI(TAG, "Host communication deinitialized");
 
     return ret;
