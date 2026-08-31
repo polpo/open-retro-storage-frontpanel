@@ -38,7 +38,7 @@ esp_err_t interface_get_entry_list(interface_context_t *ctx, dir_entry_info_t *e
 
     // Get entry count from host
     uint32_t total_entry_count = 0;
-    esp_err_t ret = host_comm_get_entry_count(ctx->host_comm, &total_entry_count);
+    esp_err_t ret = host_comm_get_entry_count(ctx->host_comm, ctx->active_device_index, &total_entry_count);
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "Failed to get entry count: %s", esp_err_to_name(ret));
         return ret;
@@ -51,7 +51,7 @@ esp_err_t interface_get_entry_list(interface_context_t *ctx, dir_entry_info_t *e
     // Get info for each entry up to the maximum requested
     size_t entries_to_fetch = (total_entry_count < max_entries) ? total_entry_count : max_entries;
     for (size_t i = 0; i < entries_to_fetch; i++) {
-        ret = host_comm_get_entry_info(ctx->host_comm, i, &entries[i]);
+        ret = host_comm_get_entry_info(ctx->host_comm, ctx->active_device_index, i, &entries[i]);
         if (ret == ESP_OK) {
             (*entry_count)++;
         } else {

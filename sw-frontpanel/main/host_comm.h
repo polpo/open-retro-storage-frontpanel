@@ -48,10 +48,14 @@ esp_err_t host_comm_init(host_comm_t *comm, const transport_config_t *config);
 esp_err_t host_comm_deinit(host_comm_t *comm);
 
 // Directory browsing functions
-esp_err_t host_comm_get_entry_count(host_comm_t *comm, uint32_t *count);
-esp_err_t host_comm_get_entry_info(host_comm_t *comm, uint32_t index, dir_entry_info_t *info);
+//
+// For devices like PicoIDE that keep per-device browse directories/file
+// filters, device_index sends the index of the device. BlueSCSI has one common
+// browse directory and ignores device_index.
+esp_err_t host_comm_get_entry_count(host_comm_t *comm, uint16_t device_index, uint32_t *count);
+esp_err_t host_comm_get_entry_info(host_comm_t *comm, uint16_t device_index, uint32_t index, dir_entry_info_t *info);
 esp_err_t host_comm_select_entry(host_comm_t *comm, int32_t index, uint16_t device_index);  // -1 = parent dir, >=0 = select entry
-esp_err_t host_comm_get_current_path(host_comm_t *comm, char *path, size_t max_len);
+esp_err_t host_comm_get_current_path(host_comm_t *comm, uint16_t device_index, char *path, size_t max_len);
 
 // Image management functions (device_index selects target device, 0 for default/single device)
 esp_err_t host_comm_select_prev_image(host_comm_t *comm, uint16_t device_index);

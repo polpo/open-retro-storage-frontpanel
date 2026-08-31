@@ -508,14 +508,6 @@ static esp_err_t api_images_handler(httpd_req_t *req) {
     if (g_server && g_server->interface_ctx) {
         host_comm_t *host_comm = g_server->interface_ctx->host_comm;
 
-        // Get current path
-        char current_path[256] = "/";
-        if (host_comm && host_comm->link_up) {
-            host_comm_get_current_path(host_comm, current_path, sizeof(current_path));
-        }
-        ret = json.write("current_path", current_path);
-        if (ret != ESP_OK) return ret;
-
         // Get device index from query parameter or use active device
         uint16_t device_index = g_server->interface_ctx->active_device_index;
         {
@@ -530,6 +522,14 @@ static esp_err_t api_images_handler(httpd_req_t *req) {
                 }
             }
         }
+
+        // Get current path
+        char current_path[256] = "/";
+        if (host_comm && host_comm->link_up) {
+            host_comm_get_current_path(host_comm, device_index, current_path, sizeof(current_path));
+        }
+        ret = json.write("current_path", current_path);
+        if (ret != ESP_OK) return ret;
 
         // Get loaded image status
         loaded_image_status_t image_status = {};
@@ -564,12 +564,12 @@ static esp_err_t api_images_handler(httpd_req_t *req) {
         // Stream entries one at a time to avoid stack overflow
         uint32_t entry_count = 0;
         if (host_comm && host_comm->link_up) {
-            host_comm_get_entry_count(host_comm, &entry_count);
+            host_comm_get_entry_count(host_comm, device_index, &entry_count);
         }
 
         for (uint32_t i = 0; i < entry_count && i < 64; i++) {
             dir_entry_info_t entry;
-            if (host_comm_get_entry_info(host_comm, i, &entry) == ESP_OK) {
+            if (host_comm_get_entry_info(host_comm, device_index, i, &entry) == ESP_OK) {
                 ret = json.beginObject();
                 if (ret != ESP_OK) return ret;
 
