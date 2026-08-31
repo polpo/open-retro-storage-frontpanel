@@ -99,6 +99,13 @@
             <p id="hostname-text" style="visibility: hidden; color: #666; margin: 5px 0;">Available at <strong id="hostname-url">http://frontpanel.local</strong></p>
         </div>
 
+        <!-- #ifdef PRODUCT_BLUESCSI -->
+        <div class="section" id="initiator-section" style="display: none;">
+            <h3>Imaging Drives</h3>
+            <div id="initiator-body"></div>
+        </div>
+        <!-- #endif -->
+
         <div class="section">
             <h3>Devices</h3>
             <div id="device-selector"></div>

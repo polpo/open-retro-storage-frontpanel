@@ -21,6 +21,8 @@ let productName = "PicoIDE";
 let mainboardFirmwarePending = false;
 // #endif
 let devices = [];
+let operatingMode = 0;   // 1 = initiator (disk imaging)
+function isInitiatorMode() { return operatingMode === 1; }
 let activeDeviceIndex = 0;
 let deviceIndexInitialized = false;
 
@@ -122,6 +124,9 @@ async function refreshDevices() {
     const data = await apiCall('/devices');
     if (data) {
         devices = data.devices || [];
+        // #ifdef PRODUCT_BLUESCSI
+        operatingMode = data.mode || 0;
+        // #endif
         // Set device index to one that the list actually contains, prefering
         // active_device which is the panel's selection.
         const listed = (index) => devices.some(d => d.index === index);
@@ -142,7 +147,9 @@ function renderDeviceSelector() {
     if (!container) return;
 
     if (devices.length === 0) {
-        container.innerHTML = '<div class="status">No devices found</div>';
+        container.innerHTML = isInitiatorMode()
+            ? '<div class="status">Initiator mode: this BlueSCSI is imaging drives, not emulating them.</div>'
+            : '<div class="status">No devices found</div>';
         return;
     }
 
@@ -269,10 +276,13 @@ async function refreshImages() {
                     // #ifdef PRODUCT_BLUESCSI
                     modBtns = renderFileModButtons(entry, filePath);
                     // #endif
+                    const loadBtn = (entry.loadable === 0 || isInitiatorMode())
+                        ? ''
+                        : `<button onclick="selectEntry(${entry.index})">Load</button>`;
                     return `<div class="entry-item file-item">
                         <span><strong>${entry.name}</strong></span>
                         <span class="entry-actions">
-                            <button onclick="selectEntry(${entry.index})">Load</button>
+                            ${loadBtn}
                             <a class="entry-btn icon-btn" href="${dlUrl}" download="${entry.name}" title="Download ${entry.name}" aria-label="Download ${entry.name}">
                                 <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false">
                                     <path fill="currentColor" d="M8 1a1 1 0 0 1 1 1v6.59l1.3-1.3a1 1 0 0 1 1.4 1.42l-3 3a1 1 0 0 1-1.4 0l-3-3a1 1 0 0 1 1.4-1.42L7 8.59V2a1 1 0 0 1 1-1ZM3 12a1 1 0 0 1 1 1v1h8v-1a1 1 0 1 1 2 0v2a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1v-2a1 1 0 0 1 1-1Z"/>
@@ -1402,9 +1412,96 @@ async function uploadPanelFirmware() {
 // #endif
 
 // Initialize the page (serialize requests to avoid overwhelming ESP32)
+// #ifdef PRODUCT_BLUESCSI
+const INITIATOR_SKIP_TEXT = {
+    1: 'Larger than 4GB - the SD card needs to be exFAT',
+    2: 'Not a disk drive',
+    3: 'An image for this ID already exists',
+    4: 'Too many copies of this drive already',
+    5: 'SD card is full',
+};
+
+function initiatorTargetRow(t) {
+    const name = [t.vendor, t.product].filter(Boolean).join(' ') || `SCSI ID ${t.id}`;
+    const total = t.sectors * t.sector_size;
+    const done = t.sectors_done * t.sector_size;
+    const pct = t.sectors > 0 ? Math.floor(100 * t.sectors_done / t.sectors) : 0;
+
+    let detail;
+    if (t.status === 4) {
+        detail = INITIATOR_SKIP_TEXT[t.skip_reason] || 'Failed';
+    } else if (t.status === 3) {
+        detail = t.bad_sectors > 0
+            ? `Done - ${t.bad_sectors} bad sector${t.bad_sectors === 1 ? '' : 's'}`
+            : 'Done';
+    } else if (t.status === 2) {
+        detail = `${formatBytes(done)} of ${formatBytes(total)}`;
+    } else {
+        detail = formatBytes(total);
+    }
+
+    const bar = t.status === 2
+        ? `<div class="progress-bar"><div class="progress-fill" style="width: ${pct}%"></div></div>`
+        : '';
+
+    return `<div class="entry-item">
+        <span><strong>ID ${t.id}</strong> ${name}<br><small>${detail}</small>${bar}</span>
+    </div>`;
+}
+
+function formatBytes(bytes) {
+    if (bytes >= 1024 * 1024 * 1024) return (bytes / (1024 * 1024 * 1024)).toFixed(1) + ' GB';
+    if (bytes >= 1024 * 1024) return Math.round(bytes / (1024 * 1024)) + ' MB';
+    return Math.round(bytes / 1024) + ' KB';
+}
+
+async function refreshInitiator() {
+    const section = document.getElementById('initiator-section');
+    if (!section) return;
+
+    const data = await apiCall('/initiator');
+    if (!data || !data.mode) {
+        section.style.display = 'none';
+        return;
+    }
+    section.style.display = '';
+    operatingMode = 1;
+
+    let head;
+    if (data.phase === 1) {
+        head = data.current_target >= 0 && data.current_target !== 255
+            ? `Scanning SCSI ID ${data.current_target}...`
+            : 'Scanning the SCSI bus...';
+    } else if (data.phase === 2) {
+        const rate = data.speed_kbps > 0 ? ` at ${data.speed_kbps} kB/s` : '';
+        head = `Writing ${data.filename || 'an image'}${rate}`;
+    } else if (data.phase === 3) {
+        const n = data.targets_imaged;
+        head = `Finished. ${n} drive${n === 1 ? '' : 's'} imaged.`;
+    } else if (data.phase === 4) {
+        head = 'Imaging stopped.';
+    } else {
+        head = 'Starting up...';
+    }
+
+    const rows = (data.targets || []).map(initiatorTargetRow).join('');
+    document.getElementById('initiator-body').innerHTML =
+        `<div class="status">${head}</div>` +
+        (rows || '<div class="status">No drives found yet.</div>');
+
+    // Keep polling while there is still something to watch
+    if (data.phase === 1 || data.phase === 2) {
+        setTimeout(refreshInitiator, 2000);
+    }
+}
+// #endif
+
 document.addEventListener('DOMContentLoaded', async function() {
     await loadSystemInfo();
     await refreshDevices();
+    // #ifdef PRODUCT_BLUESCSI
+    await refreshInitiator();
+    // #endif
     await refreshImages();
     await loadWiFiStatus();
     // #ifdef PRODUCT_BLUESCSI

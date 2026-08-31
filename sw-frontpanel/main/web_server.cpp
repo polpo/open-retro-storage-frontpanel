@@ -53,6 +53,7 @@ static esp_err_t api_firmware_check_handler(httpd_req_t *req);
 static esp_err_t api_firmware_update_handler(httpd_req_t *req);
 static esp_err_t api_firmware_status_handler(httpd_req_t *req);
 #ifdef CONFIG_PRODUCT_BLUESCSI
+static esp_err_t api_initiator_handler(httpd_req_t *req);
 static esp_err_t api_mainboard_firmware_check_handler(httpd_req_t *req);
 static esp_err_t api_mainboard_firmware_update_handler(httpd_req_t *req);
 static esp_err_t api_mainboard_firmware_status_handler(httpd_req_t *req);
@@ -303,6 +304,7 @@ static const httpd_uri_t uri_handlers[] = {
     { .uri = "/api/firmware/update", .method = HTTP_POST, .handler = api_firmware_update_handler, .user_ctx = NULL },
     { .uri = "/api/firmware/status", .method = HTTP_GET, .handler = api_firmware_status_handler, .user_ctx = NULL },
 #ifdef CONFIG_PRODUCT_BLUESCSI
+    { .uri = "/api/initiator", .method = HTTP_GET, .handler = api_initiator_handler, .user_ctx = NULL },
     { .uri = "/api/firmware/mainboard/check", .method = HTTP_GET, .handler = api_mainboard_firmware_check_handler, .user_ctx = NULL },
     { .uri = "/api/firmware/mainboard/update", .method = HTTP_POST, .handler = api_mainboard_firmware_update_handler, .user_ctx = NULL },
     { .uri = "/api/firmware/mainboard/status", .method = HTTP_GET, .handler = api_mainboard_firmware_status_handler, .user_ctx = NULL },
@@ -399,6 +401,103 @@ static esp_err_t api_status_handler(httpd_req_t *req) {
     return json.finalize();
 }
 
+#ifdef CONFIG_PRODUCT_BLUESCSI
+static const char *initiator_phase_name(uint8_t phase) {
+    switch (phase) {
+        case PANEL_INITIATOR_PHASE_SCANNING: return "scanning";
+        case PANEL_INITIATOR_PHASE_IMAGING:  return "imaging";
+        case PANEL_INITIATOR_PHASE_COMPLETE: return "complete";
+        case PANEL_INITIATOR_PHASE_ERROR:    return "error";
+        default:                             return "idle";
+    }
+}
+
+/* Serves the status the display task already polls. Issuing our own transaction
+ * here would put a browser refresh in contention with the display task for the
+ * host_comm mutex, against a main board that may be mid-spin-up. */
+static esp_err_t api_initiator_handler(httpd_req_t *req) {
+    httpd_resp_set_type(req, "application/json");
+
+    JsonStreamWriter json(req);
+    esp_err_t ret = json.beginObject();
+    if (ret != ESP_OK) return ret;
+
+    int target_count = 0;
+    const initiator_status_response_t *st = panel_get_initiator_status(&target_count);
+
+    ret = json.write("mode", panel_in_initiator_mode() ? 1 : 0);
+    if (ret != ESP_OK) return ret;
+
+    if (!st || !panel_in_initiator_mode()) {
+        ret = json.endObject();
+        if (ret != ESP_OK) return ret;
+        return json.finalize();
+    }
+
+    ret = json.write("phase", (int)st->phase);
+    if (ret != ESP_OK) return ret;
+    ret = json.write("phase_name", initiator_phase_name(st->phase));
+    if (ret != ESP_OK) return ret;
+    ret = json.write("initiator_id", (int)st->initiator_id);
+    if (ret != ESP_OK) return ret;
+    ret = json.write("current_target", (int)st->current_target_id);
+    if (ret != ESP_OK) return ret;
+    ret = json.write("targets_found", (int)st->targets_found);
+    if (ret != ESP_OK) return ret;
+    ret = json.write("targets_imaged", (int)st->targets_imaged);
+    if (ret != ESP_OK) return ret;
+    ret = json.write("speed_kbps", (uint32_t)st->speed_kbps);
+    if (ret != ESP_OK) return ret;
+    ret = json.write("filename", st->current_filename);
+    if (ret != ESP_OK) return ret;
+
+    ret = json.writeKey("targets");
+    if (ret != ESP_OK) return ret;
+    ret = json.beginArray();
+    if (ret != ESP_OK) return ret;
+
+    for (int i = 0; i < target_count; i++) {
+        const initiator_target_info_t *t = &st->targets[i];
+        char vendor[9], product[17];
+        memcpy(vendor, t->vendor, 8);   vendor[8] = '\0';
+        memcpy(product, t->product, 16); product[16] = '\0';
+        for (int j = 7; j >= 0 && vendor[j] == ' '; j--) vendor[j] = '\0';
+        for (int j = 15; j >= 0 && product[j] == ' '; j--) product[j] = '\0';
+
+        ret = json.beginObject();
+        if (ret != ESP_OK) return ret;
+        ret = json.write("id", (int)t->scsi_id);
+        if (ret != ESP_OK) return ret;
+        ret = json.write("type", (int)t->device_type);
+        if (ret != ESP_OK) return ret;
+        ret = json.write("status", (int)t->status);
+        if (ret != ESP_OK) return ret;
+        ret = json.write("skip_reason", (int)t->skip_reason);
+        if (ret != ESP_OK) return ret;
+        ret = json.write("vendor", vendor);
+        if (ret != ESP_OK) return ret;
+        ret = json.write("product", product);
+        if (ret != ESP_OK) return ret;
+        ret = json.write("sectors", t->sectorcount);
+        if (ret != ESP_OK) return ret;
+        ret = json.write("sector_size", t->sectorsize);
+        if (ret != ESP_OK) return ret;
+        ret = json.write("sectors_done", t->sectors_done);
+        if (ret != ESP_OK) return ret;
+        ret = json.write("bad_sectors", t->bad_sector_count);
+        if (ret != ESP_OK) return ret;
+        ret = json.endObject();
+        if (ret != ESP_OK) return ret;
+    }
+
+    ret = json.endArray();
+    if (ret != ESP_OK) return ret;
+    ret = json.endObject();
+    if (ret != ESP_OK) return ret;
+    return json.finalize();
+}
+#endif // CONFIG_PRODUCT_BLUESCSI
+
 static esp_err_t api_devices_handler(httpd_req_t *req) {
     httpd_resp_set_type(req, "application/json");
 
@@ -420,6 +519,12 @@ static esp_err_t api_devices_handler(httpd_req_t *req) {
         if (list_ret == ESP_OK) {
             ret = json.write("device_count", (int)list->device_count);
             if (ret != ESP_OK) return ret;
+#ifdef CONFIG_PRODUCT_BLUESCSI
+            // In initiator mode there are no emulated devices; the web UI needs
+            // to know that rather than reading the empty list as a failure.
+            ret = json.write("mode", (int)PANEL_DEVLIST_MODE(list));
+            if (ret != ESP_OK) return ret;
+#endif
 
             ret = json.writeKey("devices");
             if (ret != ESP_OK) return ret;
@@ -586,6 +691,11 @@ static esp_err_t api_images_handler(httpd_req_t *req) {
                 if (ret != ESP_OK) return ret;
 
                 ret = json.write("is_directory", entry.entry_type == 0);
+                if (ret != ESP_OK) return ret;
+                // log.txt / bluescsi.ini and friends stay listed so they can be
+                // downloaded and edited, but must not offer a Load button.
+                ret = json.write("loadable",
+                                 (entry.flags & PANEL_ENTRY_FLAG_NOT_LOADABLE) ? 0 : 1);
                 if (ret != ESP_OK) return ret;
 
                 ret = json.write("index", (int)i);

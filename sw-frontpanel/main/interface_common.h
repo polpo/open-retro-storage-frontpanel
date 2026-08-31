@@ -56,6 +56,14 @@ esp_err_t interface_get_current_image(interface_context_t *ctx, uint16_t device_
 // Device list
 esp_err_t interface_get_device_list(interface_context_t *ctx, device_list_response_t *response, size_t max_size);
 
+#ifdef CONFIG_PRODUCT_BLUESCSI
+// Initiator (disk imaging) mode. Defined in main.c, which owns the polled
+// status; readers get the cached copy rather than issuing their own
+// transaction and contending for the host_comm mutex.
+bool panel_in_initiator_mode(void);
+const initiator_status_response_t *panel_get_initiator_status(int *target_count);
+#endif
+
 // WiFi operations
 esp_err_t interface_wifi_scan(interface_context_t *ctx, wifi_ap_info_t *networks, size_t max_networks, size_t *found_networks);
 esp_err_t interface_wifi_connect(interface_context_t *ctx, const char *ssid, const char *password);
