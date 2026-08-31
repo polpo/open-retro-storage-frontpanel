@@ -154,9 +154,6 @@ void interface_invalidate_disc_list(void) {
     disc_list_loaded = false;
 }
 static void refresh_device_list(void);
-static bool select_default_device(void);
-static bool active_device_is_removable(void);
-static void rebuild_main_menu(void);
 static void populate_device_menu(void);
 static void on_host_link_established(void);
 static const char* get_active_device_label(void);
@@ -242,18 +239,20 @@ static void on_display_off_state_change(bool now_off, void *ctx) {
     refresh_led_state();
 }
 
-// Main menu contents depend on the state of the board we're controlling: "Eject
-// Image" only if the current device has removeable media, and "Select Device"
-// only when there is more than one device. rebuild_main_menu() manages this
-#define MAIN_MENU_MAX_ITEMS 5
-static menu_item_t main_menu_items[MAIN_MENU_MAX_ITEMS];
-static struct {
-    int8_t select_image;
-    int8_t eject_image;
-    int8_t select_device;
-    int8_t settings;
-    int8_t system_info;
-} main_menu_idx;
+static menu_item_t main_menu_items[] = {
+    {.text = "Select Image", .action = MENU_ACTION_CUSTOM, .selectable = true},
+    {.text = "Eject Image", .action = MENU_ACTION_CUSTOM, .selectable = true},
+    {.text = "Settings", .action = MENU_ACTION_CUSTOM, .selectable = true},
+    {.text = "System Info", .action = MENU_ACTION_CUSTOM, .selectable = true},
+};
+
+static menu_item_t main_menu_items_multi[] = {
+    {.text = "Select Device", .action = MENU_ACTION_CUSTOM, .selectable = true},
+    {.text = "Select Image", .action = MENU_ACTION_CUSTOM, .selectable = true},
+    {.text = "Eject Image", .action = MENU_ACTION_CUSTOM, .selectable = true},
+    {.text = "Settings", .action = MENU_ACTION_CUSTOM, .selectable = true},
+    {.text = "System Info", .action = MENU_ACTION_CUSTOM, .selectable = true},
+};
 
 static menu_item_t settings_menu_items[] = {
     {.text = "Firmware Update", .action = MENU_ACTION_CUSTOM, .selectable = true},
@@ -420,9 +419,9 @@ static void handle_button_event(button_event_t *event) {
                         }
                     }
                     break;
-                case 3: // Back button (West) - Eject (removable media only)
+                case 3: // Back button (West) - Eject (ATAPI only)
                     if (event->type == BUTTON_EVENT_CLICK) {
-                        if (active_device_is_removable() && host_comm.link_up) {
+                        if (current_device_type != PANEL_DEVICE_TYPE_IDE && host_comm.link_up) {
                             // Show inverted icon as eject feedback
                             ui_draw_status_screen(&display, current_disc_name,
                                                   &current_image_status,
@@ -457,12 +456,14 @@ static void handle_button_event(button_event_t *event) {
                     break;
                 case 1: // Select button (East)
                     if (event->type == BUTTON_EVENT_CLICK) {
-                        int32_t selected = (int32_t)menu_get_selected_index(&main_menu);
+                        uint32_t selected = menu_get_selected_index(&main_menu);
+                        // In multi-device mode, "Select Device" is item 0, shifting others by 1
+                        uint32_t offset = (device_count > 1) ? 1 : 0;
 
-                        if (selected == main_menu_idx.select_device) {
+                        if (device_count > 1 && selected == 0) { // "Select Device"
                             populate_device_menu();
                             current_screen = SCREEN_DEVICE_SELECT;
-                        } else if (selected == main_menu_idx.select_image) {
+                        } else if (selected == offset + 0) { // "Select Image"
                             // Refresh directory list before showing it
                             if (!disc_list_loaded && host_comm.link_up) {
                                 ESP_LOGI(TAG, "Loading directory list...");
@@ -478,8 +479,14 @@ static void handle_button_event(button_event_t *event) {
                                 disc_menu.title = "Select Image";
                             }
                             current_screen = SCREEN_DISC_LIST;
-                        } else if (selected == main_menu_idx.eject_image) {
-                            if (host_comm.link_up) {
+                        } else if (selected == offset + 1) { // "Eject Image"
+                            if (current_device_type == PANEL_DEVICE_TYPE_IDE) {
+                                // IDE mode: eject not supported
+                                info_return_screen = SCREEN_MAIN_MENU;
+                                current_screen = SCREEN_INFO;
+                                show_info_screen("Not Available",
+                                    "Eject is not available\nin IDE mode.\n\nUse Select Image to\nchoose a different\nhard disk image.");
+                            } else if (host_comm.link_up) {
                                 // Show inverted icon as eject feedback
                                 ui_draw_status_screen(&display, current_disc_name,
                                                       &current_image_status,
@@ -497,9 +504,9 @@ static void handle_button_event(button_event_t *event) {
                                     handle_comm_error(ret);
                                 }
                             }
-                        } else if (selected == main_menu_idx.settings) {
+                        } else if (selected == offset + 2) { // "Settings"
                             current_screen = SCREEN_SETTINGS;
-                        } else if (selected == main_menu_idx.system_info) {
+                        } else if (selected == offset + 3) { // "System Info"
                             info_return_screen = SCREEN_MAIN_MENU;
                             current_screen = SCREEN_INFO;
                             const esp_app_desc_t* info_app_desc = esp_app_get_description();
@@ -731,8 +738,6 @@ static void handle_button_event(button_event_t *event) {
                             ESP_LOGI(TAG, "Selected device %u: %s",
                                      active_device_index,
                                      device_list->devices[selected].device_label);
-                            // Eject may appear or disappear with the new device
-                            rebuild_main_menu();
                             current_screen = SCREEN_STATUS;
                             refresh_playback_status();
                         }
@@ -1350,16 +1355,6 @@ static void refresh_playback_status(void) {
         return;
     }
 
-    // The main board is alive. If we didn't get a device list at startup, fetch
-    // it now Note that an empty device list is possible, for example with
-    // BlueSCSI in initiator mode
-    if (!device_list_valid) {
-        refresh_device_list();
-        if (device_list_valid && select_default_device()) {
-            refresh_device_type();
-        }
-    }
-
     if (current_playback_status.disc_name[0]) {
         // Trust whatever string the main board put in disc_name — it carries the
         // image name when a disc is loaded (the main board caches the filename in
@@ -1421,8 +1416,8 @@ static void refresh_device_type(void) {
     esp_err_t ret = host_comm_get_loaded_image_status(&host_comm, active_device_index, &status);
     if (ret == ESP_OK) {
         current_device_type = status.device_type;
-        ESP_LOGI(TAG, "Device type: %u", current_device_type);
-        rebuild_main_menu();
+        ESP_LOGI(TAG, "Device type: %s",
+                 current_device_type == PANEL_DEVICE_TYPE_IDE ? "IDE (Hard Disk)" : "ATAPI (CD-ROM)");
     }
 }
 
@@ -1443,91 +1438,33 @@ static void refresh_device_list(void) {
         device_count = 1;
         device_list_valid = false;
     }
-    rebuild_main_menu();
 }
 
-// Device types whose media is removable. category a future main board reports
-// that we do not know about - is never treated as ejectable. These are the
-// devices a user is most likely to want selected on the panel. Mirrors
-// EJECTABLE_TYPES in www/app.js: keep the two in sync.
+// SCSI peripheral types (the device_summary_t.device_type values reported by
+// the main board) whose media is removable. These are the devices a user is
+// most likely to want selected on the panel. Mirrors EJECTABLE_TYPES in
+// www/app.js — keep the two in sync.
 static bool device_type_is_removable(uint8_t device_type) {
     switch (device_type) {
-        case PANEL_DEV_CATEGORY_REMOVABLE:
-        case PANEL_DEV_CATEGORY_OPTICAL:
-        case PANEL_DEV_CATEGORY_FLOPPY:
-        case PANEL_DEV_CATEGORY_MO:
-        case PANEL_DEV_CATEGORY_ZIP:
+        case 1:  // removable
+        case 2:  // optical (CD-ROM)
+        case 3:  // floppy
+        case 4:  // MO
+        case 7:  // ZIP
             return true;
         default:
             return false;
     }
 }
 
-// Whether the active device's media is removable.
-static bool active_device_is_removable(void) {
-    if (device_list_valid) {
-        for (uint8_t i = 0; i < device_list->device_count; i++) {
-            if (device_list->devices[i].device_index == active_device_index) {
-                return device_type_is_removable(device_list->devices[i].device_type);
-            }
-        }
-    }
-    return current_device_type == PANEL_DEVICE_TYPE_ATAPI;
-}
-
-static void main_menu_append(uint32_t *count, const char *text, int8_t *slot) {
-    menu_item_t *item = &main_menu_items[*count];
-    strncpy(item->text, text, MENU_ITEM_MAX_LENGTH - 1);
-    item->text[MENU_ITEM_MAX_LENGTH - 1] = '\0';
-    item->action = MENU_ACTION_CUSTOM;
-    item->selectable = true;
-    *slot = (int8_t)(*count);
-    (*count)++;
-}
-
-// Rebuild the main menu for the currently active device.
-static void rebuild_main_menu(void) {
-    static bool built = false;
-    static bool built_ejectable = false;
-    static bool built_multi = false;
-
-    bool ejectable = active_device_is_removable();
-    bool multi = (device_count > 1);
-    if (built && ejectable == built_ejectable && multi == built_multi) {
-        return;
-    }
-    built = true;
-    built_ejectable = ejectable;
-    built_multi = multi;
-
-    main_menu_idx.select_image = -1;
-    main_menu_idx.eject_image = -1;
-    main_menu_idx.select_device = -1;
-    main_menu_idx.settings = -1;
-    main_menu_idx.system_info = -1;
-
-    uint32_t count = 0;
-    main_menu_append(&count, "Select Image", &main_menu_idx.select_image);
-    if (ejectable) {
-        main_menu_append(&count, "Eject Image", &main_menu_idx.eject_image);
-    }
-    if (multi) {
-        main_menu_append(&count, "Select Device", &main_menu_idx.select_device);
-    }
-    main_menu_append(&count, "Settings", &main_menu_idx.settings);
-    main_menu_append(&count, "System Info", &main_menu_idx.system_info);
-
-    menu_set_items(&main_menu, main_menu_items, count);
-}
-
 // Choose the device shown on the panel by default. Prefer the first removable
 // device (e.g. a CD-ROM) over device 0, which is commonly a fixed HDD or a
 // non-removable device such as a network adapter. Falls back to the first
-// listed device when none are removable. Returns false when the list is empty
-// (e.g. a BlueSCSI in initiator mode) and no device was picked.
-static bool select_default_device(void) {
+// listed device when none are removable. Call once after the initial device
+// list load so it does not override a later manual selection.
+static void select_default_device(void) {
     if (!device_list_valid || device_list->device_count == 0) {
-        return false;
+        return;
     }
 
     for (uint8_t i = 0; i < device_list->device_count; i++) {
@@ -1536,14 +1473,13 @@ static bool select_default_device(void) {
             interface_ctx.active_device_index = active_device_index;
             ESP_LOGI(TAG, "Default device -> removable %u (%s)",
                      active_device_index, device_list->devices[i].device_label);
-            return true;
+            return;
         }
     }
 
     // No removable device present: default to the first listed device.
     active_device_index = device_list->devices[0].device_index;
     interface_ctx.active_device_index = active_device_index;
-    return true;
 }
 
 // Populate the device select menu from cached device list
@@ -1590,16 +1526,13 @@ static const char* get_active_device_label(void) {
 // default of ATAPI, giving CD affordances and CD poll cadence on an HDD-only
 // board. Called from every path that establishes the link.
 static void on_host_link_established(void) {
-    // Settle on the active device BEFORE reading its type, so current_device_type
-    // describes the device we actually landed on. refresh_device_list() and
-    // refresh_device_type() each call rebuild_main_menu(), and the last one wins:
-    // it decides the "Eject Image" row from the settled device's removability and
-    // the "Select Device" row from the device count.
+    refresh_device_type();
     refresh_device_list();
     select_default_device();
-    refresh_device_type();
 
     if (device_count > 1) {
+        menu_set_items(&main_menu, main_menu_items_multi,
+                       sizeof(main_menu_items_multi) / sizeof(main_menu_items_multi[0]));
         ESP_LOGI(TAG, "Multi-device mode: %u devices", device_count);
     }
 
@@ -2374,7 +2307,8 @@ void app_main(void) {
     ui_update_splash_progress(&display, "Init menus...", 50);
     menu_init(&main_menu, MENU_VISIBLE_ITEMS_WITH_TITLE);
     main_menu.title = "Main Menu";
-    rebuild_main_menu();
+    menu_set_items(&main_menu, main_menu_items,
+                  sizeof(main_menu_items) / sizeof(main_menu_items[0]));
 
     menu_init(&disc_menu, MENU_VISIBLE_ITEMS_WITH_TITLE);
     disc_menu.title = "Select Image";
@@ -2455,6 +2389,9 @@ void app_main(void) {
                 ESP_LOGI(TAG, "Main board firmware version: %s", main_version);
             }
 
+            // Get device type (IDE vs ATAPI)
+            refresh_device_type();
+
             // Get device list for multi-device support
             refresh_device_list();
 
@@ -2463,10 +2400,10 @@ void app_main(void) {
             // non-removable device like a network adapter.
             select_default_device();
 
-            // Get device type of the device we settled on
-            refresh_device_type();
-
+            // Switch to multi-device main menu if multiple devices found
             if (device_count > 1) {
+                menu_set_items(&main_menu, main_menu_items_multi,
+                              sizeof(main_menu_items_multi) / sizeof(main_menu_items_multi[0]));
                 ESP_LOGI(TAG, "Multi-device mode: %u devices", device_count);
             }
 

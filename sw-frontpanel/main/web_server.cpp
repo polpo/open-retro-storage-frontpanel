@@ -75,21 +75,22 @@ static esp_err_t api_screen_handler(httpd_req_t *req);
 // Global server instance for handlers
 static web_server_t *g_server = NULL;
 
-// Helper: extract device index from the JSON body. Every request that operates on 
-// a device should include it in the body, so if there is not one, return false.
-static bool get_device_from_body(httpd_req_t *req, uint16_t *device_index) {
-    if (req->content_len == 0 || req->content_len > 256) return false;
+// Helper: extract device index from optional JSON body, falling back to active_device_index
+static uint16_t get_device_from_body(httpd_req_t *req) {
+    uint16_t default_device = (g_server && g_server->interface_ctx)
+        ? g_server->interface_ctx->active_device_index : 0;
+    if (req->content_len == 0 || req->content_len > 256) return default_device;
     char buf[256];
     int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
-    if (len <= 0) return false;
+    if (len <= 0) return default_device;
     buf[len] = '\0';
     cJSON *json = cJSON_Parse(buf);
-    if (!json) return false;
+    if (!json) return default_device;
     cJSON *dev = cJSON_GetObjectItem(json, "device");
-    bool found = cJSON_IsNumber(dev);
-    if (found) *device_index = (uint16_t)dev->valueint;
+    uint16_t result = default_device;
+    if (cJSON_IsNumber(dev)) result = (uint16_t)dev->valueint;
     cJSON_Delete(json);
-    return found;
+    return result;
 }
 
 #ifdef CONFIG_PANEL_TEST_HOOKS
@@ -219,10 +220,9 @@ static esp_err_t api_screen_handler(httpd_req_t *req) {
 
 // Global OTA manager instance
 static ota_manager_t g_ota_manager;
-
-#ifdef CONFIG_PRODUCT_BLUESCSI
 static TaskHandle_t g_ota_task_handle = NULL;
 
+#ifdef CONFIG_PRODUCT_BLUESCSI
 // Background OTA task - processes OTA update without blocking HTTP handler
 static void web_firmware_update_task(void *pvParameters) {
     ota_manager_t *ota = (ota_manager_t *)pvParameters;
@@ -508,21 +508,19 @@ static esp_err_t api_images_handler(httpd_req_t *req) {
     if (g_server && g_server->interface_ctx) {
         host_comm_t *host_comm = g_server->interface_ctx->host_comm;
 
-        // The ?device= query parameter names the device this listing is for.
-        // On BlueSCSI: used for device's loaded image status
-        // On PicoIDE: loaded image status, per-device browse dir, extension filter
-        uint16_t device_index;
+        // Get device index from query parameter or use active device
+        uint16_t device_index = g_server->interface_ctx->active_device_index;
         {
             size_t query_len = httpd_req_get_url_query_len(req);
-            char query[64];
-            char device_str[8];
-            if (query_len == 0 || query_len >= sizeof(query) ||
-                httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK ||
-                httpd_query_key_value(query, "device", device_str, sizeof(device_str)) != ESP_OK) {
-                httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing device");
-                return ESP_FAIL;
+            if (query_len > 0 && query_len < 64) {
+                char query[64];
+                if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+                    char device_str[8];
+                    if (httpd_query_key_value(query, "device", device_str, sizeof(device_str)) == ESP_OK) {
+                        device_index = (uint16_t)atoi(device_str);
+                    }
+                }
             }
-            device_index = (uint16_t)atoi(device_str);
         }
 
         // Get current path
@@ -647,14 +645,11 @@ static esp_err_t api_select_entry_handler(httpd_req_t *req) {
 
     int32_t entry_index = (int32_t)entry_index_json->valueint;
 
-    // The device to act on is required
+    // Parse optional device field, falling back to active_device_index
     cJSON *device_json = cJSON_GetObjectItem(json, "device");
-    if (!cJSON_IsNumber(device_json)) {
-        cJSON_Delete(json);
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing device");
-        return ESP_FAIL;
-    }
-    uint16_t device_index = (uint16_t)device_json->valueint;
+    uint16_t device_index = (g_server && g_server->interface_ctx)
+        ? g_server->interface_ctx->active_device_index : 0;
+    if (cJSON_IsNumber(device_json)) device_index = (uint16_t)device_json->valueint;
 
     // Send command to host
     httpd_resp_set_type(req, "application/json");
@@ -703,11 +698,7 @@ static esp_err_t api_select_entry_handler(httpd_req_t *req) {
 }
 
 static esp_err_t api_eject_image_handler(httpd_req_t *req) {
-    uint16_t device_index;
-    if (!get_device_from_body(req, &device_index)) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing device");
-        return ESP_FAIL;
-    }
+    uint16_t device_index = get_device_from_body(req);
 
     httpd_resp_set_type(req, "application/json");
 
@@ -738,11 +729,7 @@ static esp_err_t api_eject_image_handler(httpd_req_t *req) {
 }
 
 static esp_err_t api_prev_image_handler(httpd_req_t *req) {
-    uint16_t device_index;
-    if (!get_device_from_body(req, &device_index)) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing device");
-        return ESP_FAIL;
-    }
+    uint16_t device_index = get_device_from_body(req);
 
     httpd_resp_set_type(req, "application/json");
 
@@ -773,11 +760,7 @@ static esp_err_t api_prev_image_handler(httpd_req_t *req) {
 }
 
 static esp_err_t api_next_image_handler(httpd_req_t *req) {
-    uint16_t device_index;
-    if (!get_device_from_body(req, &device_index)) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing device");
-        return ESP_FAIL;
-    }
+    uint16_t device_index = get_device_from_body(req);
 
     httpd_resp_set_type(req, "application/json");
 

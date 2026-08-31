@@ -122,14 +122,9 @@ async function refreshDevices() {
     const data = await apiCall('/devices');
     if (data) {
         devices = data.devices || [];
-        // Set device index to one that the list actually contains, prefering
-        // active_device which is the panel's selection.
-        const listed = (index) => devices.some(d => d.index === index);
-        if (devices.length > 0 && !(deviceIndexInitialized && listed(activeDeviceIndex))) {
-            activeDeviceIndex = listed(data.active_device) ? data.active_device : devices[0].index;
+        if (!deviceIndexInitialized && data.active_device !== undefined) {
+            activeDeviceIndex = data.active_device;
             deviceIndexInitialized = true;
-        } else if (devices.length === 0) {
-            deviceIndexInitialized = false;
         }
         renderDeviceSelector();
     }
@@ -204,16 +199,9 @@ function renderFileModButtons(entry, filePath) {
 }
 // #endif
 
-// The current device every request acts on. The value of null means we don't
-// have a device list yet, which tells the caller to wait until we have a list.
-function currentDevice() {
-    return deviceIndexInitialized ? activeDeviceIndex : null;
-}
-
 async function refreshImages() {
-    const device = currentDevice();
-    if (device === null) return;
-    const data = await apiCall(`/images?device=${device}`);
+    const endpoint = devices.length > 1 ? `/images?device=${activeDeviceIndex}` : '/images';
+    const data = await apiCall(endpoint);
     if (data) {
         currentPath = data.current_path || "/";
         currentImage = data.current_image;
@@ -286,12 +274,7 @@ async function refreshImages() {
 
 async function selectEntry(index) {
     const body = { index: index };
-    const device = currentDevice();
-    if (device === null) {
-        showStatus('error', 'No device selected yet');
-        return;
-    }
-    body.device = device;
+    if (devices.length > 1) body.device = activeDeviceIndex;
     const data = await apiCall('/select_entry', {
         method: 'POST',
         body: JSON.stringify(body)
@@ -321,12 +304,7 @@ async function ejectDevice(deviceIndex) {
 
 async function ejectImage() {
     const body = {};
-    const device = currentDevice();
-    if (device === null) {
-        showStatus('error', 'No device selected yet');
-        return;
-    }
-    body.device = device;
+    if (devices.length > 1) body.device = activeDeviceIndex;
     const data = await apiCall('/eject_image', {
         method: 'POST',
         body: JSON.stringify(body)
@@ -415,12 +393,7 @@ async function createDir() {
 
 async function prevImage() {
     const body = {};
-    const device = currentDevice();
-    if (device === null) {
-        showStatus('error', 'No device selected yet');
-        return;
-    }
-    body.device = device;
+    if (devices.length > 1) body.device = activeDeviceIndex;
     const data = await apiCall('/prev_image', {
         method: 'POST',
         body: JSON.stringify(body)
@@ -434,12 +407,7 @@ async function prevImage() {
 
 async function nextImage() {
     const body = {};
-    const device = currentDevice();
-    if (device === null) {
-        showStatus('error', 'No device selected yet');
-        return;
-    }
-    body.device = device;
+    if (devices.length > 1) body.device = activeDeviceIndex;
     const data = await apiCall('/next_image', {
         method: 'POST',
         body: JSON.stringify(body)
