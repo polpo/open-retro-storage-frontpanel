@@ -1,6 +1,56 @@
 name: Build
 on: [push, pull_request]
 jobs:
+  # Runs before the firmware build so the binaries published to `latest` carry
+  # the bumped version, and so main's tip is the commit that was actually built.
+  bump-version:
+    if: "github.ref == 'refs/heads/main' && github.repository == 'polpo/open-retro-storage-frontpanel' && !startsWith(github.event.head_commit.message, 'chore: bump pre')"
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    concurrency:
+      group: bump-pre
+      cancel-in-progress: false
+    outputs:
+      sha: ${{ steps.push.outputs.sha }}
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v5
+        with:
+          ref: main
+      - name: Bump PROJECT_VER
+        id: bump
+        shell: bash
+        run: |
+          set -euo pipefail
+          FILE=sw-frontpanel/CMakeLists.txt
+          CUR=$(sed -n 's/^set(PROJECT_VER "\(.*\)")$/\1/p' "$FILE")
+          if [ -z "$CUR" ]; then
+            echo "PROJECT_VER not found in $FILE" >&2
+            exit 1
+          fi
+          if [[ "$CUR" =~ ^([0-9]+\.[0-9]+\.[0-9]+)-pre([0-9]+)$ ]]; then
+            NEW="${BASH_REMATCH[1]}-pre$(( BASH_REMATCH[2] + 1 ))"
+          elif [[ "$CUR" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+            # Last release is out; start the next patch line.
+            NEW="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.$(( BASH_REMATCH[3] + 1 ))-pre1"
+          else
+            echo "Cannot parse version '$CUR'" >&2
+            exit 1
+          fi
+          sed -i "s/^set(PROJECT_VER \"$CUR\")$/set(PROJECT_VER \"$NEW\")/" "$FILE"
+          echo "new=$NEW" >> "$GITHUB_OUTPUT"
+      - name: Commit and push
+        id: push
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "chore: bump pre to ${{ steps.bump.outputs.new }}"
+          git push origin HEAD:main
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
   host-tests:
     runs-on: ubuntu-24.04
     steps:
@@ -10,6 +60,9 @@ jobs:
         run: make -C sw-frontpanel/test
 
   build-frontpanel-firmware:
+    needs: [bump-version]
+    # bump-version is skipped for PRs, tags and forks; build from github.sha there.
+    if: always() && needs.bump-version.result != 'failure' && needs.bump-version.result != 'cancelled'
     runs-on: ubuntu-22.04
     strategy:
       matrix:
@@ -24,6 +77,7 @@ jobs:
       - name: Checkout repo with submodules
         uses: actions/checkout@v5
         with:
+          ref: ${{ needs.bump-version.outputs.sha || github.sha }}
           submodules: recursive
       - name: Build Front Panel Firmware (${{ matrix.product.name }})
         uses: espressif/esp-idf-ci-action@v1
@@ -89,3 +143,55 @@ jobs:
             */bluescsi-frontpanel.bin
           draft: true
           prerelease: ${{ steps.relinfo.outputs.prerelease }}
+
+  latest-release:
+    # Keeps a rolling `latest` prerelease pointing at the tip of main, the same
+    # way BlueSCSI-v2 does.
+    if: github.ref == 'refs/heads/main' && github.repository == 'polpo/open-retro-storage-frontpanel'
+    runs-on: ubuntu-24.04
+    needs: [bump-version, host-tests, build-frontpanel-firmware]
+    permissions:
+      contents: write
+    concurrency:
+      group: latest-release
+      cancel-in-progress: true
+    env:
+      STAGING_DIR: ${{github.workspace}}/latest-staging-dir
+      BUILT_SHA: ${{ needs.bump-version.outputs.sha || github.sha }}
+    steps:
+      - name: Checkout the built commit
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.bump-version.outputs.sha || github.sha }}
+      - name: Download firmware artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: ${{env.STAGING_DIR}}
+          pattern: frontpanel-firmware-*
+          merge-multiple: true
+      - name: Move the latest tag to this commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          git tag -f latest "$BUILT_SHA"
+          git push origin --force latest
+      - name: Upload to latest release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          cat > latest-body.md <<EOF
+          Automatic build from the latest commit on \`main\` (\`${BUILT_SHA:0:7}\`). Not a stable release.
+
+          Upload the \`.bin\` for your board through the front panel web interface. To flash over UART instead, see [Programming the firmware](https://github.com/${GITHUB_REPOSITORY}#programming-the-firmware).
+          EOF
+          if ! gh release view --repo "$GITHUB_REPOSITORY" latest >/dev/null 2>&1; then
+            gh release create --repo "$GITHUB_REPOSITORY" latest \
+              -t "Latest development build" -F latest-body.md --prerelease
+          else
+            gh release edit --repo "$GITHUB_REPOSITORY" latest \
+              -t "Latest development build" -F latest-body.md --prerelease --draft=false
+          fi
+          gh release upload --repo "$GITHUB_REPOSITORY" --clobber latest \
+            "$STAGING_DIR"/picoide-frontpanel.bin "$STAGING_DIR"/bluescsi-frontpanel.bin

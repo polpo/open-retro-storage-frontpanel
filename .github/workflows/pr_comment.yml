@@ -1,0 +1,71 @@
+name: Post build comment
+
+# Runs from the default branch with a write token, so the build artifact links
+# for pull requests from forks can still be posted.
+# This workflow must never check out or execute the pull request's code.
+on:
+  workflow_run:
+    workflows: ["Build"]
+    types: [completed]
+
+permissions:
+  actions: read
+  pull-requests: write
+
+jobs:
+  build_comment:
+    name: Post build comment on PR
+    runs-on: ubuntu-24.04
+    if: github.event.workflow_run.event == 'pull_request'
+
+    steps:
+      # workflow_run.pull_requests is empty for forks, so resolve the number
+      # from the head SHA.
+      - name: Resolve PR number
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          number=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}/pulls" --jq '.[0].number // empty')
+          echo "number=${number}" >> "$GITHUB_OUTPUT"
+
+      - name: Build comment body
+        id: body
+        if: steps.pr.outputs.number != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/artifacts" --paginate \
+            --jq '.artifacts[] | select(.name | startswith("frontpanel-firmware-")) | select(.expired == false) | "\(.name)\t\(.id)"' \
+            | sort > artifacts.tsv
+          if [ ! -s artifacts.tsv ]; then
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          {
+            echo "### Test this PR"
+            echo
+            echo "Firmware built from \`${HEAD_SHA:0:7}\`:"
+            echo
+            while IFS=$'\t' read -r name id; do
+              echo "- [**${name}.zip**](https://github.com/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/artifacts/${id})"
+            done < artifacts.tsv
+            echo
+            echo "Upload the \`.bin\` for your board through the front panel web interface. To flash over UART instead, see [Programming the firmware](https://github.com/${GITHUB_REPOSITORY}#programming-the-firmware)."
+            echo
+            echo "<sub>Must be signed in to GitHub. Build expires after 90 days.</sub>"
+          } > pr-comment.md
+          echo "found=true" >> "$GITHUB_OUTPUT"
+
+      - name: Post build comment on PR
+        if: steps.body.outputs.found == 'true'
+        uses: marocchino/sticky-pull-request-comment@v3
+        with:
+          header: frontpanel-build
+          number: ${{ steps.pr.outputs.number }}
+          path: pr-comment.md
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
