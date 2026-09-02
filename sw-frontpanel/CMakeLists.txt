@@ -2,7 +2,7 @@
 # CMakeLists in this exact order for cmake to work correctly
 cmake_minimum_required(VERSION 3.16)
 
-set(PROJECT_VER "0.4.1-pre2")
+set(PROJECT_VER "0.4.1-pre3")
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 
 # Name the firmware per product (picoide-frontpanel / bluescsi-frontpanel).
