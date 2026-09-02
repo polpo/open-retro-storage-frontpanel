@@ -3,8 +3,11 @@ on: [push, pull_request]
 jobs:
   # Runs before the firmware build so the binaries published to `latest` carry
   # the bumped version, and so main's tip is the commit that was actually built.
+  # Skips its own bump commits, and `chore: release` commits: those land a final
+  # X.Y.Z for the tag build to publish, so main stays on it until the next
+  # ordinary commit starts the following patch line.
   bump-version:
-    if: "github.ref == 'refs/heads/main' && github.repository == 'polpo/open-retro-storage-frontpanel' && !startsWith(github.event.head_commit.message, 'chore: bump pre')"
+    if: "github.ref == 'refs/heads/main' && github.repository == 'polpo/open-retro-storage-frontpanel' && !startsWith(github.event.head_commit.message, 'chore: bump pre') && !startsWith(github.event.head_commit.message, 'chore: release')"
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -96,7 +99,12 @@ jobs:
             sw-frontpanel/build-${{ matrix.product.name }}/partition_table/partition-table.bin
 
   create-release:
-    if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
+    # A job with a plain `if` also has to pass an implicit success() over every
+    # ancestor, and bump-version is skipped on tags. Check the build's result
+    # directly so that skip doesn't cascade down here.
+    if: >-
+      always() && needs.build-frontpanel-firmware.result == 'success'
+      && github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
     runs-on: ubuntu-24.04
     needs: [build-frontpanel-firmware]
     permissions:
@@ -147,7 +155,15 @@ jobs:
   latest-release:
     # Keeps a rolling `latest` prerelease pointing at the tip of main, the same
     # way BlueSCSI-v2 does.
-    if: github.ref == 'refs/heads/main' && github.repository == 'polpo/open-retro-storage-frontpanel'
+    # Same as create-release: bump-version is skipped on `chore: release`
+    # commits, and BUILT_SHA falls back to github.sha when it is.
+    if: >-
+      always() && needs.bump-version.result != 'failure'
+      && needs.bump-version.result != 'cancelled'
+      && needs.host-tests.result == 'success'
+      && needs.build-frontpanel-firmware.result == 'success'
+      && github.ref == 'refs/heads/main'
+      && github.repository == 'polpo/open-retro-storage-frontpanel'
     runs-on: ubuntu-24.04
     needs: [bump-version, host-tests, build-frontpanel-firmware]
     permissions:
