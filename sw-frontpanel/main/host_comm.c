@@ -457,13 +457,43 @@ esp_err_t host_comm_get_playback_status(host_comm_t *comm, uint16_t device_index
                                                     NULL, 0,
                                                     (uint8_t*)status, sizeof(playback_status_t));
     if (ret == ESP_OK) {
-        ESP_LOGD(TAG, "Playback status: disc_inserted=%d, type=%d, playing=%d, track=%d",
-                status->disc_inserted, status->disc_type, status->is_playing, status->current_track);
+        ESP_LOGD(TAG, "Playback status: flags=0x%02x, type=%d, track=%d",
+                status->flags, status->disc_type, status->current_track);
     }
 
     HOST_COMM_UNLOCK(comm);
     return ret;
 }
+
+#ifdef CONFIG_PRODUCT_BLUESCSI
+esp_err_t host_comm_get_initiator_summary(host_comm_t *comm,
+                                          panel_initiator_summary_t *summary) {
+    if (!host_comm_have_handle(comm) || !summary) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    HOST_COMM_LOCK(comm);
+
+    esp_err_t ret = transport_two_phase_transaction(&comm->transport,
+                                                    PANEL_CMD_GET_INITIATOR_SUMMARY,
+                                                    PANEL_ARG_IGNORED,
+                                                    NULL, 0,
+                                                    (uint8_t*)summary,
+                                                    sizeof(panel_initiator_summary_t));
+
+    HOST_COMM_UNLOCK(comm);
+
+    if (ret != ESP_OK) {
+        return ret;
+    }
+    // Same guard as the playback status: an absent board reads back as a
+    // uniform 0x00/0xFF bus, which would otherwise look like a valid summary.
+    if (summary->alive_magic != PANEL_ALIVE_MAGIC) {
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+    return ESP_OK;
+}
+#endif
 
 esp_err_t host_comm_probe_alive(host_comm_t *comm, uint16_t device_index) {
     playback_status_t status;
@@ -496,9 +526,9 @@ esp_err_t host_comm_probe_alive(host_comm_t *comm, uint16_t device_index) {
         return ESP_ERR_INVALID_RESPONSE;
     }
 
-    // Cross-check a second, independently-constrained field: these are booleans
-    // written by the main board, so anything else means we are reading noise.
-    if (status.disc_inserted > 1 || status.is_playing > 1 || status.tray_open > 1) {
+    // Cross-check a second, independently-constrained field: only defined flag
+    // bits are ever set, so anything else means we are reading noise.
+    if (status.flags & ~PANEL_PB_FLAGS_KNOWN) {
         return ESP_ERR_INVALID_RESPONSE;
     }
 
@@ -1055,11 +1085,62 @@ esp_err_t host_comm_get_device_list(host_comm_t *comm, device_list_response_t *r
     // Copy result to caller's buffer
     size_t copy_size = (result_size < max_size) ? result_size : max_size;
     memcpy(response, result_data, copy_size);
+
+    // Callers iterate devices[] up to device_count. A truncated or garbled reply
+    // would walk off the end, so clamp the count to what actually arrived.
+    size_t capacity = (copy_size > sizeof(device_list_response_t))
+        ? (copy_size - sizeof(device_list_response_t)) / sizeof(device_summary_t) : 0;
+    if (response->device_count > capacity) {
+        ESP_LOGW(TAG, "Device list truncated: %u of %u devices fit",
+                 (unsigned)capacity, response->device_count);
+        response->device_count = (uint8_t)capacity;
+    }
+
     ESP_LOGI(TAG, "Device list: %u devices (max %u)", response->device_count, response->max_devices);
 
     HOST_COMM_UNLOCK(comm);
     return ESP_OK;
 }
+
+#ifdef CONFIG_PRODUCT_BLUESCSI
+esp_err_t host_comm_get_initiator_status(host_comm_t *comm, initiator_status_response_t *response,
+                                         size_t max_size, size_t *out_size) {
+    if (!host_comm_have_handle(comm) || !response ||
+        max_size < sizeof(initiator_status_response_t)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    HOST_COMM_LOCK(comm);
+
+    ESP_LOGD(TAG, "Getting initiator status");
+
+    esp_err_t ret = transport_two_phase_transaction(&comm->transport,
+                                                    PANEL_CMD_GET_INITIATOR_STATUS, PANEL_ARG_IGNORED,
+                                                    NULL, 0,
+                                                    NULL, 0);
+    if (ret != ESP_OK) {
+        HOST_COMM_UNLOCK(comm);
+        return ret;
+    }
+
+    uint8_t *result_data;
+    size_t result_size;
+    ret = host_comm_poll_async_result(comm, 2000, 10, max_size, &result_data, &result_size);
+    if (ret != ESP_OK) {
+        HOST_COMM_UNLOCK(comm);
+        return ret;
+    }
+
+    size_t copy_size = (result_size < max_size) ? result_size : max_size;
+    memcpy(response, result_data, copy_size);
+    if (out_size) *out_size = copy_size;
+    ESP_LOGD(TAG, "Initiator status: phase=%u, targets_found=%u",
+             response->phase, response->targets_found);
+
+    HOST_COMM_UNLOCK(comm);
+    return ESP_OK;
+}
+#endif // CONFIG_PRODUCT_BLUESCSI
 
 esp_err_t host_comm_get_command_status(host_comm_t *comm, panel_command_status_t *status) {
     if (!host_comm_have_handle(comm) || !status) {

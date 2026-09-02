@@ -24,6 +24,9 @@
 #include "freertos/semphr.h"
 #include "transport.h"
 #include "panel_protocol_defs.h"
+#ifdef CONFIG_PRODUCT_BLUESCSI
+#include "panel_protocol_defs_initiator.h"
+#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -70,6 +73,13 @@ esp_err_t host_comm_get_playback_status(host_comm_t *comm, uint16_t device_index
 // Validated liveness probe: fetches playback status and checks it carries
 // PANEL_ALIVE_MAGIC. ESP_ERR_INVALID_RESPONSE if the transaction completed but
 // no live main board answered (e.g. reading a floating SPI bus).
+#ifdef CONFIG_PRODUCT_BLUESCSI
+// Synchronous initiator progress. Unlike host_comm_get_initiator_status(), the
+// main board answers this from its ISR, so it works while the board is imaging.
+esp_err_t host_comm_get_initiator_summary(host_comm_t *comm,
+                                          panel_initiator_summary_t *summary);
+#endif
+
 esp_err_t host_comm_probe_alive(host_comm_t *comm, uint16_t device_index);
 
 // Device list
@@ -103,6 +113,14 @@ esp_err_t host_comm_mkdir(host_comm_t *comm, const char *path, uint8_t *result_c
 // RP2350 (main board) firmware functions
 esp_err_t host_comm_get_rp2350_fw_status(host_comm_t *comm, rp2350_fw_status_t *status);
 esp_err_t host_comm_start_rp2350_update(host_comm_t *comm);
+
+#ifdef CONFIG_PRODUCT_BLUESCSI
+// Initiator (disk imaging) mode status. *out_size receives the bytes actually
+// returned; the caller must check it against response->targets_found before
+// walking the target array.
+esp_err_t host_comm_get_initiator_status(host_comm_t *comm, initiator_status_response_t *response,
+                                         size_t max_size, size_t *out_size);
+#endif
 
 // Command status polling (immediate read, doesn't interfere with running commands)
 esp_err_t host_comm_get_command_status(host_comm_t *comm, panel_command_status_t *status);

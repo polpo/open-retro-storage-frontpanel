@@ -10,6 +10,7 @@
 
 #include "test_framework.h"
 #include "panel_protocol_defs.h"
+#include "panel_protocol_defs_initiator.h"
 #include <stddef.h>
 
 // --- Struct sizes (must match the sizes the header comments promise, because
@@ -24,7 +25,11 @@ TEST(protocol_struct_sizes) {
     // 4+4+32+1+8 = 49. sizeof() is the authoritative ABI (both sides compile
     // the same struct); the prose comment is stale. Pin the real size.
     CHECK_EQ_INT(sizeof(panel_firmware_info_t), 49);
-    CHECK_EQ_INT(sizeof(panel_playback_status_t), 76);
+    CHECK_EQ_INT(sizeof(panel_playback_status_t), 75);
+    // One mode per response: the initiator's own state is its own struct.
+    // Carries the current target's identity as well as the run's progress,
+    // because the async per-target table never arrives while imaging.
+    CHECK_EQ_INT(sizeof(panel_initiator_summary_t), 45);
     CHECK_EQ_INT(sizeof(dir_entry_info_t), 68);
     CHECK_EQ_INT(sizeof(device_summary_t), 68);
     // NOTE: header comment says "212 bytes"; real packed size is 216
@@ -46,11 +51,44 @@ TEST(protocol_header_is_packed) {
 }
 
 TEST(protocol_playback_status_offsets) {
-    CHECK_EQ_INT(offsetof(panel_playback_status_t, disc_inserted), 0);
-    CHECK_EQ_INT(offsetof(panel_playback_status_t, disc_name), 8);
-    CHECK_EQ_INT(offsetof(panel_playback_status_t, device_status), 72);
-    CHECK_EQ_INT(offsetof(panel_playback_status_t, alive_magic), 73);
-    CHECK_EQ_INT(offsetof(panel_playback_status_t, tray_open), 74);
+    // alive_magic is first on purpose: a reader built against a different
+    // layout still finds it, so a version skew reads as "wrong protocol"
+    // rather than as a dead board.
+    CHECK_EQ_INT(offsetof(panel_playback_status_t, alive_magic), 0);
+    CHECK_EQ_INT(offsetof(panel_playback_status_t, protocol_version), 1);
+    CHECK_EQ_INT(offsetof(panel_playback_status_t, flags), 2);
+    CHECK_EQ_INT(offsetof(panel_playback_status_t, operating_mode), 6);
+    CHECK_EQ_INT(offsetof(panel_playback_status_t, disc_name), 11);
+
+    // The summary leads with the same three metadata bytes as the playback
+    // status, so a panel polling only this one still sees liveness, protocol
+    // version and a mode change back to target.
+    CHECK_EQ_INT(offsetof(panel_initiator_summary_t, alive_magic), 0);
+    CHECK_EQ_INT(offsetof(panel_initiator_summary_t, protocol_version), 1);
+    CHECK_EQ_INT(offsetof(panel_initiator_summary_t, operating_mode), 2);
+    CHECK_EQ_INT(offsetof(panel_initiator_summary_t, phase), 3);
+    CHECK_EQ_INT(offsetof(panel_initiator_summary_t, speed_kbps), 8);
+    CHECK_EQ_INT(offsetof(panel_initiator_summary_t, device_type), 10);
+    CHECK_EQ_INT(offsetof(panel_initiator_summary_t, sectorcount), 11);
+    CHECK_EQ_INT(offsetof(panel_initiator_summary_t, sectorsize), 15);
+    CHECK_EQ_INT(offsetof(panel_initiator_summary_t, vendor), 19);
+    CHECK_EQ_INT(offsetof(panel_initiator_summary_t, product), 28);
+    CHECK_EQ_HEX(PANEL_CMD_GET_INITIATOR_SUMMARY, 0x87);
+    // A read command, so the main board answers it in its ISR rather than
+    // deferring it to a main loop an imaging board does not reach.
+    CHECK_TRUE(PANEL_CMD_IS_READ(PANEL_CMD_GET_INITIATOR_SUMMARY));
+    CHECK_TRUE(!PANEL_CMD_IS_ASYNC(PANEL_CMD_GET_INITIATOR_SUMMARY));
+    CHECK_TRUE(PANEL_CMD_IS_ASYNC(PANEL_CMD_GET_INITIATOR_STATUS));
+
+    // Flags are single bits and KNOWN must cover exactly the defined ones.
+    CHECK_EQ_HEX(PANEL_PB_DISC_INSERTED, 0x01);
+    CHECK_EQ_HEX(PANEL_PB_PLAYING, 0x02);
+    CHECK_EQ_HEX(PANEL_PB_TRAY_OPEN, 0x04);
+    CHECK_EQ_HEX(PANEL_PB_FLAGS_KNOWN,
+                 PANEL_PB_DISC_INSERTED | PANEL_PB_PLAYING | PANEL_PB_TRAY_OPEN);
+    // The operating mode rides on this synchronous poll rather than the async
+    // GET_DEVICE_LIST, which an imaging board never completes. It reuses the
+    // old reserved byte, so the struct size must not move.
 }
 
 TEST(protocol_loaded_image_status_offsets) {
@@ -162,6 +200,64 @@ TEST(protocol_special_constants) {
     CHECK_EQ_HEX((uint16_t)(int16_t)-1, PANEL_ARG_EXTENDED);
 }
 
+/* The initiator status wire format is shared verbatim with the main board's
+ * panel_protocol_defs_initiator.h. These pin the layout so a change on either
+ * side that is not mirrored fails here rather than on a bench. */
+TEST(initiator_struct_sizes) {
+    CHECK_EQ_INT(sizeof(initiator_target_info_t), 50);
+    CHECK_EQ_INT(sizeof(initiator_status_response_t), 42);
+}
+
+TEST(initiator_status_offsets) {
+    CHECK_EQ_INT(offsetof(initiator_status_response_t, phase), 0);
+    CHECK_EQ_INT(offsetof(initiator_status_response_t, current_target_id), 1);
+    CHECK_EQ_INT(offsetof(initiator_status_response_t, initiator_id), 2);
+    CHECK_EQ_INT(offsetof(initiator_status_response_t, targets_found), 3);
+    CHECK_EQ_INT(offsetof(initiator_status_response_t, targets_imaged), 4);
+    CHECK_EQ_INT(offsetof(initiator_status_response_t, drives_imaged_mask), 5);
+    CHECK_EQ_INT(offsetof(initiator_status_response_t, speed_kbps), 6);
+    CHECK_EQ_INT(offsetof(initiator_status_response_t, current_filename), 8);
+    CHECK_EQ_INT(offsetof(initiator_status_response_t, targets), 42);
+}
+
+TEST(initiator_target_info_offsets) {
+    CHECK_EQ_INT(offsetof(initiator_target_info_t, scsi_id), 0);
+    CHECK_EQ_INT(offsetof(initiator_target_info_t, status), 3);
+    CHECK_EQ_INT(offsetof(initiator_target_info_t, sectorcount), 4);
+    CHECK_EQ_INT(offsetof(initiator_target_info_t, sectors_done), 12);
+    CHECK_EQ_INT(offsetof(initiator_target_info_t, vendor), 20);
+    CHECK_EQ_INT(offsetof(initiator_target_info_t, product), 29);
+    CHECK_EQ_INT(offsetof(initiator_target_info_t, sense_key), 46);
+    CHECK_EQ_INT(offsetof(initiator_target_info_t, skip_reason), 49);
+}
+
+/* 0x59 must stay an async write command: the main board answers it from the
+ * main loop, where the initiator state is not being mutated underneath it.
+ * Turning it into a read command would serve it from the ISR instead. */
+TEST(initiator_status_is_an_async_write_command) {
+    CHECK_EQ_HEX(PANEL_CMD_GET_INITIATOR_STATUS, 0x59);
+    CHECK_EQ_INT(PANEL_CMD_IS_READ(PANEL_CMD_GET_INITIATOR_STATUS), 0);
+    CHECK_TRUE(PANEL_CMD_IS_ASYNC(PANEL_CMD_GET_INITIATOR_STATUS));
+}
+
+/* The mode byte rides in the device list's reserved area, so an older main
+ * board that zeroes it reads as target mode. */
+TEST(initiator_mode_byte_is_backward_compatible) {
+    CHECK_EQ_INT(offsetof(device_list_response_t, reserved), 2);
+    CHECK_EQ_HEX(PANEL_MODE_TARGET, 0x00);
+    device_list_response_t list = {0};
+    CHECK_EQ_HEX(PANEL_DEVLIST_MODE(&list), PANEL_MODE_TARGET);
+}
+
+/* Listed but not loadable: the flag has to live in padding so the struct size
+ * is unchanged and an older panel simply ignores it. */
+TEST(entry_flags_fit_existing_padding) {
+    CHECK_EQ_INT(sizeof(dir_entry_info_t), 68);
+    CHECK_EQ_INT(offsetof(dir_entry_info_t, entry_type), 64);
+    CHECK_EQ_INT(offsetof(dir_entry_info_t, flags), 65);
+    CHECK_EQ_HEX(PANEL_ENTRY_FLAG_NOT_LOADABLE, 0x01);
+}
+
 void run_protocol_defs_suite(void) {
     printf("protocol_defs:\n");
     RUN(protocol_struct_sizes);
@@ -175,4 +271,10 @@ void run_protocol_defs_suite(void) {
     RUN(protocol_read_commands_have_set_direction_bit);
     RUN(protocol_command_macros);
     RUN(protocol_special_constants);
+    RUN(initiator_struct_sizes);
+    RUN(initiator_status_offsets);
+    RUN(initiator_target_info_offsets);
+    RUN(initiator_status_is_an_async_write_command);
+    RUN(initiator_mode_byte_is_backward_compatible);
+    RUN(entry_flags_fit_existing_padding);
 }

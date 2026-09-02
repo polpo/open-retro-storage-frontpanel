@@ -34,6 +34,7 @@
 #include "wifi_manager.h"
 #include "web_server.h"
 #include "interface_common.h"
+#include "panel_policy.h"
 #include "esp_netif_ip_addr.h"
 #include "ota_manager.h"
 #include "fw_version.h"
@@ -97,6 +98,9 @@ static menu_t* screen_menus[SCREEN_COUNT] = {
     [SCREEN_IDLE_MODE] = &idle_mode_menu,
     [SCREEN_IDLE_TIMEOUT] = &idle_timeout_menu,
     [SCREEN_BLANK_TIMEOUT] = &blank_timeout_menu,
+#ifdef CONFIG_PRODUCT_BLUESCSI
+    [SCREEN_INITIATOR_STATUS] = NULL,
+#endif
 };
 static host_comm_t host_comm;
 static bool host_comm_ready = false;  // True once the transport layer is up (host_comm_init succeeded)
@@ -128,6 +132,12 @@ static uint16_t active_device_index = 0;
 static uint8_t device_list_buffer[sizeof(device_list_response_t) + CONFIG_MAX_DEVICES * sizeof(device_summary_t)];
 static device_list_response_t *device_list = (device_list_response_t *)device_list_buffer;
 static bool device_list_valid = false;
+// A main board that fails GET_DEVICE_LIST fails it every time, so re-asking on
+// every status poll costs a host transaction and a warning every few seconds
+// forever. Back off instead, and warn only on the first failure of a run.
+#define DEVICE_LIST_RETRY_MS 30000
+static bool device_list_failed = false;
+static TickType_t device_list_next_try = 0;
 
 // Latest PANEL_CMD_GET_DEVICE_STATUS reply, refreshed alongside playback
 // status. Drives the LED color so SD error states (NO_CARD, WRONG_MODE) get
@@ -188,11 +198,55 @@ static char info_screen_body[256] = "";
 static activity_event_t last_activity_event = {0};
 static bool display_is_off = false;
 
+#ifdef CONFIG_PRODUCT_BLUESCSI
+// Initiator (disk imaging) mode. The main board reports the mode in the device
+// list; while it is imaging there are no emulated devices to browse.
+static uint8_t operating_mode = PANEL_MODE_TARGET;
+static uint8_t initiator_status_buffer[sizeof(initiator_status_response_t) +
+                                       8 * sizeof(initiator_target_info_t)];
+static initiator_status_response_t *initiator_status =
+    (initiator_status_response_t *)initiator_status_buffer;
+static int  initiator_target_count = 0;
+static bool initiator_status_needs_redraw = true;
+// Progress of the run, from PANEL_CMD_GET_INITIATOR_SUMMARY. That is a
+// synchronous read the main board answers from its ISR, so it arrives while the
+// board is imaging - which is exactly when the async GET_INITIATOR_STATUS, and
+// so the per-target detail, does not.
+static panel_initiator_summary_t initiator_summary;
+static void refresh_initiator_status(void);
+
+bool panel_in_initiator_mode(void) { return operating_mode == PANEL_MODE_INITIATOR; }
+const panel_initiator_summary_t *panel_get_initiator_summary(void) {
+    return &initiator_summary;
+}
+const initiator_status_response_t *panel_get_initiator_status(int *target_count) {
+    if (target_count) *target_count = initiator_target_count;
+    return initiator_status;
+}
+#endif
+
 // Computes the LED color implied by current state. Returns true via the
 // out-param when the color represents in-progress disc activity, which
 // suppresses the slow breathe so reads/writes remain clearly visible
 static rgb_color_t compute_led_state_color(bool *is_activity) {
     *is_activity = false;
+#ifdef CONFIG_PRODUCT_BLUESCSI
+    // Checked before the SD-card states below, which BlueSCSI never reports.
+    if (operating_mode == PANEL_MODE_INITIATOR) {
+        switch (initiator_status->phase) {
+            case PANEL_INITIATOR_PHASE_IMAGING:
+                // The main board blinks its status LED in proportion to imaging
+                // progress and that line drives PIN_ACT_IN, so following the pin
+                // here makes the panel blink with real SCSI reads. is_activity
+                // also suppresses the idle breathe.
+                *is_activity = true;
+                return last_activity_event.pin_state ? COLOR_GREEN : COLOR_OFF;
+            case PANEL_INITIATOR_PHASE_COMPLETE: return COLOR_BLUE;
+            case PANEL_INITIATOR_PHASE_ERROR:    return COLOR_RED;
+            default:                             return COLOR_CYAN;  // scanning
+        }
+    }
+#endif
     // SD-card error states win over the normal disc-inserted check so the
     // user sees a clearly different color than the generic "no image" idle
     switch (current_device_status) {
@@ -203,7 +257,7 @@ static rgb_color_t compute_led_state_color(bool *is_activity) {
         default:
             break;
     }
-    if (!current_playback_status.disc_inserted) {
+    if (!(current_playback_status.flags & PANEL_PB_DISC_INSERTED)) {
         return COLOR_ORANGE;  // No image loaded
     }
     if (last_activity_event.pin_state) {
@@ -243,17 +297,15 @@ static void on_display_off_state_change(bool now_off, void *ctx) {
 }
 
 // Main menu contents depend on the state of the board we're controlling: "Eject
-// Image" only if the current device has removeable media, and "Select Device"
-// only when there is more than one device. rebuild_main_menu() manages this
-#define MAIN_MENU_MAX_ITEMS 5
+// Image" only if the current device has removable media, and "Select Device"
+// only when there is more than one device. main_menu_layout() in panel_policy.c
+// decides that; rebuild_main_menu() renders it. Every row starts absent so a
+// button arriving before the first rebuild cannot alias row 0.
 static menu_item_t main_menu_items[MAIN_MENU_MAX_ITEMS];
-static struct {
-    int8_t select_image;
-    int8_t eject_image;
-    int8_t select_device;
-    int8_t settings;
-    int8_t system_info;
-} main_menu_idx;
+static main_menu_layout_t main_menu_rows = {
+    .count = 0,
+    .position = { -1, -1, -1, -1, -1 },
+};
 
 static menu_item_t settings_menu_items[] = {
     {.text = "Firmware Update", .action = MENU_ACTION_CUSTOM, .selectable = true},
@@ -393,6 +445,18 @@ static void handle_button_event(button_event_t *event) {
     
     // Handle navigation based on current screen
     switch (current_screen) {
+#ifdef CONFIG_PRODUCT_BLUESCSI
+        case SCREEN_INITIATOR_STATUS:
+            // Nothing to browse or eject while imaging; the only route off this
+            // screen is into Settings (WiFi, display, firmware).
+            if (event->button_id == 1 && event->type == BUTTON_EVENT_CLICK) {
+                current_screen = SCREEN_SETTINGS;
+                active_menu = screen_menus[current_screen];
+                if (active_menu) active_menu->needs_redraw = true;
+            }
+            break;
+#endif
+
         case SCREEN_STATUS:
             switch (event->button_id) {
                 case 0: // Up button (North) - Previous image
@@ -459,10 +523,10 @@ static void handle_button_event(button_event_t *event) {
                     if (event->type == BUTTON_EVENT_CLICK) {
                         int32_t selected = (int32_t)menu_get_selected_index(&main_menu);
 
-                        if (selected == main_menu_idx.select_device) {
+                        if (selected == main_menu_rows.position[MAIN_MENU_ROW_SELECT_DEVICE]) {
                             populate_device_menu();
                             current_screen = SCREEN_DEVICE_SELECT;
-                        } else if (selected == main_menu_idx.select_image) {
+                        } else if (selected == main_menu_rows.position[MAIN_MENU_ROW_SELECT_IMAGE]) {
                             // Refresh directory list before showing it
                             if (!disc_list_loaded && host_comm.link_up) {
                                 ESP_LOGI(TAG, "Loading directory list...");
@@ -478,7 +542,7 @@ static void handle_button_event(button_event_t *event) {
                                 disc_menu.title = "Select Image";
                             }
                             current_screen = SCREEN_DISC_LIST;
-                        } else if (selected == main_menu_idx.eject_image) {
+                        } else if (selected == main_menu_rows.position[MAIN_MENU_ROW_EJECT_IMAGE]) {
                             if (host_comm.link_up) {
                                 // Show inverted icon as eject feedback
                                 ui_draw_status_screen(&display, current_disc_name,
@@ -497,9 +561,9 @@ static void handle_button_event(button_event_t *event) {
                                     handle_comm_error(ret);
                                 }
                             }
-                        } else if (selected == main_menu_idx.settings) {
+                        } else if (selected == main_menu_rows.position[MAIN_MENU_ROW_SETTINGS]) {
                             current_screen = SCREEN_SETTINGS;
-                        } else if (selected == main_menu_idx.system_info) {
+                        } else if (selected == main_menu_rows.position[MAIN_MENU_ROW_SYSTEM_INFO]) {
                             info_return_screen = SCREEN_MAIN_MENU;
                             current_screen = SCREEN_INFO;
                             const esp_app_desc_t* info_app_desc = esp_app_get_description();
@@ -625,6 +689,16 @@ static void handle_button_event(button_event_t *event) {
                     break;
                 case 3: // Back button (West)
                     if (event->type == BUTTON_EVENT_CLICK) {
+#ifdef CONFIG_PRODUCT_BLUESCSI
+                        // Initiator mode never reaches the main menu, so Back
+                        // has to return to the screen the user came from.
+                        if (operating_mode == PANEL_MODE_INITIATOR) {
+                            current_screen = SCREEN_INITIATOR_STATUS;
+                            active_menu = NULL;
+                            initiator_status_needs_redraw = true;
+                            break;
+                        }
+#endif
                         current_screen = SCREEN_MAIN_MENU;
                     }
                     break;
@@ -957,6 +1031,9 @@ static const char *const screen_names[SCREEN_COUNT] = {
     "SCREEN_IDLE_MODE", "SCREEN_IDLE_TIMEOUT", "SCREEN_BLANK_TIMEOUT",
     "SCREEN_INFO", "SCREEN_FIRMWARE_UPDATE", "SCREEN_FIRMWARE_STATUS",
     "SCREEN_DEVICE_SELECT",
+#ifdef CONFIG_PRODUCT_BLUESCSI
+    "SCREEN_INITIATOR_STATUS",
+#endif
 };
 _Static_assert(sizeof(screen_names) / sizeof(screen_names[0]) == SCREEN_COUNT,
                "screen_names is out of step with screen_type_t");
@@ -1131,6 +1208,11 @@ static void redraw_current_screen(void) {
         case SCREEN_FIRMWARE_STATUS:
             draw_firmware_status_screen();
             break;
+#ifdef CONFIG_PRODUCT_BLUESCSI
+        case SCREEN_INITIATOR_STATUS:
+            initiator_status_needs_redraw = true;
+            break;
+#endif
         case SCREEN_FIRMWARE_UPDATE:
         case SCREEN_SPLASH:
         default:
@@ -1170,6 +1252,15 @@ static void display_update_task(void *pvParameters) {
 
             if (display_manager_screensaver_active(&display)) {
                 display_manager_screensaver_tick(&display);
+#ifdef CONFIG_PRODUCT_BLUESCSI
+            } else if (current_screen == SCREEN_INITIATOR_STATUS) {
+                if (screen_changed || initiator_status_needs_redraw) {
+                    ui_draw_initiator_screen(&display, initiator_status,
+                                             initiator_target_count,
+                                             &initiator_summary);
+                    initiator_status_needs_redraw = false;
+                }
+#endif
             } else if (current_screen == SCREEN_STATUS) {
                 if (screen_changed || status_needs_redraw) {
                     // Full redraw when entering status screen or status changed
@@ -1281,12 +1372,30 @@ static void status_refresh_task(void *pvParameters) {
         if (display.state == DISPLAY_STATE_OFF) {
             // Screen off: no need to poll at all
             poll_interval_ms = 0;
+#ifdef CONFIG_PRODUCT_BLUESCSI
+        } else if ((operating_mode == PANEL_MODE_INITIATOR ||
+                    current_screen == SCREEN_INITIATOR_STATUS) && host_comm.link_up) {
+            // Not gated on the current screen: the web UI wants fresh progress
+            // even while the OLED is showing a menu. The screen is checked as
+            // well as the mode so that a panel which reached the initiator
+            // screen keeps polling even if it has since read TARGET back - it
+            // would otherwise match no arm of this chain, stop polling, and be
+            // unable to ever learn the mode again.
+            switch (initiator_status->phase) {
+                case PANEL_INITIATOR_PHASE_IMAGING:  poll_interval_ms = 500;  break;
+                case PANEL_INITIATOR_PHASE_SCANNING: poll_interval_ms = 2000; break;
+                default:                             poll_interval_ms = 5000; break;
+            }
+            // Also polls the mode, so leaving initiator mode is noticed here.
+            refresh_playback_status();
+            refresh_initiator_status();
+#endif
         } else if (current_screen == SCREEN_STATUS && host_comm.link_up) {
             if (current_device_type == PANEL_DEVICE_TYPE_IDE ||
                 current_device_type == PANEL_DEVICE_TYPE_SCSI) {
                 // HDD: image can only change via web UI, poll infrequently
                 poll_interval_ms = 5000;
-            } else if (!current_playback_status.is_playing) {
+            } else if (!(current_playback_status.flags & PANEL_PB_PLAYING)) {
                 // ATAPI with no audio playing: poll less frequently
                 poll_interval_ms = 5000;
             } else {
@@ -1350,12 +1459,41 @@ static void refresh_playback_status(void) {
         return;
     }
 
-    // The main board is alive. If we didn't get a device list at startup, fetch
-    // it now Note that an empty device list is possible, for example with
-    // BlueSCSI in initiator mode
-    if (!device_list_valid) {
+#ifdef CONFIG_PRODUCT_BLUESCSI
+    // The board reports its mode on every poll. This is the only carrier that
+    // survives an imaging board: GET_DEVICE_LIST is async and never completes
+    // while the initiator is on the bus, so operating_mode would otherwise stay
+    // TARGET forever and the initiator screen would be unreachable.
+    uint8_t prev_mode = operating_mode;
+    operating_mode = current_playback_status.operating_mode;
+
+    // The boot path picks a screen once. A board that changes mode under a live
+    // panel - finishing an imaging run, or being rebooted into one - has to move
+    // the panel with it, or the display sits on a screen for the wrong mode.
+    // Only from the two status screens, so a user in a menu is left alone.
+    if (operating_mode != prev_mode) {
+        if (operating_mode == PANEL_MODE_INITIATOR && current_screen == SCREEN_STATUS) {
+            current_screen = SCREEN_INITIATOR_STATUS;
+            active_menu = NULL;
+            initiator_status_needs_redraw = true;
+        } else if (operating_mode == PANEL_MODE_TARGET &&
+                   current_screen == SCREEN_INITIATOR_STATUS) {
+            current_screen = SCREEN_STATUS;
+            active_menu = screen_menus[current_screen];
+            status_needs_redraw = true;
+        }
+    }
+
+#endif
+
+    // The main board is alive but we have no usable device list. Either the
+    // command failed, or the list came back empty — which BlueSCSI reports while
+    // it is in initiator mode, and stops reporting once imaging ends. Re-ask on
+    // the backoff so both recover without a link flap.
+    if ((!device_list_valid || device_count == 0) &&
+        (int32_t)(xTaskGetTickCount() - device_list_next_try) >= 0) {
         refresh_device_list();
-        if (device_list_valid && select_default_device()) {
+        if (select_default_device()) {
             refresh_device_type();
         }
     }
@@ -1411,20 +1549,66 @@ static void refresh_playback_status(void) {
     handle_activity_event(&event);
 }
 
-// Function to refresh device type from host
+// Refresh the device type and rebuild the main menu for the settled device. The
+// rebuild is unconditional: it is the commit point of the ordering contract in
+// on_host_link_established(), so a failed status fetch must not leave the menu
+// describing whichever device was active before.
 static void refresh_device_type(void) {
+    loaded_image_status_t status;
+    if (host_comm.link_up &&
+        host_comm_get_loaded_image_status(&host_comm, active_device_index, &status) == ESP_OK) {
+        current_device_type = status.device_type;
+        ESP_LOGI(TAG, "Device type: %u", current_device_type);
+    }
+    rebuild_main_menu();
+}
+
+#ifdef CONFIG_PRODUCT_BLUESCSI
+static void refresh_initiator_status(void) {
     if (!host_comm.link_up) {
         return;
     }
 
-    loaded_image_status_t status;
-    esp_err_t ret = host_comm_get_loaded_image_status(&host_comm, active_device_index, &status);
-    if (ret == ESP_OK) {
-        current_device_type = status.device_type;
-        ESP_LOGI(TAG, "Device type: %u", current_device_type);
-        rebuild_main_menu();
+    // The summary always answers, so take it first and redraw from it. The
+    // per-target detail below is a bonus that only arrives between bus
+    // transfers; the screen must not depend on it.
+    if (host_comm_get_initiator_summary(&host_comm, &initiator_summary) == ESP_OK) {
+        operating_mode = initiator_summary.operating_mode;
+        initiator_status_needs_redraw = true;
     }
+
+    size_t size = 0;
+    esp_err_t ret = host_comm_get_initiator_status(&host_comm, initiator_status,
+                                                   sizeof(initiator_status_buffer), &size);
+    if (ret != ESP_OK) {
+        // A spinning-up drive keeps the main board on the SCSI bus for up to a
+        // minute, during which it defers every panel command and this times
+        // out. That is normal, not a dead link, so keep showing the last status
+        // instead of tearing the link down mid-imaging.
+        if (ret != ESP_ERR_TIMEOUT) {
+            handle_comm_error(ret);
+        }
+        ESP_LOGD(TAG, "Initiator status unavailable: %s", esp_err_to_name(ret));
+        return;
+    }
+
+    // targets_found is the authoritative array length; refuse to walk past
+    // what actually arrived.
+    int count = initiator_status->targets_found;
+    size_t needed = sizeof(initiator_status_response_t) +
+                    (size_t)count * sizeof(initiator_target_info_t);
+    if (count < 0 || needed > size || needed > sizeof(initiator_status_buffer)) {
+        ESP_LOGW(TAG, "Initiator status truncated: %u targets in %u bytes",
+                 (unsigned)count, (unsigned)size);
+        count = (int)((size - sizeof(initiator_status_response_t)) /
+                      sizeof(initiator_target_info_t));
+        if (count < 0) count = 0;
+    }
+    initiator_target_count = count;
+    initiator_status_needs_redraw = true;
+    refresh_led_state();
 }
+#endif
 
 // Function to refresh device list from host
 static void refresh_device_list(void) {
@@ -1432,13 +1616,26 @@ static void refresh_device_list(void) {
         return;
     }
 
+    device_list_next_try = xTaskGetTickCount() + pdMS_TO_TICKS(DEVICE_LIST_RETRY_MS);
+
     esp_err_t ret = host_comm_get_device_list(&host_comm, device_list, sizeof(device_list_buffer));
     if (ret == ESP_OK) {
         device_count = device_list->device_count;
         device_list_valid = true;
+        device_list_failed = false;
+#ifdef CONFIG_PRODUCT_BLUESCSI
+        // Read it here rather than once at startup so a main board that reboots
+        // into the other mode is picked up without restarting the panel. The
+        // empty-list re-poll in refresh_playback_status() is what gets us back
+        // here while imaging, so the switch is noticed without a link flap.
+        operating_mode = PANEL_DEVLIST_MODE(device_list);
+#endif
         ESP_LOGI(TAG, "Device list: %u devices (max %u)", device_count, device_list->max_devices);
     } else {
-        ESP_LOGW(TAG, "Failed to get device list: %s (single device assumed)", esp_err_to_name(ret));
+        if (!device_list_failed) {
+            ESP_LOGW(TAG, "Failed to get device list: %s (single device assumed)", esp_err_to_name(ret));
+            device_list_failed = true;
+        }
         // Assume single device if command not supported
         device_count = 1;
         device_list_valid = false;
@@ -1446,43 +1643,16 @@ static void refresh_device_list(void) {
     rebuild_main_menu();
 }
 
-// Device types whose media is removable. category a future main board reports
-// that we do not know about - is never treated as ejectable. These are the
-// devices a user is most likely to want selected on the panel. Mirrors
-// EJECTABLE_TYPES in www/app.js: keep the two in sync.
-static bool device_type_is_removable(uint8_t device_type) {
-    switch (device_type) {
-        case PANEL_DEV_CATEGORY_REMOVABLE:
-        case PANEL_DEV_CATEGORY_OPTICAL:
-        case PANEL_DEV_CATEGORY_FLOPPY:
-        case PANEL_DEV_CATEGORY_MO:
-        case PANEL_DEV_CATEGORY_ZIP:
-            return true;
-        default:
-            return false;
-    }
-}
-
-// Whether the active device's media is removable.
+// Whether the active device's media is removable. Without a device list there
+// is nothing to classify against: current_device_type is no substitute, being a
+// PANEL_DEVICE_TYPE_* rather than a PANEL_DEV_CATEGORY_*, and BlueSCSI reports
+// PANEL_DEVICE_TYPE_SCSI for every device whatever its media. IDE is the only
+// value that rules removable media out, so keep offering Eject for anything
+// else and let the main board refuse what it cannot do.
 static bool active_device_is_removable(void) {
-    if (device_list_valid) {
-        for (uint8_t i = 0; i < device_list->device_count; i++) {
-            if (device_list->devices[i].device_index == active_device_index) {
-                return device_type_is_removable(device_list->devices[i].device_type);
-            }
-        }
-    }
-    return current_device_type == PANEL_DEVICE_TYPE_ATAPI;
-}
-
-static void main_menu_append(uint32_t *count, const char *text, int8_t *slot) {
-    menu_item_t *item = &main_menu_items[*count];
-    strncpy(item->text, text, MENU_ITEM_MAX_LENGTH - 1);
-    item->text[MENU_ITEM_MAX_LENGTH - 1] = '\0';
-    item->action = MENU_ACTION_CUSTOM;
-    item->selectable = true;
-    *slot = (int8_t)(*count);
-    (*count)++;
+    return device_list_is_removable(device_list_valid ? device_list : NULL,
+                                    active_device_index,
+                                    current_device_type != PANEL_DEVICE_TYPE_IDE);
 }
 
 // Rebuild the main menu for the currently active device.
@@ -1500,24 +1670,17 @@ static void rebuild_main_menu(void) {
     built_ejectable = ejectable;
     built_multi = multi;
 
-    main_menu_idx.select_image = -1;
-    main_menu_idx.eject_image = -1;
-    main_menu_idx.select_device = -1;
-    main_menu_idx.settings = -1;
-    main_menu_idx.system_info = -1;
-
-    uint32_t count = 0;
-    main_menu_append(&count, "Select Image", &main_menu_idx.select_image);
-    if (ejectable) {
-        main_menu_append(&count, "Eject Image", &main_menu_idx.eject_image);
+    main_menu_layout(ejectable, multi, &main_menu_rows);
+    for (uint32_t i = 0; i < main_menu_rows.count; i++) {
+        menu_item_t *item = &main_menu_items[i];
+        strncpy(item->text, main_menu_row_text(main_menu_rows.rows[i]),
+                MENU_ITEM_MAX_LENGTH - 1);
+        item->text[MENU_ITEM_MAX_LENGTH - 1] = '\0';
+        item->action = MENU_ACTION_CUSTOM;
+        item->selectable = true;
     }
-    if (multi) {
-        main_menu_append(&count, "Select Device", &main_menu_idx.select_device);
-    }
-    main_menu_append(&count, "Settings", &main_menu_idx.settings);
-    main_menu_append(&count, "System Info", &main_menu_idx.system_info);
 
-    menu_set_items(&main_menu, main_menu_items, count);
+    menu_set_items(&main_menu, main_menu_items, main_menu_rows.count);
 }
 
 // Choose the device shown on the panel by default. Prefer the first removable
@@ -1531,7 +1694,7 @@ static bool select_default_device(void) {
     }
 
     for (uint8_t i = 0; i < device_list->device_count; i++) {
-        if (device_type_is_removable(device_list->devices[i].device_type)) {
+        if (device_category_is_removable(device_list->devices[i].device_type)) {
             active_device_index = device_list->devices[i].device_index;
             interface_ctx.active_device_index = active_device_index;
             ESP_LOGI(TAG, "Default device -> removable %u (%s)",
@@ -1591,10 +1754,10 @@ static const char* get_active_device_label(void) {
 // board. Called from every path that establishes the link.
 static void on_host_link_established(void) {
     // Settle on the active device BEFORE reading its type, so current_device_type
-    // describes the device we actually landed on. refresh_device_list() and
-    // refresh_device_type() each call rebuild_main_menu(), and the last one wins:
-    // it decides the "Eject Image" row from the settled device's removability and
-    // the "Select Device" row from the device count.
+    // describes the device we actually landed on. refresh_device_type() rebuilds
+    // the main menu last, deciding the "Eject Image" row from the settled
+    // device's removability and the "Select Device" row from the device count.
+    device_list_next_try = 0;
     refresh_device_list();
     select_default_device();
     refresh_device_type();
@@ -2527,16 +2690,39 @@ void app_main(void) {
 
     led_stop_pulse();
 
-    current_screen = SCREEN_STATUS;
-    active_menu = screen_menus[current_screen];
+    // Learn the operating mode before choosing a screen. This poll is the only
+    // thing an imaging board reliably answers, so it has to happen before the
+    // branch below rather than inside the target arm.
     refresh_playback_status();
-    ui_draw_status_screen(&display, current_disc_name,
-                          &current_image_status,
-                          &current_playback_status, disc_name_changed,
-                          get_active_device_label(),
-                          false);
-    disc_name_changed = false;
-    status_needs_redraw = false;
+
+#ifdef CONFIG_PRODUCT_BLUESCSI
+    if (operating_mode == PANEL_MODE_INITIATOR) {
+        current_screen = SCREEN_INITIATOR_STATUS;
+        active_menu = NULL;
+        refresh_initiator_status();
+        ui_draw_initiator_screen(&display, initiator_status, initiator_target_count,
+                                 &initiator_summary);
+        initiator_status_needs_redraw = false;
+    } else
+#endif
+    {
+        current_screen = SCREEN_STATUS;
+        active_menu = screen_menus[current_screen];
+        ui_draw_status_screen(&display, current_disc_name,
+                              &current_image_status,
+                              &current_playback_status, disc_name_changed,
+                              get_active_device_label(),
+                              false);
+        disc_name_changed = false;
+        status_needs_redraw = false;
+    }
+
+#ifdef CONFIG_PANEL_TEST_HOOKS
+    // The boot path sets current_screen directly rather than going through the
+    // button handler, so publish here or the first /api/ui read reports a
+    // screen of NULL - which is how the initiator screen looked untestable.
+    panel_publish_ui_state();
+#endif
 
     // Set LED based on image loaded state
     activity_event_t init_event = { .pin_state = gpio_get_level(PIN_ACT_IN) };

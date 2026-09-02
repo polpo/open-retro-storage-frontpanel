@@ -38,6 +38,9 @@ typedef enum {
     SCREEN_FIRMWARE_UPDATE,
     SCREEN_FIRMWARE_STATUS,
     SCREEN_DEVICE_SELECT,
+#ifdef CONFIG_PRODUCT_BLUESCSI
+    SCREEN_INITIATOR_STATUS,
+#endif
     SCREEN_COUNT  // Sentinel - must be last
 } screen_type_t;
 
@@ -47,6 +50,14 @@ esp_err_t ui_update_splash_version(display_manager_t *display, const char *versi
 esp_err_t ui_draw_menu(display_manager_t *display, menu_t *menu);
 esp_err_t ui_draw_disc_list(display_manager_t *display, menu_t *menu);
 esp_err_t ui_draw_status_bar(display_manager_t *display, const char *status);
+#ifdef CONFIG_PRODUCT_BLUESCSI
+// Initiator (disk imaging) status. target_count is the validated length of
+// status->targets[], taken from the response's targets_found.
+esp_err_t ui_draw_initiator_screen(display_manager_t *display,
+                                   const initiator_status_response_t *status,
+                                   int target_count,
+                                   const panel_initiator_summary_t *summary);
+#endif
 esp_err_t ui_draw_info_screen(display_manager_t *display, const char *title, const char *info);
 esp_err_t ui_draw_firmware_update(display_manager_t *display, const char *status, uint8_t progress);
 esp_err_t ui_draw_status_screen(display_manager_t *display, const char *disc_name,
