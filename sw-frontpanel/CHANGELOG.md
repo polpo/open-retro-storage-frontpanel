@@ -1,4 +1,4 @@
-# v0.4.1
+# v0.5.0
 
 - One BlueSCSI firmware image for all boards: the panel auto-detects the host
   transport (v2 = I2C, Ultra/Ultra Wide = SPI) at boot and remembers it, so
