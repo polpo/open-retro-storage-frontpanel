@@ -1419,7 +1419,6 @@ async function uploadPanelFirmware() {
 }
 // #endif
 
-// Initialize the page (serialize requests to avoid overwhelming ESP32)
 // #ifdef PRODUCT_BLUESCSI
 const INITIATOR_SKIP_TEXT = {
     1: 'Larger than 4GB - the SD card needs to be exFAT',
@@ -1509,6 +1508,7 @@ async function refreshInitiator() {
 }
 // #endif
 
+// Initialize the page (serialize requests to avoid overwhelming ESP32)
 document.addEventListener('DOMContentLoaded', async function() {
     await loadSystemInfo();
     await refreshDevices();

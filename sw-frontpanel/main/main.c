@@ -1563,7 +1563,6 @@ static void refresh_device_type(void) {
     rebuild_main_menu();
 }
 
-// Function to refresh device list from host
 #ifdef CONFIG_PRODUCT_BLUESCSI
 static void refresh_initiator_status(void) {
     if (!host_comm.link_up) {
@@ -1611,6 +1610,7 @@ static void refresh_initiator_status(void) {
 }
 #endif
 
+// Function to refresh device list from host
 static void refresh_device_list(void) {
     if (!host_comm.link_up) {
         return;
