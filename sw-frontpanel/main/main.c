@@ -2730,11 +2730,28 @@ void app_main(void) {
 
     ESP_LOGI(TAG, "System initialized successfully");
 
-    // If we booted from a new OTA firmware, mark it as valid now that init succeeded
+    // If we booted from a new OTA firmware
+    ota_update_source_t ota_source = ota_manager_take_update_source();
     const esp_partition_t *running = esp_ota_get_running_partition();
     esp_ota_img_states_t ota_state;
     if (esp_ota_get_state_partition(running, &ota_state) == ESP_OK) {
         if (ota_state == ESP_OTA_IMG_PENDING_VERIFY) {
+            if (ota_source == OTA_SOURCE_HOST &&
+                // If the new firmware came from the main board, rollback if we can't
+                // talk to the main board. The main board stays up during an OTA update
+                // driven by it, so it should be immediately available for the aliveness
+                // check.
+                (host_comm_probe_alive(&host_comm, 0) != ESP_OK ||
+                 host_comm_probe_alive(&host_comm, 0) != ESP_OK)) {
+                ESP_LOGE(TAG, "New firmware came from the main board but the main board is not responding; rolling back");
+                ui_draw_firmware_update(&display, "No main board, rolling back", 0);
+                led_set_color(COLOR_RED);
+                vTaskDelay(pdMS_TO_TICKS(3000));
+                esp_err_t rb_ret = esp_ota_mark_app_invalid_rollback_and_reboot();
+                // Only returns if there is no valid image to roll back to, in
+                // which case this image is all we have, so keep it.
+                ESP_LOGW(TAG, "Rollback not possible (%s), keeping new firmware", esp_err_to_name(rb_ret));
+            }
             ESP_LOGI(TAG, "New firmware verified successfully, cancelling rollback");
             esp_ota_mark_app_valid_cancel_rollback();
         }
