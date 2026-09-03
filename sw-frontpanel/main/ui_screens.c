@@ -899,18 +899,18 @@ static const char* initiator_device_type_str(uint8_t device_type) {
     }
 }
 
-/* Human-readable size. Everything is cast to unsigned long long because
- * `long` is 32-bit on the ESP32 and these are 64-bit byte counts. */
+/* Human-readable size. The 64-bit byte count is reduced to a 32-bit KiB count
+ * before formatting: the nano printf this firmware links against has no 64-bit
+ * conversions, and 32 bits of KiB covers everything up to 4 TB. */
 static void format_size(char *buf, size_t buf_size, uint64_t bytes) {
-    const uint64_t gib = (uint64_t)1024 * 1024 * 1024;
-    if (bytes >= gib) {
-        snprintf(buf, buf_size, "%llu.%llu GB",
-                 (unsigned long long)(bytes / gib),
-                 (unsigned long long)((bytes % gib) * 10 / gib));
-    } else if (bytes >= 1024 * 1024) {
-        snprintf(buf, buf_size, "%llu MB", (unsigned long long)(bytes / (1024 * 1024)));
+    const unsigned long mib = 1024 * 1024;
+    unsigned long kib = (unsigned long)(bytes / 1024);
+    if (kib >= mib) {  // >= 1GB
+        snprintf(buf, buf_size, "%lu.%lu GB", kib / mib, (kib % mib) * 10 / mib);
+    } else if (kib >= 1024) { // >= 1MB
+        snprintf(buf, buf_size, "%lu MB", kib / 1024);
     } else {
-        snprintf(buf, buf_size, "%llu KB", (unsigned long long)(bytes / 1024));
+        snprintf(buf, buf_size, "%lu KB", kib);
     }
 }
 
@@ -952,7 +952,7 @@ static void initiator_trim(char *dst, size_t dst_size, const char *src, size_t s
 static void initiator_fit_filename(char *dst, size_t dst_size, const char *name, int max_chars) {
     int len = (int)strlen(name);
     if (len <= max_chars) {
-        snprintf(dst, dst_size, "%s", name);
+        strlcpy(dst, name, dst_size);
     } else {
         snprintf(dst, dst_size, "\xe2\x80\xa6%s", name + (len - max_chars + 1));
     }
