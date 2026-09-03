@@ -39,8 +39,5 @@ CONFIG_LOG_MAXIMUM_LEVEL_WARN=y
 # The panel is IPv4-only (mDNS and the web UI both work over IPv4). (~28 KB)
 CONFIG_LWIP_IPV6=n
 
-# No esp_err_t name table; errors log as numeric codes. (~8 KB)
-CONFIG_ESP_ERR_TO_NAME_LOOKUP=n
-
 # WPA2/3-Enterprise is not supported by the WiFi setup UI.
 CONFIG_ESP_WIFI_ENTERPRISE_SUPPORT=n
