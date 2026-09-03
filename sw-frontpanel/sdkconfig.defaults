@@ -1,5 +1,9 @@
 # Common sdkconfig defaults for all product variants
 
+# The panel is an ESP32-C3. Pin it so a fresh build dir cannot default to
+# plain esp32, which builds and links but cannot run on the hardware.
+CONFIG_IDF_TARGET="esp32c3"
+
 # Custom partition table with OTA support
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
