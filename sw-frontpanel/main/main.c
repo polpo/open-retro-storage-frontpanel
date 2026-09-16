@@ -2431,6 +2431,7 @@ void app_main(void) {
     }
     ESP_ERROR_CHECK(nvs_ret);
 
+#ifndef CONFIG_PANEL_NO_DISPLAY
     // Initialize shared SPI bus with MISO enabled for host communication
     spi_bus_config_t bus_config = {
         .mosi_io_num = PIN_SPI_MOSI,
@@ -2448,6 +2449,9 @@ void app_main(void) {
     }
     ESP_LOGI(TAG, "Shared SPI bus initialized (MISO: %d, MOSI: %d, CLK: %d)",
              PIN_SPI_MISO, PIN_SPI_MOSI, PIN_SPI_CLK);
+#else
+    esp_err_t ret;
+#endif
 
     ret = display_manager_init(&display);
     if (ret != ESP_OK) {

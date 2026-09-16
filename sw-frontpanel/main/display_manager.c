@@ -20,6 +20,7 @@
 #include "esp_timer.h"
 #include "esp_random.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "driver/spi_master.h"
 #include "nvs.h"
 #include "gpio_pins.h"
@@ -67,11 +68,30 @@ static void sh1107_power_on(u8g2_t *u8g2) {
     u8g2_SetContrast(u8g2, 255);
 }
 
+#ifdef CONFIG_PANEL_NO_DISPLAY
+// Headless build (no OLED wired). u8g2 keeps rendering into its RAM frame
+// buffer, so the web UI and the test hooks see the same screen as a panel with
+// a display; these callbacks just swallow what would have gone out the SPI bus.
+static uint8_t display_null_byte_cb(u8x8_t *u8x8, uint8_t msg, uint8_t arg_int, void *arg_ptr) {
+    (void)u8x8; (void)msg; (void)arg_int; (void)arg_ptr;
+    return 1;
+}
+
+static uint8_t display_null_gpio_cb(u8x8_t *u8x8, uint8_t msg, uint8_t arg_int, void *arg_ptr) {
+    (void)u8x8; (void)arg_int; (void)arg_ptr;
+    if (msg == U8X8_MSG_DELAY_MILLI) {
+        vTaskDelay(pdMS_TO_TICKS(arg_int));
+    }
+    return 1;
+}
+#endif
+
 esp_err_t display_manager_init(display_manager_t *display) {
     if (!display) {
         return ESP_ERR_INVALID_ARG;
     }
 
+#ifndef CONFIG_PANEL_NO_DISPLAY
     // Configure u8g2 HAL to use the existing SPI bus (initialized in main.c)
     u8g2_esp32_hal_t u8g2_esp32_hal = U8G2_ESP32_HAL_DEFAULT;
     u8g2_esp32_hal.bus.spi.clk = PIN_SPI_CLK;
@@ -88,6 +108,11 @@ esp_err_t display_manager_init(display_manager_t *display) {
     u8g2_Setup_sh1107_64x128_f(&display->u8g2, U8G2_R3, 
                                 u8g2_esp32_spi_byte_cb, 
                                 u8g2_esp32_gpio_and_delay_cb);
+#else
+    u8g2_Setup_sh1107_64x128_f(&display->u8g2, U8G2_R3,
+                                display_null_byte_cb,
+                                display_null_gpio_cb);
+#endif
 
     sh1107_power_on(&display->u8g2);
     u8g2_ClearDisplay(&display->u8g2);  // blank power-on garbage before the first draw
