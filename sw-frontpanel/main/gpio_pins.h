@@ -17,6 +17,53 @@
 #pragma once
 
 #include "driver/gpio.h"
+#include "sdkconfig.h"
+
+#ifdef CONFIG_PANEL_BOARD_C3_SUPERMINI
+
+// ESP32-C3 SuperMini (DIY, web UI only).
+//
+// That board brings out GPIO0-10, GPIO20 and GPIO21 and nothing else: GPIO18
+// and GPIO19 are wired to its USB-C data lines, and GPIO11-17 are the module's
+// SPI flash. Three of the remaining pins are spoken for by the board itself -
+// GPIO8 drives the onboard blue LED, GPIO9 is the BOOT button, GPIO2 carries
+// the strapping pull-up - and GPIO20/21 are the UART console. That leaves
+// GPIO0, 1, 3, 4, 5, 6, 7 and 10 free, which is not enough for the OLED as
+// well, so this board builds with CONFIG_PANEL_NO_DISPLAY.
+
+// Host interface (I2C to a BlueSCSI v2: GPIO3 -> Pico GPIO16,
+// GPIO10 -> Pico GPIO17, plus 2.2k pull-ups to 3V3 on both).
+#define PIN_SDA         GPIO_NUM_3
+#define PIN_SCL         GPIO_NUM_10
+
+// Activity indicator input (from main board). Unconnected on most DIY builds,
+// so gpio_handler pulls it up - a floating pin would storm the edge ISR.
+#define PIN_ACT_IN      GPIO_NUM_0
+
+// LED output (WS2812B addressable LED strip), optional.
+#define PIN_LED_OUT     GPIO_NUM_1
+
+// Navigation buttons, optional: wire each to GND, the inputs are pulled up.
+#define PIN_NAV_UP      GPIO_NUM_4
+#define PIN_NAV_DOWN    GPIO_NUM_5
+#define PIN_NAV_LEFT    GPIO_NUM_6
+#define PIN_NAV_RIGHT   GPIO_NUM_7
+
+// UART interface (USB-C console)
+#define PIN_UART_TX     GPIO_NUM_21
+
+// No OLED and no SPI host link on this board: nothing is left to put them on.
+// These stay defined so the SPI paths still compile; they are never brought up
+// (CONFIG_PANEL_NO_DISPLAY skips the bus, and the host transport is forced to
+// I2C in Kconfig).
+#define PIN_OLED_CS     GPIO_NUM_NC
+#define PIN_OLED_DC     GPIO_NUM_NC
+#define PIN_SPI_MISO    GPIO_NUM_NC
+#define PIN_SPI_CLK     GPIO_NUM_NC
+#define PIN_SPI_MOSI    GPIO_NUM_NC
+#define PIN_HOST_CS     GPIO_NUM_NC
+
+#else
 
 // OLED Display control pins (SPI mode)
 #define PIN_OLED_CS     GPIO_NUM_0   // Chip Select for SPI OLED
@@ -48,6 +95,8 @@
 
 // UART interface
 #define PIN_UART_TX     GPIO_NUM_21
+
+#endif // CONFIG_PANEL_BOARD_C3_SUPERMINI
 
 // LED strip configuration
 #define LED_STRIP_GPIO_NUM  PIN_LED_OUT
