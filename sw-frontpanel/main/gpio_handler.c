@@ -428,7 +428,13 @@ esp_err_t gpio_handler_configure_activity_pin(gpio_num_t gpio_num) {
     gpio_config_t io_conf = {
         .pin_bit_mask = (1ULL << gpio_num),
         .mode = GPIO_MODE_INPUT,
+        // DIY builds usually leave this pin unconnected; without a pull-up a
+        // floating input storms the any-edge ISR. The panel PCB drives it.
+#ifdef CONFIG_PANEL_BOARD_C3_SUPERMINI
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+#else
         .pull_up_en = GPIO_PULLUP_DISABLE,
+#endif
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
         .intr_type = GPIO_INTR_ANYEDGE
     };

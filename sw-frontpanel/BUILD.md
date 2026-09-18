@@ -31,10 +31,12 @@ and run the same `idf.py` commands.
 The product is chosen by layering a per-product defaults file on top of the
 common `sdkconfig.defaults`:
 
-| Product                          | Defaults files                 | Firmware output           |
-| -------------------------------- | ------------------------------ | ------------------------- |
-| PicoIDE                          | `sdkconfig.defaults.picoide`   | `picoide-frontpanel.bin`  |
-| BlueSCSI (v2 / Ultra, one image) | `sdkconfig.defaults.bluescsi`  | `bluescsi-frontpanel.bin` |
+| Product                          | Defaults files                    | Firmware output               |
+| -------------------------------- | --------------------------------- | ----------------------------- |
+| PicoIDE                          | `sdkconfig.defaults.picoide`      | `picoide-frontpanel.bin`      |
+| BlueSCSI (v2 / Ultra, one image) | `sdkconfig.defaults.bluescsi`     | `bluescsi-frontpanel.bin`     |
+| PicoIDE, DIY SuperMini           | `sdkconfig.defaults.picoide-diy`  | `picoide-frontpanel-diy.bin`  |
+| BlueSCSI, DIY SuperMini          | `sdkconfig.defaults.bluescsi-diy` | `bluescsi-frontpanel-diy.bin` |
 
 Build each product into its **own build directory** (`-B build-<product>`) with
 its **own `sdkconfig`** (`-DSDKCONFIG=build-<product>/sdkconfig`). Both flags are
@@ -67,13 +69,50 @@ idf.py -B build-picoide \
 
 Output: `build-picoide/picoide-frontpanel.bin`
 
+### DIY ESP32-C3 SuperMini
+
+A bare SuperMini wired to a main board with jumpers, driven entirely from the
+web UI — the board has no room for the OLED or the navigation buttons. Swap
+`bluescsi-diy` for `picoide-diy` to build the PicoIDE image.
+
+```bash
+idf.py -B build-bluescsi-diy \
+  -DSDKCONFIG=build-bluescsi-diy/sdkconfig \
+  -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.bluescsi-diy" \
+  build
+```
+
+Output: `build-bluescsi-diy/bluescsi-frontpanel-diy.bin`
+
+Both host transports are wired, so the BlueSCSI image auto-detects v2 (I2C)
+and Ultra/Ultra Wide (SPI) the same way the shipping one does. PicoIDE is SPI.
+
+| SuperMini | Host        | Transport |
+| --------- | ----------- | --------- |
+| GPIO3     | SDA         | I2C       |
+| GPIO10    | SCL         | I2C       |
+| GPIO6     | SCK         | SPI       |
+| GPIO7     | MOSI        | SPI       |
+| GPIO5     | MISO        | SPI       |
+| GPIO4     | CS          | SPI       |
+| GND       | GND         | both      |
+
+I2C needs a 2.2k pull-up from each of SDA and SCL to 3V3 — the panel PCB
+normally supplies those, and the 1 MHz link will not come up without them.
+
+On a BlueSCSI v2, SDA and SCL are GPIO16 and GPIO17, broken out on the Qwiic
+connector, and `EnableFrontPanel = Yes` in `[SCSI]` of `bluescsi.ini` gates the
+host side.
+
 ## Flashing and monitoring
 
 Replace the port to match your board (e.g. `/dev/ttyACM0`, `/dev/ttyUSB0`):
 
 ```bash
-idf.py -B build-bluescsi -p /dev/ttyACM0 flash monitor   # BlueSCSI
-idf.py -B build-picoide  -p /dev/ttyACM0 flash monitor   # PicoIDE
+idf.py -B build-bluescsi     -p /dev/ttyACM0 flash monitor   # BlueSCSI
+idf.py -B build-picoide      -p /dev/ttyACM0 flash monitor   # PicoIDE
+idf.py -B build-bluescsi-diy -p /dev/ttyACM0 flash monitor   # BlueSCSI, DIY SuperMini
+idf.py -B build-picoide-diy  -p /dev/ttyACM0 flash monitor   # PicoIDE, DIY SuperMini
 ```
 
 `flash` (re)builds as needed, writes the image, and `monitor` attaches to the
@@ -83,7 +122,7 @@ UART. Exit the monitor with `Ctrl-]`.
 
 ```bash
 idf.py -B build-bluescsi fullclean    # clean one product's build dir
-rm -rf build-bluescsi build-picoide   # or just remove the dirs
+rm -rf build-bluescsi build-picoide build-bluescsi-diy build-picoide-diy
 ```
 
 Run `fullclean` if you change ESP-IDF versions — a build directory configured
