@@ -76,10 +76,13 @@ jobs:
           - name: bluescsi
             sdkconfig_extra: sdkconfig.defaults.bluescsi
             binary: bluescsi-frontpanel.bin
-          # BlueSCSI on a DIY ESP32-C3 SuperMini (web UI only, no display).
+          # DIY ESP32-C3 SuperMini builds (web UI only, no display or buttons).
           - name: bluescsi-diy
             sdkconfig_extra: sdkconfig.defaults.bluescsi-diy
             binary: bluescsi-frontpanel-diy.bin
+          - name: picoide-diy
+            sdkconfig_extra: sdkconfig.defaults.picoide-diy
+            binary: picoide-frontpanel-diy.bin
     env:
       OUTPUT_DIR: ${{github.workspace}}/binaries
     steps:
@@ -156,6 +159,7 @@ jobs:
             */picoide-frontpanel.bin
             */bluescsi-frontpanel.bin
             */bluescsi-frontpanel-diy.bin
+            */picoide-frontpanel-diy.bin
           draft: true
           prerelease: ${{ steps.relinfo.outputs.prerelease }}
 
@@ -218,4 +222,4 @@ jobs:
           fi
           gh release upload --repo "$GITHUB_REPOSITORY" --clobber latest \
             "$STAGING_DIR"/picoide-frontpanel.bin "$STAGING_DIR"/bluescsi-frontpanel.bin \
-            "$STAGING_DIR"/bluescsi-frontpanel-diy.bin
+            "$STAGING_DIR"/bluescsi-frontpanel-diy.bin "$STAGING_DIR"/picoide-frontpanel-diy.bin

@@ -2431,7 +2431,9 @@ void app_main(void) {
     }
     ESP_ERROR_CHECK(nvs_ret);
 
-#ifndef CONFIG_PANEL_NO_DISPLAY
+    esp_err_t ret = ESP_OK;
+
+#ifdef CONFIG_PANEL_SPI_BUS
     // Initialize shared SPI bus with MISO enabled for host communication
     spi_bus_config_t bus_config = {
         .mosi_io_num = PIN_SPI_MOSI,
@@ -2442,15 +2444,13 @@ void app_main(void) {
         .max_transfer_sz = 4096,
     };
 
-    esp_err_t ret = spi_bus_initialize(SPI2_HOST, &bus_config, SPI_DMA_CH_AUTO);
+    ret = spi_bus_initialize(SPI2_HOST, &bus_config, SPI_DMA_CH_AUTO);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to initialize shared SPI bus: %s", esp_err_to_name(ret));
         return;
     }
     ESP_LOGI(TAG, "Shared SPI bus initialized (MISO: %d, MOSI: %d, CLK: %d)",
              PIN_SPI_MISO, PIN_SPI_MOSI, PIN_SPI_CLK);
-#else
-    esp_err_t ret;
 #endif
 
     ret = display_manager_init(&display);
@@ -2498,6 +2498,7 @@ void app_main(void) {
     // Set initial LED to orange (no image loaded yet)
     led_set_color(COLOR_ORANGE);
     
+#ifndef CONFIG_PANEL_NO_BUTTONS
     ui_update_splash_progress(&display, "Init buttons...", 40);
     // Configure buttons with repeat for up/down navigation
     button_config_t nav_button_config = {
@@ -2534,6 +2535,7 @@ void app_main(void) {
 
     action_button_config.gpio = PIN_NAV_LEFT;
     gpio_handler_add_button(3, &action_button_config);
+#endif
 
     gpio_handler_register_button_callback(handle_button_event);
     gpio_handler_start();
