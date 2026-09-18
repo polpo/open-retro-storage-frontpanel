@@ -28,13 +28,28 @@
 // SPI flash. Three of the remaining pins are spoken for by the board itself -
 // GPIO8 drives the onboard blue LED, GPIO9 is the BOOT button, GPIO2 carries
 // the strapping pull-up - and GPIO20/21 are the UART console. That leaves
-// GPIO0, 1, 3, 4, 5, 6, 7 and 10 free, which is not enough for the OLED as
-// well, so this board builds with CONFIG_PANEL_NO_DISPLAY.
+// eight: GPIO0, 1, 3, 4, 5, 6, 7 and 10.
+//
+// Both host transports get their own pins, so one image runs on every main
+// board. That spends all eight, which is why this board has no OLED
+// (CONFIG_PANEL_NO_DISPLAY) and no navigation buttons
+// (CONFIG_PANEL_NO_BUTTONS) - the web UI drives it instead.
+//
+// The SPI pins deliberately avoid the SPI2 IO_MUX set (MISO 2, CLK 6, MOSI 7,
+// CS 10). IO_MUX would allow 80 MHz against the GPIO matrix's 40, and the host
+// link runs at 10 - so there is nothing to win, and IO_MUX MISO would land on
+// GPIO2, whose strapping level a host driving the line at reset could hold low.
 
-// Host interface (I2C to a BlueSCSI v2: GPIO3 -> Pico GPIO16,
-// GPIO10 -> Pico GPIO17, plus 2.2k pull-ups to 3V3 on both).
+// Host interface, I2C (BlueSCSI v2): GPIO3 -> host GPIO16,
+// GPIO10 -> host GPIO17, plus 2.2k pull-ups to 3V3 on both.
 #define PIN_SDA         GPIO_NUM_3
 #define PIN_SCL         GPIO_NUM_10
+
+// Host interface, SPI (BlueSCSI Ultra/Ultra Wide, PicoIDE).
+#define PIN_SPI_CLK     GPIO_NUM_6
+#define PIN_SPI_MOSI    GPIO_NUM_7
+#define PIN_SPI_MISO    GPIO_NUM_5
+#define PIN_HOST_CS     GPIO_NUM_4
 
 // Activity indicator input (from main board). Unconnected on most DIY builds,
 // so gpio_handler pulls it up - a floating pin would storm the edge ISR.
@@ -43,25 +58,13 @@
 // LED output (WS2812B addressable LED strip), optional.
 #define PIN_LED_OUT     GPIO_NUM_1
 
-// Navigation buttons, optional: wire each to GND, the inputs are pulled up.
-#define PIN_NAV_UP      GPIO_NUM_4
-#define PIN_NAV_DOWN    GPIO_NUM_5
-#define PIN_NAV_LEFT    GPIO_NUM_6
-#define PIN_NAV_RIGHT   GPIO_NUM_7
-
 // UART interface (USB-C console)
 #define PIN_UART_TX     GPIO_NUM_21
 
-// No OLED and no SPI host link on this board: nothing is left to put them on.
-// These stay defined so the SPI paths still compile; they are never brought up
-// (CONFIG_PANEL_NO_DISPLAY skips the bus, and the host transport is forced to
-// I2C in Kconfig).
+// No OLED on this board. These stay defined so the display paths still
+// compile; CONFIG_PANEL_NO_DISPLAY means they are never driven.
 #define PIN_OLED_CS     GPIO_NUM_NC
 #define PIN_OLED_DC     GPIO_NUM_NC
-#define PIN_SPI_MISO    GPIO_NUM_NC
-#define PIN_SPI_CLK     GPIO_NUM_NC
-#define PIN_SPI_MOSI    GPIO_NUM_NC
-#define PIN_HOST_CS     GPIO_NUM_NC
 
 #else
 

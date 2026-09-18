@@ -32,19 +32,25 @@ menu "Product Configuration"
 
         config PANEL_BOARD_C3_SUPERMINI
             bool "ESP32-C3 SuperMini (DIY, web UI only)"
-            depends on PRODUCT_BLUESCSI
             select PANEL_NO_DISPLAY
+            select PANEL_NO_BUTTONS
             help
-                A bare ESP32-C3 SuperMini wired to a BlueSCSI v2 with two
-                signal wires, for the web interface without a display or
-                buttons. That board only breaks out GPIO0-10, 20 and 21
-                (GPIO18/19 are its USB-C data pins), so the shipping pin map
-                does not fit and the host link has to be I2C.
+                A bare ESP32-C3 SuperMini wired to a main board with a handful
+                of jumpers, for the web interface without a display or buttons.
+                That board only breaks out GPIO0-10, 20 and 21 (GPIO18/19 are
+                its USB-C data pins), so the shipping pin map does not fit.
 
-                Wiring: C3 GPIO3 -> Pico GPIO16 (SDA), C3 GPIO10 ->
-                Pico GPIO17 (SCL), GND -> GND, plus 2.2k pull-ups from each
-                signal to 3V3. The link runs at 1 MHz and the panel PCB
-                normally supplies those pull-ups.
+                Both host transports are wired, so one build covers every main
+                board: I2C for BlueSCSI v2, SPI for BlueSCSI Ultra/Ultra Wide
+                and PicoIDE.
+
+                I2C wiring: C3 GPIO3 -> host SDA, C3 GPIO10 -> host SCL,
+                GND -> GND, plus 2.2k pull-ups from each signal to 3V3. The
+                link runs at 1 MHz and the panel PCB normally supplies those
+                pull-ups.
+
+                SPI wiring: C3 GPIO6 -> host SCK, GPIO7 -> host MOSI,
+                GPIO5 -> host MISO, GPIO4 -> host CS, GND -> GND.
     endchoice
 
     config PANEL_NO_DISPLAY
@@ -53,7 +59,21 @@ menu "Product Configuration"
         help
             Build without the SH1107 OLED. u8g2 still renders into its RAM
             frame buffer (so the web UI and the test hooks work unchanged),
-            but nothing is clocked out and no SPI bus is claimed.
+            but nothing is clocked out.
+
+    config PANEL_NO_BUTTONS
+        bool
+        default n
+        help
+            Build without the four navigation buttons. The web UI and the
+            test hooks drive the menus instead.
+
+    config PANEL_SPI_BUS
+        bool
+        default y if !PANEL_NO_DISPLAY || HOST_TRANSPORT_SPI || HOST_TRANSPORT_AUTO
+        help
+            Claim the shared SPI2 bus at boot. The OLED and the SPI host link
+            both ride it, so a build needs it unless it has neither.
 
     config MAX_DEVICES
         int
@@ -62,7 +82,6 @@ menu "Product Configuration"
 
     choice HOST_TRANSPORT
         prompt "Host communication transport"
-        default HOST_TRANSPORT_I2C if PANEL_BOARD_C3_SUPERMINI
         default HOST_TRANSPORT_AUTO if PRODUCT_BLUESCSI
         default HOST_TRANSPORT_SPI
         help
@@ -74,7 +93,7 @@ menu "Product Configuration"
 
         config HOST_TRANSPORT_AUTO
             bool "Auto-detect (SPI or I2C)"
-            depends on PRODUCT_BLUESCSI && !PANEL_BOARD_C3_SUPERMINI
+            depends on PRODUCT_BLUESCSI
             help
                 Probe for the main board on both transports at boot and
                 remember the one that answered, so one BlueSCSI binary covers
@@ -82,7 +101,6 @@ menu "Product Configuration"
 
         config HOST_TRANSPORT_SPI
             bool "SPI (forced)"
-            depends on !PANEL_BOARD_C3_SUPERMINI
             help
                 10 MHz SPI master (BlueSCSI Ultra/Ultra Wide, PicoIDE).
 
