@@ -1992,6 +1992,19 @@ static esp_err_t parse_upload_multipart_header(const char *buf, int received,
     return ESP_OK;
 }
 
+// Error replies during an upload. The browser is still streaming the request
+// body when a handler rejects it, so responding immediately makes
+// esp_http_server drop the socket and the browser reports a generic network
+// error with the message never read. Read the rest of the body first.
+static esp_err_t upload_error(httpd_req_t *req, const char *status, const char *msg) {
+    char drain[512];
+    while (httpd_req_recv(req, drain, sizeof(drain)) > 0) {
+    }
+    httpd_resp_set_status(req, status);
+    httpd_resp_send(req, msg, HTTPD_RESP_USE_STRLEN);
+    return ESP_FAIL;
+}
+
 static esp_err_t handle_file_upload(httpd_req_t *req, const char *path_prefix) {
     ESP_LOGI(TAG, "Upload request received (prefix: \"%s\")", path_prefix);
 
@@ -2002,9 +2015,7 @@ static esp_err_t handle_file_upload(httpd_req_t *req, const char *path_prefix) {
     size_t content_length = req->content_len;
     if (content_length == 0) {
         ESP_LOGE(TAG, "No content in upload request");
-        httpd_resp_set_status(req, "400 Bad Request");
-        httpd_resp_send(req, "No content", HTTPD_RESP_USE_STRLEN);
-        return ESP_FAIL;
+        return upload_error(req, "400 Bad Request", "No content");
     }
 
     ESP_LOGI(TAG, "Upload content length: %u bytes", content_length);
@@ -2014,9 +2025,7 @@ static esp_err_t handle_file_upload(httpd_req_t *req, const char *path_prefix) {
     char *chunk_buffer = (char*)malloc(chunk_size);
     if (!chunk_buffer) {
         ESP_LOGE(TAG, "Failed to allocate upload buffer");
-        httpd_resp_set_status(req, "500 Internal Server Error");
-        httpd_resp_send(req, "Memory allocation failed", HTTPD_RESP_USE_STRLEN);
-        return ESP_FAIL;
+        return upload_error(req, "500 Internal Server Error", "Memory allocation failed");
     }
 
     uint32_t actual_file_size = 0;
@@ -2027,9 +2036,7 @@ static esp_err_t handle_file_upload(httpd_req_t *req, const char *path_prefix) {
     if (received <= 0) {
         ESP_LOGE(TAG, "Failed to receive upload data");
         free(chunk_buffer);
-        httpd_resp_set_status(req, "400 Bad Request");
-        httpd_resp_send(req, "Failed to receive data", HTTPD_RESP_USE_STRLEN);
-        return ESP_FAIL;
+        return upload_error(req, "400 Bad Request", "Failed to receive data");
     }
 
     // Parse multipart headers (filename + file size) from the first chunk
@@ -2039,9 +2046,7 @@ static esp_err_t handle_file_upload(httpd_req_t *req, const char *path_prefix) {
                                       &actual_file_size, &file_data_start, &parse_err) != ESP_OK) {
         ESP_LOGE(TAG, "%s", parse_err);
         free(chunk_buffer);
-        httpd_resp_set_status(req, "400 Bad Request");
-        httpd_resp_send(req, parse_err, HTTPD_RESP_USE_STRLEN);
-        return ESP_FAIL;
+        return upload_error(req, "400 Bad Request", parse_err);
     }
     ESP_LOGI(TAG, "Upload: %s (%u bytes), data at offset %u",
              g_upload_state.filename, actual_file_size, file_data_start);
@@ -2054,9 +2059,7 @@ static esp_err_t handle_file_upload(httpd_req_t *req, const char *path_prefix) {
     if (!g_server || !g_server->interface_ctx->host_comm) {
         ESP_LOGE(TAG, "Host communication not available");
         free(chunk_buffer);
-        httpd_resp_set_status(req, "503 Service Unavailable");
-        httpd_resp_send(req, "Host not connected", HTTPD_RESP_USE_STRLEN);
-        return ESP_FAIL;
+        return upload_error(req, "503 Service Unavailable", "Host not connected");
     }
 
     host_comm_t *host_comm = g_server->interface_ctx->host_comm;
@@ -2066,9 +2069,7 @@ static esp_err_t handle_file_upload(httpd_req_t *req, const char *path_prefix) {
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start file upload: %s", esp_err_to_name(ret));
         free(chunk_buffer);
-        httpd_resp_set_status(req, "500 Internal Server Error");
-        httpd_resp_send(req, "Failed to start upload", HTTPD_RESP_USE_STRLEN);
-        return ESP_FAIL;
+        return upload_error(req, "500 Internal Server Error", "Failed to start upload");
     }
 
     // Process file data from the first chunk
@@ -2084,9 +2085,7 @@ static esp_err_t handle_file_upload(httpd_req_t *req, const char *path_prefix) {
             ESP_LOGE(TAG, "First chunk data too large: %d bytes (max %d)",
                      first_chunk_data_size, PANEL_FILE_CHUNK_SIZE);
             free(chunk_buffer);
-            httpd_resp_set_status(req, "400 Bad Request");
-            httpd_resp_send(req, "Multipart header too large", HTTPD_RESP_USE_STRLEN);
-            return ESP_FAIL;
+            return upload_error(req, "400 Bad Request", "Multipart header too large");
         }
 
         ret = host_comm_write_file_chunk(host_comm,
@@ -2095,9 +2094,7 @@ static esp_err_t handle_file_upload(httpd_req_t *req, const char *path_prefix) {
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "Failed to write first chunk: %s", esp_err_to_name(ret));
             free(chunk_buffer);
-            httpd_resp_set_status(req, "500 Internal Server Error");
-            httpd_resp_send(req, "Upload failed", HTTPD_RESP_USE_STRLEN);
-            return ESP_FAIL;
+            return upload_error(req, "500 Internal Server Error", "Upload failed");
         }
 
         g_upload_state.bytes_received += first_chunk_data_size;
@@ -2112,9 +2109,7 @@ static esp_err_t handle_file_upload(httpd_req_t *req, const char *path_prefix) {
         if (chunk_received <= 0) {
             ESP_LOGE(TAG, "Failed to receive chunk data");
             free(chunk_buffer);
-            httpd_resp_set_status(req, "400 Bad Request");
-            httpd_resp_send(req, "Failed to receive data", HTTPD_RESP_USE_STRLEN);
-            return ESP_FAIL;
+            return upload_error(req, "400 Bad Request", "Failed to receive data");
         }
 
         // Write chunk to RP2350
@@ -2122,9 +2117,7 @@ static esp_err_t handle_file_upload(httpd_req_t *req, const char *path_prefix) {
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "Failed to write chunk: %s", esp_err_to_name(ret));
             free(chunk_buffer);
-            httpd_resp_set_status(req, "500 Internal Server Error");
-            httpd_resp_send(req, "Upload failed", HTTPD_RESP_USE_STRLEN);
-            return ESP_FAIL;
+            return upload_error(req, "500 Internal Server Error", "Upload failed");
         }
 
         g_upload_state.bytes_received += chunk_received;
@@ -2142,9 +2135,7 @@ static esp_err_t handle_file_upload(httpd_req_t *req, const char *path_prefix) {
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to finish upload: %s", esp_err_to_name(ret));
         free(chunk_buffer);
-        httpd_resp_set_status(req, "500 Internal Server Error");
-        httpd_resp_send(req, "Upload failed", HTTPD_RESP_USE_STRLEN);
-        return ESP_FAIL;
+        return upload_error(req, "500 Internal Server Error", "Upload failed");
     }
 
     free(chunk_buffer);
@@ -2233,37 +2224,39 @@ static void panel_reboot_task(void *pvParameters) {
     esp_restart();
 }
 
+// esp_ota_write() rejects the first block when the file is not an app image,
+// which is what uploading bootloader.bin or partition-table.bin looks like.
+static esp_err_t ota_write_error(httpd_req_t *req, esp_err_t err) {
+    if (err == ESP_ERR_OTA_VALIDATE_FAILED) {
+        return upload_error(req, "400 Bad Request",
+                            "That file is not panel firmware");
+    }
+    return upload_error(req, "500 Internal Server Error", "OTA write failed");
+}
+
 // Direct ESP32 panel firmware upload: stream the posted .bin straight into the
 // next OTA partition (no SD card / main board round-trip), then reboot. This is
 // the front-panel counterpart to api_mainboard_firmware_upload_handler.
 static esp_err_t api_panel_firmware_upload_handler(httpd_req_t *req) {
     // Don't collide with the SD-card-based panel OTA background task.
     if (g_ota_task_handle != NULL) {
-        httpd_resp_set_status(req, "409 Conflict");
-        httpd_resp_send(req, "Update already in progress", HTTPD_RESP_USE_STRLEN);
-        return ESP_FAIL;
+        return upload_error(req, "409 Conflict", "Update already in progress");
     }
 
     if (req->content_len == 0) {
-        httpd_resp_set_status(req, "400 Bad Request");
-        httpd_resp_send(req, "No content", HTTPD_RESP_USE_STRLEN);
-        return ESP_FAIL;
+        return upload_error(req, "400 Bad Request", "No content");
     }
 
     const size_t chunk_size = PANEL_FILE_CHUNK_SIZE;
     char *chunk_buffer = (char *)malloc(chunk_size);
     if (!chunk_buffer) {
-        httpd_resp_set_status(req, "500 Internal Server Error");
-        httpd_resp_send(req, "Memory allocation failed", HTTPD_RESP_USE_STRLEN);
-        return ESP_FAIL;
+        return upload_error(req, "500 Internal Server Error", "Memory allocation failed");
     }
 
     int received = httpd_req_recv(req, chunk_buffer, chunk_size);
     if (received <= 0) {
         free(chunk_buffer);
-        httpd_resp_set_status(req, "400 Bad Request");
-        httpd_resp_send(req, "Failed to receive data", HTTPD_RESP_USE_STRLEN);
-        return ESP_FAIL;
+        return upload_error(req, "400 Bad Request", "Failed to receive data");
     }
 
     char filename[256];
@@ -2274,18 +2267,14 @@ static esp_err_t api_panel_firmware_upload_handler(httpd_req_t *req) {
                                       &firmware_size, &file_data_start, &parse_err) != ESP_OK) {
         ESP_LOGE(TAG, "%s", parse_err);
         free(chunk_buffer);
-        httpd_resp_set_status(req, "400 Bad Request");
-        httpd_resp_send(req, parse_err, HTTPD_RESP_USE_STRLEN);
-        return ESP_FAIL;
+        return upload_error(req, "400 Bad Request", parse_err);
     }
     ESP_LOGI(TAG, "Panel firmware upload: %s (%u bytes)", filename, firmware_size);
 
     const esp_partition_t *update_partition = esp_ota_get_next_update_partition(NULL);
     if (!update_partition) {
         free(chunk_buffer);
-        httpd_resp_set_status(req, "500 Internal Server Error");
-        httpd_resp_send(req, "No OTA partition available", HTTPD_RESP_USE_STRLEN);
-        return ESP_FAIL;
+        return upload_error(req, "500 Internal Server Error", "No OTA partition available");
     }
 
     esp_ota_handle_t ota_handle = 0;
@@ -2293,9 +2282,7 @@ static esp_err_t api_panel_firmware_upload_handler(httpd_req_t *req) {
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "esp_ota_begin failed: %s", esp_err_to_name(ret));
         free(chunk_buffer);
-        httpd_resp_set_status(req, "500 Internal Server Error");
-        httpd_resp_send(req, "Failed to begin OTA", HTTPD_RESP_USE_STRLEN);
-        return ESP_FAIL;
+        return upload_error(req, "500 Internal Server Error", "Failed to begin OTA");
     }
 
     uint32_t bytes_written = 0;
@@ -2309,9 +2296,7 @@ static esp_err_t api_panel_firmware_upload_handler(httpd_req_t *req) {
             ESP_LOGE(TAG, "esp_ota_write failed: %s", esp_err_to_name(ret));
             esp_ota_abort(ota_handle);
             free(chunk_buffer);
-            httpd_resp_set_status(req, "500 Internal Server Error");
-            httpd_resp_send(req, "OTA write failed", HTTPD_RESP_USE_STRLEN);
-            return ESP_FAIL;
+            return ota_write_error(req, ret);
         }
         bytes_written += first_size;
     }
@@ -2326,18 +2311,14 @@ static esp_err_t api_panel_firmware_upload_handler(httpd_req_t *req) {
             ESP_LOGE(TAG, "Failed to receive firmware data at %u/%u", bytes_written, firmware_size);
             esp_ota_abort(ota_handle);
             free(chunk_buffer);
-            httpd_resp_set_status(req, "400 Bad Request");
-            httpd_resp_send(req, "Failed to receive data", HTTPD_RESP_USE_STRLEN);
-            return ESP_FAIL;
+            return upload_error(req, "400 Bad Request", "Failed to receive data");
         }
         ret = esp_ota_write(ota_handle, chunk_buffer, n);
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "esp_ota_write failed: %s", esp_err_to_name(ret));
             esp_ota_abort(ota_handle);
             free(chunk_buffer);
-            httpd_resp_set_status(req, "500 Internal Server Error");
-            httpd_resp_send(req, "OTA write failed", HTTPD_RESP_USE_STRLEN);
-            return ESP_FAIL;
+            return ota_write_error(req, ret);
         }
         bytes_written += n;
     }
@@ -2348,19 +2329,15 @@ static esp_err_t api_panel_firmware_upload_handler(httpd_req_t *req) {
     ret = esp_ota_end(ota_handle);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "esp_ota_end failed: %s", esp_err_to_name(ret));
-        httpd_resp_set_status(req, "400 Bad Request");
         const char *msg = (ret == ESP_ERR_OTA_VALIDATE_FAILED)
-            ? "Firmware image validation failed" : "OTA finalize failed";
-        httpd_resp_send(req, msg, HTTPD_RESP_USE_STRLEN);
-        return ESP_FAIL;
+            ? "That file is not panel firmware" : "OTA finalize failed";
+        return upload_error(req, "400 Bad Request", msg);
     }
 
     ret = esp_ota_set_boot_partition(update_partition);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "esp_ota_set_boot_partition failed: %s", esp_err_to_name(ret));
-        httpd_resp_set_status(req, "500 Internal Server Error");
-        httpd_resp_send(req, "Failed to set boot partition", HTTPD_RESP_USE_STRLEN);
-        return ESP_FAIL;
+        return upload_error(req, "500 Internal Server Error", "Failed to set boot partition");
     }
 
     ESP_LOGI(TAG, "Panel firmware uploaded (%u bytes), rebooting", bytes_written);
