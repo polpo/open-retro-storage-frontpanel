@@ -602,26 +602,6 @@ static esp_err_t api_devices_handler(httpd_req_t *req) {
     return json.finalize();
 }
 
-// HTTP response writer for ArduinoJson streaming
-class HttpResponseWriter {
-public:
-    HttpResponseWriter(httpd_req_t* req) : req_(req) {}
-
-    size_t write(uint8_t b) {
-        char c = (char)b;
-        esp_err_t ret = httpd_resp_send_chunk(req_, &c, 1);
-        return (ret == ESP_OK) ? 1 : 0;
-    }
-
-    size_t write(const uint8_t* s, size_t n) {
-        esp_err_t ret = httpd_resp_send_chunk(req_, (const char*)s, n);
-        return (ret == ESP_OK) ? n : 0;
-    }
-
-private:
-    httpd_req_t* req_;
-};
-
 static esp_err_t api_images_handler(httpd_req_t *req) {
     httpd_resp_set_type(req, "application/json");
 

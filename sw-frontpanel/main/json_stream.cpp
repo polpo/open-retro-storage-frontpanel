@@ -19,11 +19,30 @@
 #include <stdio.h>
 
 JsonStreamWriter::JsonStreamWriter(httpd_req_t* req)
-    : req_(req), first_item_(true), depth_(0), in_object_(false) {
+    : req_(req), first_item_(true), depth_(0), in_object_(false), buf_len_(0) {
+}
+
+esp_err_t JsonStreamWriter::flush() {
+    if (buf_len_ == 0) return ESP_OK;
+    size_t len = buf_len_;
+    buf_len_ = 0;
+    return httpd_resp_send_chunk(req_, buf_, len);
 }
 
 esp_err_t JsonStreamWriter::sendChunk(const char* chunk) {
-    return httpd_resp_send_chunk(req_, chunk, strlen(chunk));
+    size_t len = strlen(chunk);
+    if (len >= kBufSize) {
+        esp_err_t ret = flush();
+        if (ret != ESP_OK) return ret;
+        return httpd_resp_send_chunk(req_, chunk, len);
+    }
+    if (buf_len_ + len > kBufSize) {
+        esp_err_t ret = flush();
+        if (ret != ESP_OK) return ret;
+    }
+    memcpy(buf_ + buf_len_, chunk, len);
+    buf_len_ += len;
+    return ESP_OK;
 }
 
 esp_err_t JsonStreamWriter::sendEscapedString(const char* str) {
@@ -189,5 +208,7 @@ esp_err_t JsonStreamWriter::write(const char* key, bool value) {
 }
 
 esp_err_t JsonStreamWriter::finalize() {
+    esp_err_t ret = flush();
+    if (ret != ESP_OK) return ret;
     return httpd_resp_send_chunk(req_, NULL, 0);
 }

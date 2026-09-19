@@ -42,11 +42,19 @@ public:
     esp_err_t finalize();
 
 private:
+    // Every sendChunk() used to be its own HTTP chunk, so a response cost about
+    // seven bytes of chunk framing per byte of JSON. Accumulate here instead and
+    // send once the buffer fills.
+    static const size_t kBufSize = 256;
+
     httpd_req_t* req_;
     bool first_item_;
     int depth_;
     bool in_object_;
+    char buf_[kBufSize];
+    size_t buf_len_;
 
+    esp_err_t flush();
     esp_err_t sendChunk(const char* chunk);
     esp_err_t sendEscapedString(const char* str);
     esp_err_t writeSeparator();
