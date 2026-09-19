@@ -72,8 +72,17 @@ jobs:
         product:
           - name: picoide
             sdkconfig_extra: sdkconfig.defaults.picoide
+            binary: picoide-frontpanel.bin
           - name: bluescsi
             sdkconfig_extra: sdkconfig.defaults.bluescsi
+            binary: bluescsi-frontpanel.bin
+          # DIY ESP32-C3 SuperMini builds (web UI only, no display or buttons).
+          - name: bluescsi-diy
+            sdkconfig_extra: sdkconfig.defaults.bluescsi-diy
+            binary: bluescsi-frontpanel-diy.bin
+          - name: picoide-diy
+            sdkconfig_extra: sdkconfig.defaults.picoide-diy
+            binary: picoide-frontpanel-diy.bin
     env:
       OUTPUT_DIR: ${{github.workspace}}/binaries
     steps:
@@ -94,7 +103,7 @@ jobs:
         with:
           name: frontpanel-firmware-${{ matrix.product.name }}
           path: |
-            sw-frontpanel/build-${{ matrix.product.name }}/${{ matrix.product.name }}-frontpanel.bin
+            sw-frontpanel/build-${{ matrix.product.name }}/${{ matrix.product.binary }}
             sw-frontpanel/build-${{ matrix.product.name }}/bootloader/bootloader.bin
             sw-frontpanel/build-${{ matrix.product.name }}/partition_table/partition-table.bin
 
@@ -149,6 +158,8 @@ jobs:
           files: |
             */picoide-frontpanel.bin
             */bluescsi-frontpanel.bin
+            */bluescsi-frontpanel-diy.bin
+            */picoide-frontpanel-diy.bin
           draft: true
           prerelease: ${{ steps.relinfo.outputs.prerelease }}
 
@@ -210,4 +221,5 @@ jobs:
               -t "Latest development build" -F latest-body.md --prerelease --draft=false
           fi
           gh release upload --repo "$GITHUB_REPOSITORY" --clobber latest \
-            "$STAGING_DIR"/picoide-frontpanel.bin "$STAGING_DIR"/bluescsi-frontpanel.bin
+            "$STAGING_DIR"/picoide-frontpanel.bin "$STAGING_DIR"/bluescsi-frontpanel.bin \
+            "$STAGING_DIR"/bluescsi-frontpanel-diy.bin "$STAGING_DIR"/picoide-frontpanel-diy.bin
