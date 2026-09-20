@@ -19,6 +19,8 @@
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_app_desc.h"
+#include "nvs_flash.h"
+#include "nvs.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "mbedtls/sha256.h"
@@ -334,6 +336,10 @@ esp_err_t ota_manager_process(ota_manager_t* ota) {
             return ret;
         }
 
+        // Remember this image came via the main board so the next boot can
+        // insist on working host comms before committing to it.
+        ota_manager_set_update_source(OTA_SOURCE_HOST);
+
         // Version will be automatically updated in esp_app_desc_t after restart
 
         ota->state = OTA_STATE_SUCCESS;
@@ -439,6 +445,41 @@ esp_err_t ota_manager_abort(ota_manager_t* ota) {
 
     ota->state = OTA_STATE_IDLE;
     return ESP_OK;
+}
+
+#define OTA_NVS_NAMESPACE "ota"
+#define OTA_NVS_KEY_SOURCE "src"
+
+esp_err_t ota_manager_set_update_source(ota_update_source_t source) {
+    nvs_handle_t handle;
+    esp_err_t ret = nvs_open(OTA_NVS_NAMESPACE, NVS_READWRITE, &handle);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to open NVS to record update source: %s", esp_err_to_name(ret));
+        return ret;
+    }
+    ret = nvs_set_u8(handle, OTA_NVS_KEY_SOURCE, (uint8_t)source);
+    if (ret == ESP_OK) {
+        ret = nvs_commit(handle);
+    }
+    nvs_close(handle);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to record update source: %s", esp_err_to_name(ret));
+    }
+    return ret;
+}
+
+ota_update_source_t ota_manager_take_update_source(void) {
+    nvs_handle_t handle;
+    if (nvs_open(OTA_NVS_NAMESPACE, NVS_READWRITE, &handle) != ESP_OK) {
+        return OTA_SOURCE_NONE;
+    }
+    uint8_t value = OTA_SOURCE_NONE;
+    if (nvs_get_u8(handle, OTA_NVS_KEY_SOURCE, &value) == ESP_OK) {
+        nvs_erase_key(handle, OTA_NVS_KEY_SOURCE);
+        nvs_commit(handle);
+    }
+    nvs_close(handle);
+    return (ota_update_source_t)value;
 }
 
 esp_err_t ota_manager_mark_valid(void) {
