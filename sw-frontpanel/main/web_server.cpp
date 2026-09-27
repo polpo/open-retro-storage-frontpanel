@@ -1386,9 +1386,8 @@ static esp_err_t api_firmware_check_handler(httpd_req_t *req) {
             bool panel_update = false;
             panel_firmware_info_t panel_info = {};
             esp_err_t panel_ret = host_comm_check_firmware(comm, &panel_info);
-            if (panel_ret == ESP_OK && panel_info.available) {
-                uint32_t current_panel_ver = ota_manager_get_current_version();
-                panel_update = (panel_info.version > current_panel_ver);
+            if (panel_ret == ESP_OK) {
+                panel_update = ota_manager_offered_differs(&panel_info);
             }
 
             bool any_update = main_update || panel_update;
@@ -1449,8 +1448,7 @@ static void web_firmware_update_task(void *pvParameters) {
     // Check what needs updating
     panel_firmware_info_t panel_info = {};
     esp_err_t ret = host_comm_check_firmware(comm, &panel_info);
-    bool panel_needs_update = (ret == ESP_OK && panel_info.available &&
-                               panel_info.version > ota_manager_get_current_version());
+    bool panel_needs_update = (ret == ESP_OK && ota_manager_offered_differs(&panel_info));
 
     rp2350_fw_status_t rp_status = {};
     ret = host_comm_get_rp2350_fw_status(comm, &rp_status);

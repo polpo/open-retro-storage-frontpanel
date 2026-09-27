@@ -72,6 +72,10 @@ esp_err_t ota_manager_deinit(ota_manager_t* ota);
 // Check if firmware update is available
 esp_err_t ota_manager_check_update(ota_manager_t* ota, bool* update_available);
 
+// True when the host offers a panel image with a different version from the
+// running one
+bool ota_manager_offered_differs(const panel_firmware_info_t* info);
+
 // Start OTA update process
 esp_err_t ota_manager_start_update(ota_manager_t* ota);
 

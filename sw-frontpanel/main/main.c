@@ -988,8 +988,7 @@ static void handle_button_event(button_event_t *event) {
 #else
                 case 1: // Select button (East) - trigger unified update
                     if (event->type == BUTTON_EVENT_CLICK) {
-                        bool panel_needs_update = panel_fw_info.available &&
-                            (panel_fw_info.version > ota_manager_get_current_version());
+                        bool panel_needs_update = ota_manager_offered_differs(&panel_fw_info);
                         bool main_needs_update = (rp2350_fw_status.available_version != 0);
                         if (panel_needs_update || main_needs_update) {
                             trigger_system_update();
@@ -1986,8 +1985,7 @@ static void firmware_update_task(void *pvParameters) {
 static void unified_firmware_update_task(void *pvParameters) {
     led_start_pulse(COLOR_RED);
 
-    bool panel_needs_update = panel_fw_info.available &&
-        (panel_fw_info.version > ota_manager_get_current_version());
+    bool panel_needs_update = ota_manager_offered_differs(&panel_fw_info);
     bool main_needs_update = (rp2350_fw_status.available_version != 0);
     bool panel_ota_written = false;
 
@@ -2134,8 +2132,7 @@ static void draw_firmware_status_screen(void) {
                             rp2350_fw_status.available_version != 0,
                             fw_screen_selection);
 #else
-    bool panel_update_avail = panel_fw_info.available &&
-        (panel_fw_info.version > ota_manager_get_current_version());
+    bool panel_update_avail = ota_manager_offered_differs(&panel_fw_info);
     bool main_update_avail = (rp2350_fw_status.available_version != 0);
     bool any_update = panel_update_avail || main_update_avail;
 

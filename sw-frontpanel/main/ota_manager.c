@@ -187,15 +187,14 @@ esp_err_t ota_manager_check_update(ota_manager_t* ota, bool* update_available) {
 
     // Check if update is available
     if (ota->firmware_info.available) {
-        uint32_t current_version = ota_manager_get_current_version();
-        if (ota->firmware_info.version > current_version) {
+        if (ota_manager_offered_differs(&ota->firmware_info)) {
             *update_available = true;
             char cur_str[20], avail_str[20];
-            fw_version_format_panel(cur_str, sizeof(cur_str), current_version);
+            fw_version_format_panel(cur_str, sizeof(cur_str), ota_manager_get_current_version());
             fw_version_format_panel(avail_str, sizeof(avail_str), ota->firmware_info.version);
             ESP_LOGI(TAG, "Update available: v%s -> v%s", cur_str, avail_str);
         } else {
-            ESP_LOGI(TAG, "Firmware is up to date");
+            ESP_LOGI(TAG, "Offered firmware matches the running version");
         }
     } else {
         ESP_LOGI(TAG, "No firmware file found on host");
@@ -467,5 +466,9 @@ uint32_t ota_manager_get_current_version(void) {
     ESP_LOGI(TAG, "Current firmware version: %s -> 0x%08lX", app_desc->version, version);
 
     return version;
+}
+
+bool ota_manager_offered_differs(const panel_firmware_info_t* info) {
+    return info && info->available && info->version != ota_manager_get_current_version();
 }
 
