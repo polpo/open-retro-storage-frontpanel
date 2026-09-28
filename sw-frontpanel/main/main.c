@@ -192,6 +192,7 @@ static void panel_publish_framebuffer(void);
 // being re-rendered later (e.g. after the screensaver clears the buffer).
 static const char *info_screen_title = "";
 static char info_screen_body[256] = "";
+static uint32_t info_screen_scroll = 0;  // First visible wrapped line of info_screen_body
 
 // Cached state used to refresh the LED both on activity events and on display
 // off-state transitions so breathing can pick up the current color
@@ -722,31 +723,36 @@ static void handle_button_event(button_event_t *event) {
                         uint32_t selected = menu_get_selected_index(&wifi_menu);
                         if (selected == 0) { // "WiFi Status"
                             wifi_manager_state_t state = wifi_manager_get_state(&wifi_manager);
+                            const char *title = "WiFi Status";
                             char info_text[256];
 
                             if (state == WIFI_MANAGER_STATE_AP_MODE) {
                                 // Show AP mode info with credentials
+                                title = "WiFi: AP";
                                 snprintf(info_text, sizeof(info_text),
-                                    "Mode: Access Point\n"
                                     "SSID: %s\n"
-                                    "Password: %s\n"
+                                    "PW: %s\n"
+                                    "Host: %s.local\n"
                                     "IP: 192.168.4.1",
-                                    wifi_manager_get_ap_ssid(&wifi_manager), WIFI_MANAGER_AP_PASSWORD);
+                                    wifi_manager_get_ap_ssid(&wifi_manager), WIFI_MANAGER_AP_PASSWORD,
+                                    wifi_manager_get_mdns_hostname(&wifi_manager));
                             } else if (wifi_manager_is_connected(&wifi_manager)) {
                                 // Show client mode info
+                                title = "WiFi: Client";
                                 esp_ip4_addr_t ip;
                                 if (wifi_manager_get_ip_info(&wifi_manager, &ip, NULL, NULL) == ESP_OK) {
                                     snprintf(info_text, sizeof(info_text),
-                                        "Mode: Client\n"
                                         "SSID: %s\n"
+                                        "Host: %s.local\n"
                                         "IP: " IPSTR,
-                                        wifi_manager.ssid, IP2STR(&ip));
+                                        wifi_manager.ssid, wifi_manager_get_mdns_hostname(&wifi_manager),
+                                        IP2STR(&ip));
                                 } else {
                                     snprintf(info_text, sizeof(info_text),
-                                        "Mode: Client\n"
                                         "SSID: %s\n"
+                                        "Host: %s.local\n"
                                         "IP: Unknown",
-                                        wifi_manager.ssid);
+                                        wifi_manager.ssid, wifi_manager_get_mdns_hostname(&wifi_manager));
                                 }
                             } else {
                                 snprintf(info_text, sizeof(info_text),
@@ -755,7 +761,7 @@ static void handle_button_event(button_event_t *event) {
                             }
                             info_return_screen = SCREEN_WIFI_MENU;
                             current_screen = SCREEN_INFO;
-                            show_info_screen("WiFi Status", info_text);
+                            show_info_screen(title, info_text);
                         } else if (selected == 1) { // "Reset WiFi"
                             ESP_LOGI(TAG, "Resetting WiFi to defaults");
                             wifi_manager_disconnect(&wifi_manager);
@@ -766,7 +772,7 @@ static void handle_button_event(button_event_t *event) {
                                 "WiFi settings cleared.\n\n"
                                 "Connect to:\n"
                                 "SSID: %s\n"
-                                "Pass: %s",
+                                "PW: %s",
                                 wifi_manager_get_ap_ssid(&wifi_manager), WIFI_MANAGER_AP_PASSWORD);
                             info_return_screen = SCREEN_WIFI_MENU;
                             current_screen = SCREEN_INFO;
@@ -944,9 +950,26 @@ static void handle_button_event(button_event_t *event) {
             break;
 
         case SCREEN_INFO:
-            if (event->type == BUTTON_EVENT_CLICK && event->button_id == 3) {
-                // Back button - return to previous screen
-                current_screen = info_return_screen;
+            switch (event->button_id) {
+                case 0: // Up button (North)
+                    if ((event->type == BUTTON_EVENT_CLICK || event->type == BUTTON_EVENT_REPEAT) &&
+                        info_screen_scroll > 0) {
+                        info_screen_scroll--;
+                        ui_draw_info_screen(&display, info_screen_title, info_screen_body, info_screen_scroll);
+                    }
+                    break;
+                case 2: // Down button (South)
+                    if ((event->type == BUTTON_EVENT_CLICK || event->type == BUTTON_EVENT_REPEAT) &&
+                        info_screen_scroll < ui_info_screen_max_scroll(info_screen_body)) {
+                        info_screen_scroll++;
+                        ui_draw_info_screen(&display, info_screen_title, info_screen_body, info_screen_scroll);
+                    }
+                    break;
+                case 3: // Back button (West) - return to previous screen
+                    if (event->type == BUTTON_EVENT_CLICK) {
+                        current_screen = info_return_screen;
+                    }
+                    break;
             }
             break;
 
@@ -1179,7 +1202,8 @@ static void show_info_screen(const char *title, const char *body) {
     } else {
         info_screen_body[0] = '\0';
     }
-    ui_draw_info_screen(&display, info_screen_title, info_screen_body);
+    info_screen_scroll = 0;
+    ui_draw_info_screen(&display, info_screen_title, info_screen_body, 0);
 }
 
 // Re-render whatever screen is currently active. Used after the screensaver
@@ -1201,7 +1225,7 @@ static void redraw_current_screen(void) {
             if (active_menu) active_menu->needs_redraw = true;
             break;
         case SCREEN_INFO:
-            ui_draw_info_screen(&display, info_screen_title, info_screen_body);
+            ui_draw_info_screen(&display, info_screen_title, info_screen_body, info_screen_scroll);
             break;
         case SCREEN_FIRMWARE_STATUS:
             draw_firmware_status_screen();
@@ -1860,7 +1884,7 @@ static void reconnect_to_host(void) {
     ESP_LOGI(TAG, "Reconnecting to host...");
 
     // Show reconnecting status on display
-    ui_draw_info_screen(&display, "Reconnecting...", "Restoring communication\nwith main board...");
+    ui_draw_info_screen(&display, "Reconnecting...", "Restoring communication\nwith main board...", 0);
     display_manager_update(&display);
 
     disc_list_loaded = false;
@@ -2200,7 +2224,7 @@ static void trigger_panel_update(void) {
     esp_err_t ret = ota_manager_init(&ota_manager, &host_comm);
     if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
         ESP_LOGE(TAG, "Failed to initialize OTA manager: %s", esp_err_to_name(ret));
-        ui_draw_info_screen(&display, "Error", "Failed to init OTA");
+        ui_draw_info_screen(&display, "Error", "Failed to init OTA", 0);
         return;
     }
 
@@ -2210,7 +2234,7 @@ static void trigger_panel_update(void) {
     ret = ota_manager_start_update(&ota_manager);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start update: %s", esp_err_to_name(ret));
-        ui_draw_info_screen(&display, "Error", "Failed to start update");
+        ui_draw_info_screen(&display, "Error", "Failed to start update", 0);
         return;
     }
 
@@ -2236,7 +2260,7 @@ static void trigger_mainboard_update(void) {
     esp_err_t ret = host_comm_start_rp2350_update(&host_comm);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start RP2350 update: %s", esp_err_to_name(ret));
-        ui_draw_info_screen(&display, "Error", "Failed to start update");
+        ui_draw_info_screen(&display, "Error", "Failed to start update", 0);
         vTaskDelay(pdMS_TO_TICKS(2000));
         current_screen = SCREEN_SETTINGS;
         active_menu = screen_menus[current_screen];
@@ -2253,7 +2277,7 @@ static void trigger_mainboard_update(void) {
     }
 
     // Now check if the board is back online
-    ui_draw_info_screen(&display, "Main Board", "Waiting for reboot...");
+    ui_draw_info_screen(&display, "Main Board", "Waiting for reboot...", 0);
 
     int attempts = 0;
     while (attempts < 20) {  // Up to 10 seconds
@@ -2269,7 +2293,7 @@ static void trigger_mainboard_update(void) {
 
             char msg[48];
             snprintf(msg, sizeof(msg), "Update complete!\nNow running v%s", version_str);
-            ui_draw_info_screen(&display, "Main Board", msg);
+            ui_draw_info_screen(&display, "Main Board", msg, 0);
             vTaskDelay(pdMS_TO_TICKS(3000));
             break;
         }
@@ -2278,7 +2302,7 @@ static void trigger_mainboard_update(void) {
     }
 
     if (attempts >= 20) {
-        ui_draw_info_screen(&display, "Main Board", "Update sent.\nBoard may still be\nrebooting...");
+        ui_draw_info_screen(&display, "Main Board", "Update sent.\nBoard may still be\nrebooting...", 0);
         vTaskDelay(pdMS_TO_TICKS(3000));
     }
 
