@@ -23,6 +23,10 @@
 #include "esp_netif.h"
 #include "esp_netif_ip_addr.h"
 #include "esp_mac.h"
+#ifndef CONFIG_PRODUCT_BLUESCSI
+#include "esp_random.h"
+#include "bootloader_random.h"
+#endif
 #include "mdns.h"
 #include "nvs.h"
 #include "freertos/FreeRTOS.h"
@@ -44,6 +48,11 @@ static const char *TAG = "wifi_manager";
 #define NVS_KEY_MAX_RETRY "max_retry"
 #define NVS_KEY_AP_SSID "ap_ssid"
 #define NVS_KEY_MDNS_HOST "mdns_host"
+#ifndef CONFIG_PRODUCT_BLUESCSI
+// Default AP password, generated once per device. Deliberately not erased by
+// clear_config so it stays the same across WiFi resets.
+#define NVS_KEY_AP_DEFAULT_PW "ap_default_pw"
+#endif
 
 // The single blob these settings used to be stored as, under one key.
 // Frozen in time, only used to migrate from old to new settings
@@ -72,6 +81,52 @@ void wifi_manager_default_ap_ssid(char *out, size_t len) {
     esp_read_mac(mac, ESP_MAC_WIFI_SOFTAP);
     snprintf(out, len, "%s-%02X%02X", WIFI_MANAGER_AP_SSID_PREFIX, mac[4], mac[5]);
 }
+
+#ifndef CONFIG_PRODUCT_BLUESCSI
+// Check if a stored default password matches the generated format
+static bool ap_default_pw_is_valid(const char *pw) {
+    if (strlen(pw) != WIFI_MANAGER_AP_DEFAULT_PW_LEN) return false;
+    for (const char *c = pw; *c; c++) {
+        if (*c < 'a' || *c > 'z') return false;
+    }
+    return true;
+}
+
+// Load the default AP password from NVS or generate and save one if it doesn't
+// exist yet
+static void get_ap_default_pw(char *out) {
+    nvs_handle_t handle;
+    esp_err_t ret = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle);
+    if (ret == ESP_OK) {
+        size_t len = WIFI_MANAGER_AP_DEFAULT_PW_LEN + 1;
+        if (nvs_get_str(handle, NVS_KEY_AP_DEFAULT_PW, out, &len) == ESP_OK && ap_default_pw_is_valid(out)) {
+            nvs_close(handle);
+            return;
+        }
+    } else {
+        ESP_LOGE(TAG, "Failed to open NVS for default AP password: %s", esp_err_to_name(ret));
+    }
+
+    bootloader_random_enable();
+    int i = 0;
+    while (i < WIFI_MANAGER_AP_DEFAULT_PW_LEN) {
+        // Generate bytes < 234 (9 * 26)
+        uint8_t b = esp_random() & 0xFF;
+        if (b < 234) {
+            out[i++] = 'a' + (b % 26);
+        }
+    }
+    out[WIFI_MANAGER_AP_DEFAULT_PW_LEN] = '\0';
+    bootloader_random_disable();
+
+    if (ret == ESP_OK) {
+        nvs_set_str(handle, NVS_KEY_AP_DEFAULT_PW, out);
+        nvs_commit(handle);
+        nvs_close(handle);
+        ESP_LOGI(TAG, "Generated new default AP password");
+    }
+}
+#endif
 
 void wifi_manager_default_mdns_hostname(char *out, size_t len) {
     snprintf(out, len, "%s", WIFI_MANAGER_MDNS_HOSTNAME_DEFAULT);
@@ -243,6 +298,9 @@ esp_err_t wifi_manager_init(wifi_manager_t *manager) {
 
     memset(manager, 0, sizeof(wifi_manager_t));
     s_manager = manager;
+#ifndef CONFIG_PRODUCT_BLUESCSI
+    get_ap_default_pw(manager->ap_default_pw);
+#endif
 
     // Initialize TCP/IP stack
     ESP_ERROR_CHECK(esp_netif_init());
@@ -515,7 +573,6 @@ esp_err_t wifi_manager_start_ap(wifi_manager_t *manager) {
     wifi_config_t wifi_ap_config = {
         .ap = {
             .channel = WIFI_MANAGER_AP_CHANNEL,
-            .password = WIFI_MANAGER_AP_PASSWORD,
             .max_connection = WIFI_MANAGER_AP_MAX_CONNECTIONS,
             .authmode = WIFI_AUTH_WPA2_PSK,
             .pmf_cfg = {
@@ -528,7 +585,10 @@ esp_err_t wifi_manager_start_ap(wifi_manager_t *manager) {
     wifi_ap_config.ap.ssid_len = strnlen(manager->ap_ssid, sizeof(wifi_ap_config.ap.ssid));
     memcpy(wifi_ap_config.ap.ssid, manager->ap_ssid, wifi_ap_config.ap.ssid_len);
 
-    if (strlen(WIFI_MANAGER_AP_PASSWORD) == 0) {
+    const char *ap_password = wifi_manager_get_ap_password(manager);
+    strlcpy((char *)wifi_ap_config.ap.password, ap_password, sizeof(wifi_ap_config.ap.password));
+
+    if (strlen(ap_password) == 0) {
         wifi_ap_config.ap.authmode = WIFI_AUTH_OPEN;
     }
 
@@ -862,6 +922,15 @@ static esp_err_t wifi_manager_stop_mdns(wifi_manager_t *manager) {
     mdns_free();
     ESP_LOGI(TAG, "mDNS stopped");
     return ESP_OK;
+}
+
+const char *wifi_manager_get_ap_password(wifi_manager_t *manager) {
+#ifdef CONFIG_PRODUCT_BLUESCSI
+    (void)manager;
+    return WIFI_MANAGER_AP_PASSWORD;
+#else
+    return manager ? manager->ap_default_pw : "";
+#endif
 }
 
 const char *wifi_manager_get_ap_ssid(wifi_manager_t *manager) {

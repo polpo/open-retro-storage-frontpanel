@@ -734,7 +734,7 @@ static void handle_button_event(button_event_t *event) {
                                     "PW: %s\n"
                                     "Host: %s.local\n"
                                     "IP: 192.168.4.1",
-                                    wifi_manager_get_ap_ssid(&wifi_manager), WIFI_MANAGER_AP_PASSWORD,
+                                    wifi_manager_get_ap_ssid(&wifi_manager), wifi_manager_get_ap_password(&wifi_manager),
                                     wifi_manager_get_mdns_hostname(&wifi_manager));
                             } else if (wifi_manager_is_connected(&wifi_manager)) {
                                 // Show client mode info
@@ -773,7 +773,7 @@ static void handle_button_event(button_event_t *event) {
                                 "Connect to:\n"
                                 "SSID: %s\n"
                                 "PW: %s",
-                                wifi_manager_get_ap_ssid(&wifi_manager), WIFI_MANAGER_AP_PASSWORD);
+                                wifi_manager_get_ap_ssid(&wifi_manager), wifi_manager_get_ap_password(&wifi_manager));
                             info_return_screen = SCREEN_WIFI_MENU;
                             current_screen = SCREEN_INFO;
                             show_info_screen("WiFi Reset", info_text);

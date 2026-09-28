@@ -49,7 +49,13 @@ extern "C" {
 #define PRODUCT_LOGO_URL "/logo.svg"
 #endif
 
+#ifdef CONFIG_PRODUCT_BLUESCSI
 #define WIFI_MANAGER_AP_PASSWORD "frontpanel123"
+#else
+// Per-device random default AP password, generated on first boot and kept in NVS:
+// lowercase letters only for easy typing, at the WPA2 minimum length
+#define WIFI_MANAGER_AP_DEFAULT_PW_LEN 8
+#endif
 #define WIFI_MANAGER_AP_CHANNEL 1
 #define WIFI_MANAGER_AP_MAX_CONNECTIONS 4
 #define WIFI_MANAGER_CONNECTION_RETRY_MAX 5
@@ -87,6 +93,9 @@ typedef struct {
     uint8_t max_retry_attempts;
     char ap_ssid[WIFI_MANAGER_SSID_MAX_LEN];
     char mdns_hostname[WIFI_MANAGER_HOSTNAME_MAX_LEN];
+#ifndef CONFIG_PRODUCT_BLUESCSI
+    char ap_default_pw[WIFI_MANAGER_AP_DEFAULT_PW_LEN + 1];  // Loaded or generated at init
+#endif
 
     bool initialized;
     bool station_connected;
@@ -142,6 +151,7 @@ esp_err_t wifi_manager_set_callbacks(wifi_manager_t *manager,
 // overridden and are persisted to NVS. Setting the hostname re-announces
 // immediately; a new AP SSID applies the next time the AP starts.
 const char *wifi_manager_get_ap_ssid(wifi_manager_t *manager);
+const char *wifi_manager_get_ap_password(wifi_manager_t *manager);
 const char *wifi_manager_get_mdns_hostname(wifi_manager_t *manager);
 esp_err_t wifi_manager_set_ap_ssid(wifi_manager_t *manager, const char *ssid);
 esp_err_t wifi_manager_set_mdns_hostname(wifi_manager_t *manager, const char *hostname);
