@@ -132,10 +132,6 @@ esp_err_t wifi_manager_set_callbacks(wifi_manager_t *manager,
                                    void (*on_ap_started)(esp_ip4_addr_t ip),
                                    void (*on_state_changed)(wifi_manager_state_t state));
 
-// mDNS functions
-esp_err_t wifi_manager_start_mdns(wifi_manager_t *manager);
-esp_err_t wifi_manager_stop_mdns(wifi_manager_t *manager);
-
 // Utility functions
 const char* wifi_manager_state_to_string(wifi_manager_state_t state);
 const char* wifi_manager_auth_mode_to_string(wifi_auth_mode_t auth_mode);

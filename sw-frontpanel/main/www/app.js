@@ -52,8 +52,16 @@ async function apiCall(endpoint, options = {}) {
 let statusHideTimer = null;
 const STATUS_HIDE_DELAY = 4000; // Hide after 4 seconds
 
+// Set while the page's startup loaders run in parallel, so a loader that
+// finishes later cannot replace an earlier loader's error
+let startupLoading = false;
+
 function showStatus(type, message) {
     const statusDiv = document.getElementById('connection-status');
+    if (startupLoading && type !== 'error' &&
+        statusDiv.classList.contains('error') && !statusDiv.classList.contains('hidden')) {
+        return;
+    }
     statusDiv.className = `status status-bar ${type}`;
     statusDiv.textContent = message;
     statusDiv.classList.remove('hidden');
@@ -1508,8 +1516,10 @@ async function refreshInitiator() {
 }
 // #endif
 
-// Initialize the page (serialize requests to avoid overwhelming ESP32)
+// Initialize the page
 document.addEventListener('DOMContentLoaded', async function() {
+    startupLoading = true;
+
     // Wait for loadSystemInfo() as it sets productName, which decides
     // the config filename and the firmware version formatting
     await loadSystemInfo();
@@ -1517,10 +1527,13 @@ document.addEventListener('DOMContentLoaded', async function() {
     // Other requests in parallel, except refreshImages which needs the device
     // list from refreshDevices first
     await Promise.all([
-        refreshDevices().then(() => refreshImages()),
-        // #ifdef PRODUCT_BLUESCSI
-        refreshInitiator(),
-        // #endif
+        refreshDevices()
+            // #ifdef PRODUCT_BLUESCSI
+            // Both write operatingMode; refreshInitiator must go last so
+            // refreshImages hides Load buttons while imaging
+            .then(() => refreshInitiator())
+            // #endif
+            .then(() => refreshImages()),
         loadWiFiStatus(),
         // #ifdef PRODUCT_BLUESCSI
         checkAllFirmware(),
@@ -1529,6 +1542,7 @@ document.addEventListener('DOMContentLoaded', async function() {
         // #endif
         loadConfig(),
     ]);
+    startupLoading = false;
 
     // Add file input change listener to set file size
     const fileInput = document.getElementById('file-input');
