@@ -1,1 +1,6 @@
 CONFIG_PRODUCT_PICOIDE=y
+
+# Wi-Fi TX power ceiling for RF exposure compliance (RED Art. 3.1(a)).
+# EN 62479 low-power exclusion: 13 dBm = 20 mW. This is a certified limit:
+# do not raise it!
+CONFIG_ESP_PHY_MAX_WIFI_TX_POWER=13
