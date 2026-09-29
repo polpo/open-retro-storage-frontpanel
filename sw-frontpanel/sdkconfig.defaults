@@ -15,6 +15,10 @@ CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
 CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024
 CONFIG_HTTPD_MAX_URI_LEN=512
 
+# Room for the web server's 7 client sockets plus its 3 internal ones, with
+# spare sockets for everything else (default 10)
+CONFIG_LWIP_MAX_SOCKETS=16
+
 # OTA rollback support
 CONFIG_APP_ROLLBACK_ENABLE=y
 

@@ -23,6 +23,7 @@
 #include "esp_log.h"
 #include "esp_http_server.h"
 #include "esp_system.h"
+#include "esp_app_desc.h"
 #include "cJSON.h"
 #include "interface_common.h"
 #include "json_stream.h"
@@ -327,9 +328,30 @@ static const httpd_uri_t uri_handlers[] = {
 static_assert(sizeof(uri_handlers) / sizeof(uri_handlers[0]) <= WEB_SERVER_MAX_HANDLERS,
               "uri_handlers[] exceeds WEB_SERVER_MAX_HANDLERS; bump it in web_server.h");
 
+// ETag for the embedded web assets, based on the build's ELF hash
+static char s_asset_etag[CONFIG_APP_RETRIEVE_LEN_ELF_SHA + 3];
+
+static void asset_etag_init(void) {
+    char sha[CONFIG_APP_RETRIEVE_LEN_ELF_SHA + 1] = {0};
+    esp_app_get_elf_sha256(sha, sizeof(sha));
+    // ETags must be double-quoted per RFC 9110
+    snprintf(s_asset_etag, sizeof(s_asset_etag), "\"%s\"", sha);
+}
+
 static esp_err_t static_file_handler(httpd_req_t *req) {
     const static_file_t *file = (const static_file_t *)req->user_ctx;
+
     httpd_resp_set_type(req, file->content_type);
+    httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
+    httpd_resp_set_hdr(req, "ETag", s_asset_etag);
+
+    char if_none_match[sizeof(s_asset_etag)];
+    if (httpd_req_get_hdr_value_str(req, "If-None-Match", if_none_match, sizeof(if_none_match)) == ESP_OK &&
+        strcmp(if_none_match, s_asset_etag) == 0) {
+        httpd_resp_set_status(req, "304 Not Modified");
+        return httpd_resp_send(req, NULL, 0);
+    }
+
     httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
     return httpd_resp_send(req, (const char *)file->start, file->end - file->start);
 }
@@ -1197,6 +1219,7 @@ esp_err_t web_server_init(web_server_t *server, uint16_t port) {
     memset(server, 0, sizeof(web_server_t));
     server->port = (port > 0) ? port : WEB_SERVER_PORT;
     server->initialized = true;
+    asset_etag_init();
     g_server = server;
 
     ESP_LOGI(TAG, "Web server initialized on port %d", server->port);
@@ -1216,7 +1239,7 @@ esp_err_t web_server_start(web_server_t *server) {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = server->port;
     config.max_uri_handlers = WEB_SERVER_MAX_HANDLERS;
-    config.max_open_sockets = 3;
+    config.max_open_sockets = 7;  // parallel asset + API fetches; see LWIP_MAX_SOCKETS in sdkconfig.defaults
     config.lru_purge_enable = true;
 
     esp_err_t ret = httpd_start(&server->server, &config);
