@@ -769,9 +769,9 @@ static void handle_button_event(button_event_t *event) {
                             wifi_manager_start_ap(&wifi_manager);
                             char info_text[256];
                             snprintf(info_text, sizeof(info_text),
-                                "WiFi settings cleared.\n\n"
+                                "Settings cleared.\n"
                                 "Connect to:\n"
-                                "SSID: %s\n"
+                                "%s\n"
                                 "PW: %s",
                                 wifi_manager_get_ap_ssid(&wifi_manager), wifi_manager_get_ap_password(&wifi_manager));
                             info_return_screen = SCREEN_WIFI_MENU;
