@@ -1217,8 +1217,8 @@ static esp_err_t api_wifi_status_handler(httpd_req_t *req) {
     return json.finalize();
 }
 
-// Panel identity: the AP SSID and the mDNS hostname. Both defaults are also
-// reported so the UI can show them as placeholders and offer a way back.
+// Panel identity: AP SSID, password, and mDNS hostname.
+// Defaults are reported so the UI can show them as placeholders
 static esp_err_t api_settings_get_handler(httpd_req_t *req) {
     httpd_resp_set_type(req, "application/json");
 
@@ -1237,6 +1237,8 @@ static esp_err_t api_settings_get_handler(httpd_req_t *req) {
     if (ret != ESP_OK) return ret;
     ret = json.write("mdns_hostname", wifi ? wifi_manager_get_mdns_hostname(wifi) : default_hostname);
     if (ret != ESP_OK) return ret;
+    ret = json.write("ap_password", wifi_manager_get_ap_password(wifi));
+    if (ret != ESP_OK) return ret;
     ret = json.write("default_ap_ssid", default_ap_ssid);
     if (ret != ESP_OK) return ret;
     ret = json.write("default_mdns_hostname", default_hostname);
@@ -1249,7 +1251,7 @@ static esp_err_t api_settings_get_handler(httpd_req_t *req) {
 }
 
 static esp_err_t api_settings_set_handler(httpd_req_t *req) {
-    char content[256];
+    char content[512];
     size_t recv_size = MIN(req->content_len, sizeof(content) - 1);
     int recv_ret = httpd_req_recv(req, content, recv_size);
     if (recv_ret <= 0) {
@@ -1271,16 +1273,20 @@ static esp_err_t api_settings_set_handler(httpd_req_t *req) {
         return ESP_FAIL;
     }
 
-    // Either field may be omitted to leave it alone. Both are validated up
-    // front so that rejecting one name never leaves the other already written.
+    // Any field can be omitted to leave it alone. An empty (but not omitted) ap_password
+    // resets it to default
     cJSON *ap_ssid_json = cJSON_GetObjectItem(json_req, "ap_ssid");
+    cJSON *ap_password_json = cJSON_GetObjectItem(json_req, "ap_password");
     cJSON *hostname_json = cJSON_GetObjectItem(json_req, "mdns_hostname");
     const char *ap_ssid = cJSON_IsString(ap_ssid_json) ? ap_ssid_json->valuestring : NULL;
+    const char *ap_password = cJSON_IsString(ap_password_json) ? ap_password_json->valuestring : NULL;
     const char *hostname = cJSON_IsString(hostname_json) ? hostname_json->valuestring : NULL;
 
     const char *error = NULL;
     if (ap_ssid && !wifi_manager_ap_ssid_is_valid(ap_ssid)) {
         error = "Invalid AP name: 1-32 bytes";
+    } else if (ap_password && ap_password[0] && !wifi_manager_ap_password_is_valid(ap_password)) {
+        error = "Invalid AP password: 8-63 characters, no accents or emoji";
     } else if (hostname && !wifi_manager_mdns_hostname_is_valid(hostname)) {
         error = "Invalid hostname: letters, digits and hyphens only, max 63";
     }
@@ -1293,6 +1299,9 @@ static esp_err_t api_settings_set_handler(httpd_req_t *req) {
 
     if (ap_ssid) {
         wifi_manager_set_ap_ssid(wifi, ap_ssid);
+    }
+    if (ap_password) {
+        wifi_manager_set_ap_password(wifi, ap_password);
     }
     if (hostname) {
         wifi_manager_set_mdns_hostname(wifi, hostname);
@@ -1310,6 +1319,8 @@ static esp_err_t api_settings_set_handler(httpd_req_t *req) {
     ret = json.write("ap_ssid", wifi_manager_get_ap_ssid(wifi));
     if (ret != ESP_OK) return ret;
     ret = json.write("mdns_hostname", wifi_manager_get_mdns_hostname(wifi));
+    if (ret != ESP_OK) return ret;
+    ret = json.write("ap_password", wifi_manager_get_ap_password(wifi));
     if (ret != ESP_OK) return ret;
     ret = json.endObject();
     if (ret != ESP_OK) return ret;

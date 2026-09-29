@@ -534,11 +534,20 @@ function updateHostnamePreview() {
     preview.textContent = hostname ? `Reachable at http://${hostname}.local` : '';
 }
 
+// The AP password as last reported by the panel
+let currentApPassword = '';
+
+function showApPassword(password) {
+    currentApPassword = password || '';
+    document.getElementById('setting-ap-password').value = currentApPassword;
+}
+
 async function loadPanelSettings() {
     const data = await apiCall('/settings');
     if (data) {
         document.getElementById('setting-ap-ssid').value = data.ap_ssid || '';
         document.getElementById('setting-mdns-hostname').value = data.mdns_hostname || '';
+        showApPassword(data.ap_password);
         panelSettingDefaults = {
             ap_ssid: data.default_ap_ssid || '',
             mdns_hostname: data.default_mdns_hostname || ''
@@ -547,9 +556,9 @@ async function loadPanelSettings() {
     }
 }
 
-// Each name has its own Save button, so a request carries only that one field.
-// The firmware leaves alone any field that isn't present, so saving one name
-// can't clobber the other.
+// The access point and hostname have separate Save buttons, so a request
+// carries only that card's fields. The firmware leaves alone any field that
+// isn't present, so saving one part of the settings can't clobber the other.
 async function savePanelSetting(body, successMessage) {
     showStatus('', 'Saving...');
 
@@ -557,25 +566,42 @@ async function savePanelSetting(body, successMessage) {
         method: 'POST',
         body: JSON.stringify(body)
     });
-    if (!data) return false;
+    if (!data) return null;
 
     showStatus('success', successMessage);
-    return true;
+    return data;
 }
 
-async function saveApSsid() {
+// An empty apPassword resets to the default. null leaves it unchanged
+async function sendAccessPoint(apSsid, apPassword) {
+    const body = { ap_ssid: apSsid };
+    if (apPassword !== null) body.ap_password = apPassword;
+
+    const data = await savePanelSetting(body,
+        'Access point saved. Changes apply the next time the access point starts.');
+    if (data) {
+        showApPassword(data.ap_password);
+    }
+}
+
+async function saveAccessPoint() {
     const apSsid = document.getElementById('setting-ap-ssid').value.trim();
     if (!apSsid) {
         showStatus('error', 'Access point name is required');
         return;
     }
-    await savePanelSetting({ ap_ssid: apSsid },
-        'Access point name saved. It applies the next time the access point starts.');
+    // Not trimmed: spaces are legal in a WPA2 passphrase
+    const apPassword = document.getElementById('setting-ap-password').value;
+    if (apPassword.length < 8 || apPassword.length > 63) {
+        showStatus('error', 'Access point password must be 8-63 characters');
+        return;
+    }
+    await sendAccessPoint(apSsid, apPassword !== currentApPassword ? apPassword : null);
 }
 
-async function resetApSsid() {
+async function resetAccessPoint() {
     document.getElementById('setting-ap-ssid').value = panelSettingDefaults.ap_ssid;
-    await saveApSsid();
+    await sendAccessPoint(panelSettingDefaults.ap_ssid, '');
 }
 
 async function saveHostname() {

@@ -93,6 +93,7 @@ typedef struct {
     uint8_t max_retry_attempts;
     char ap_ssid[WIFI_MANAGER_SSID_MAX_LEN];
     char mdns_hostname[WIFI_MANAGER_HOSTNAME_MAX_LEN];
+    char ap_password[WIFI_MANAGER_PASSWORD_MAX_LEN];  // empty means use the default
 #ifndef CONFIG_PRODUCT_BLUESCSI
     char ap_default_pw[WIFI_MANAGER_AP_DEFAULT_PW_LEN + 1];  // Loaded or generated at init
 #endif
@@ -149,17 +150,21 @@ esp_err_t wifi_manager_set_callbacks(wifi_manager_t *manager,
 // bytes of the SoftAP MAC, so several panels are distinguishable out of the
 // box; the mDNS hostname defaults to the bare product name. Both can be
 // overridden and are persisted to NVS. Setting the hostname re-announces
-// immediately; a new AP SSID applies the next time the AP starts.
+// immediately; a new AP SSID or password applies the next time the AP starts.
+// The AP password can be overridden too; setting it to "" returns to the
+// per-product default.
 const char *wifi_manager_get_ap_ssid(wifi_manager_t *manager);
 const char *wifi_manager_get_ap_password(wifi_manager_t *manager);
 const char *wifi_manager_get_mdns_hostname(wifi_manager_t *manager);
 esp_err_t wifi_manager_set_ap_ssid(wifi_manager_t *manager, const char *ssid);
+esp_err_t wifi_manager_set_ap_password(wifi_manager_t *manager, const char *password);
 esp_err_t wifi_manager_set_mdns_hostname(wifi_manager_t *manager, const char *hostname);
 void wifi_manager_default_ap_ssid(char *out, size_t len);
 void wifi_manager_default_mdns_hostname(char *out, size_t len);
-// Exposed so a caller setting both names can reject the pair up front rather
-// than persisting the first and failing on the second.
+// Exposed so a caller setting several at once can reject them up front rather
+// than persisting the first and failing on a later one.
 bool wifi_manager_ap_ssid_is_valid(const char *ssid);
+bool wifi_manager_ap_password_is_valid(const char *password);
 bool wifi_manager_mdns_hostname_is_valid(const char *hostname);
 
 // Utility functions

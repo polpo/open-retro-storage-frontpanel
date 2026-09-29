@@ -48,6 +48,7 @@ static const char *TAG = "wifi_manager";
 #define NVS_KEY_MAX_RETRY "max_retry"
 #define NVS_KEY_AP_SSID "ap_ssid"
 #define NVS_KEY_MDNS_HOST "mdns_host"
+#define NVS_KEY_AP_PASS "ap_pass"
 #ifndef CONFIG_PRODUCT_BLUESCSI
 // Default AP password, generated once per device. Deliberately not erased by
 // clear_config so it stays the same across WiFi resets.
@@ -137,6 +138,16 @@ bool wifi_manager_ap_ssid_is_valid(const char *ssid) {
     return len > 0 && len < WIFI_MANAGER_SSID_MAX_LEN;
 }
 
+// WPA2 passphrase: 8-63 printable ASCII characters
+bool wifi_manager_ap_password_is_valid(const char *password) {
+    size_t len = strlen(password);
+    if (len < 8 || len >= WIFI_MANAGER_PASSWORD_MAX_LEN) return false;
+    for (const char *c = password; *c; c++) {
+        if (*c < 0x20 || *c > 0x7E) return false;
+    }
+    return true;
+}
+
 // Validate against RFC 1035: ASCII letters, digits and hyphens only, no leading
 // or trailing hyphen
 bool wifi_manager_mdns_hostname_is_valid(const char *hostname) {
@@ -160,6 +171,7 @@ static void set_default_settings(wifi_manager_t *manager) {
     manager->max_retry_attempts = WIFI_MANAGER_CONNECTION_RETRY_MAX;
     wifi_manager_default_ap_ssid(manager->ap_ssid, sizeof(manager->ap_ssid));
     wifi_manager_default_mdns_hostname(manager->mdns_hostname, sizeof(manager->mdns_hostname));
+    manager->ap_password[0] = '\0';
 }
 
 static bool import_legacy_settings(nvs_handle_t handle, wifi_manager_t *manager) {
@@ -390,6 +402,7 @@ esp_err_t wifi_manager_save_settings(wifi_manager_t *manager) {
     nvs_set_u8(handle, NVS_KEY_MAX_RETRY, manager->max_retry_attempts);
     nvs_set_str(handle, NVS_KEY_AP_SSID, manager->ap_ssid);
     nvs_set_str(handle, NVS_KEY_MDNS_HOST, manager->mdns_hostname);
+    nvs_set_str(handle, NVS_KEY_AP_PASS, manager->ap_password);
 
     ret = nvs_commit(handle);
     nvs_close(handle);
@@ -441,6 +454,15 @@ esp_err_t wifi_manager_load_settings(wifi_manager_t *manager) {
     len = sizeof(manager->mdns_hostname);
     found |= (nvs_get_str(handle, NVS_KEY_MDNS_HOST, manager->mdns_hostname, &len) == ESP_OK);
 
+    len = sizeof(manager->ap_password);
+    if (nvs_get_str(handle, NVS_KEY_AP_PASS, manager->ap_password, &len) == ESP_OK) {
+        found = true;
+        // Fall back to the default insead of starting an AP nobody can join
+        if (manager->ap_password[0] && !wifi_manager_ap_password_is_valid(manager->ap_password)) {
+            manager->ap_password[0] = '\0';
+        }
+    }
+
     // No key at all means this is either a fresh device or one still holding
     // the old single blob.
     bool imported = !found && import_legacy_settings(handle, manager);
@@ -477,6 +499,7 @@ esp_err_t wifi_manager_clear_config(wifi_manager_t *manager) {
     nvs_erase_key(handle, NVS_KEY_MAX_RETRY);
     nvs_erase_key(handle, NVS_KEY_AP_SSID);
     nvs_erase_key(handle, NVS_KEY_MDNS_HOST);
+    nvs_erase_key(handle, NVS_KEY_AP_PASS);
     // The old blob goes too, or the next load would import it straight back.
     nvs_erase_key(handle, NVS_KEY_LEGACY_BLOB);
 
@@ -925,8 +948,10 @@ static esp_err_t wifi_manager_stop_mdns(wifi_manager_t *manager) {
 }
 
 const char *wifi_manager_get_ap_password(wifi_manager_t *manager) {
+    if (manager && manager->ap_password[0]) {
+        return manager->ap_password;
+    }
 #ifdef CONFIG_PRODUCT_BLUESCSI
-    (void)manager;
     return WIFI_MANAGER_AP_PASSWORD;
 #else
     return manager ? manager->ap_default_pw : "";
@@ -950,6 +975,18 @@ esp_err_t wifi_manager_set_ap_ssid(wifi_manager_t *manager, const char *ssid) {
     ESP_LOGI(TAG, "AP SSID set to %s (applies on next AP start)", manager->ap_ssid);
     // Deliberately not restarting a running AP: the client that just asked for
     // the change is most likely connected over it.
+    return wifi_manager_save_settings(manager);
+}
+
+esp_err_t wifi_manager_set_ap_password(wifi_manager_t *manager, const char *password) {
+    if (!manager || !password || (password[0] && !wifi_manager_ap_password_is_valid(password))) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    snprintf(manager->ap_password, sizeof(manager->ap_password), "%s", password);
+    ESP_LOGI(TAG, "AP password %s (applies on next AP start)",
+             password[0] ? "changed" : "reset to default");
+    // Not restarting a running AP, for the same reason as the SSID
     return wifi_manager_save_settings(manager);
 }
 
