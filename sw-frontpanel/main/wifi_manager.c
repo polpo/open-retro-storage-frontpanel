@@ -563,13 +563,17 @@ esp_err_t wifi_manager_connect(wifi_manager_t *manager, const char *ssid, const 
         return ESP_ERR_INVALID_ARG;
     }
 
-    // Update configuration
-    strncpy(manager->ssid, ssid, WIFI_MANAGER_SSID_MAX_LEN - 1);
-    manager->ssid[WIFI_MANAGER_SSID_MAX_LEN - 1] = '\0';
+    // Update configuration if it differs
+    if (ssid != manager->ssid) {
+        strncpy(manager->ssid, ssid, WIFI_MANAGER_SSID_MAX_LEN - 1);
+        manager->ssid[WIFI_MANAGER_SSID_MAX_LEN - 1] = '\0';
+    }
 
     if (password) {
-        strncpy(manager->password, password, WIFI_MANAGER_PASSWORD_MAX_LEN - 1);
-        manager->password[WIFI_MANAGER_PASSWORD_MAX_LEN - 1] = '\0';
+        if (password != manager->password) {
+            strncpy(manager->password, password, WIFI_MANAGER_PASSWORD_MAX_LEN - 1);
+            manager->password[WIFI_MANAGER_PASSWORD_MAX_LEN - 1] = '\0';
+        }
     } else {
         manager->password[0] = '\0';
     }
