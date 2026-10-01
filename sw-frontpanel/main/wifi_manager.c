@@ -518,8 +518,14 @@ esp_err_t wifi_manager_clear_config(wifi_manager_t *manager) {
 
     set_default_settings(manager);
 
+    // The hostname is reset too, so announce the default one right away
+    esp_err_t ret = mdns_hostname_set(manager->mdns_hostname);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to apply mDNS hostname: %s", esp_err_to_name(ret));
+    }
+
     nvs_handle_t handle;
-    esp_err_t ret = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle);
+    ret = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle);
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "Failed to open NVS for clearing: %s", esp_err_to_name(ret));
         return ESP_OK;
