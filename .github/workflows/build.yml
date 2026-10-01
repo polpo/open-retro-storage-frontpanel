@@ -74,6 +74,10 @@ jobs:
             sdkconfig_extra: sdkconfig.defaults.picoide
           - name: bluescsi
             sdkconfig_extra: sdkconfig.defaults.bluescsi
+          # Compile check only: the test hooks are a remote control for the UI
+          # and never ship
+          - name: bluescsi-bench
+            sdkconfig_extra: sdkconfig.defaults.bluescsi;sdkconfig.defaults.bluescsi-bench
     env:
       OUTPUT_DIR: ${{github.workspace}}/binaries
     steps:
@@ -90,6 +94,7 @@ jobs:
           path: 'sw-frontpanel'
           command: 'idf.py -B build-${{ matrix.product.name }} -DSDKCONFIG=build-${{ matrix.product.name }}/sdkconfig -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;${{ matrix.product.sdkconfig_extra }}" build'
       - name: Upload Front Panel Firmware
+        if: matrix.product.name != 'bluescsi-bench'
         uses: actions/upload-artifact@v7
         with:
           name: frontpanel-firmware-${{ matrix.product.name }}

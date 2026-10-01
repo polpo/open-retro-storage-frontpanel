@@ -3,6 +3,9 @@
 cmake_minimum_required(VERSION 3.16)
 
 set(PROJECT_VER "0.5.1-pre7")
+# Otherwise IDF guesses the target from a stray sdkconfig before the defaults,
+# and a fresh build dir can silently build for plain esp32
+set(IDF_TARGET esp32c3)
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 
 # Name the firmware per product (picoide-frontpanel / bluescsi-frontpanel).
