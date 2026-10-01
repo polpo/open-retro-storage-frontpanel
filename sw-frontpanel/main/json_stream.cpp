@@ -59,6 +59,11 @@ esp_err_t JsonStreamWriter::sendEscapedString(const char* str) {
             ret = sendChunk("\\r");
         } else if (*str == '\t') {
             ret = sendChunk("\\t");
+        } else if ((unsigned char)*str < 0x20) {
+            // JSON forbids any other raw control character in a string
+            static const char hex[] = "0123456789abcdef";
+            char escaped[7] = {'\\', 'u', '0', '0', hex[*str >> 4], hex[*str & 0xF], '\0'};
+            ret = sendChunk(escaped);
         } else {
             char single[2] = {*str, '\0'};
             ret = sendChunk(single);
