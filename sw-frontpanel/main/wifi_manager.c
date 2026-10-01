@@ -175,7 +175,7 @@ static void set_default_settings(wifi_manager_t *manager) {
 }
 
 // Save one panel identity setting, leaving other settings alone
-static esp_err_t save_identity_setting(const char *key, const char *value) {
+static esp_err_t save_identity_setting(const char *key, const char *value, const char *default_value) {
     nvs_handle_t handle;
     esp_err_t ret = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle);
     if (ret != ESP_OK) {
@@ -183,7 +183,12 @@ static esp_err_t save_identity_setting(const char *key, const char *value) {
         return ret;
     }
 
-    ret = nvs_set_str(handle, key, value);
+    if (value[0] == '\0' || strcmp(value, default_value) == 0) {
+        ret = nvs_erase_key(handle, key);
+        if (ret == ESP_ERR_NVS_NOT_FOUND) ret = ESP_OK;
+    } else {
+        ret = nvs_set_str(handle, key, value);
+    }
     if (ret == ESP_OK) ret = nvs_commit(handle);
     nvs_close(handle);
 
@@ -466,11 +471,22 @@ esp_err_t wifi_manager_load_settings(wifi_manager_t *manager) {
     found |= (nvs_get_u32(handle, NVS_KEY_CONN_TMO, &manager->connection_timeout_ms) == ESP_OK);
     found |= (nvs_get_u8(handle, NVS_KEY_MAX_RETRY, &manager->max_retry_attempts) == ESP_OK);
 
+    // Defaults aren't stored, but an empty value also means default
     len = sizeof(manager->ap_ssid);
-    found |= (nvs_get_str(handle, NVS_KEY_AP_SSID, manager->ap_ssid, &len) == ESP_OK);
+    if (nvs_get_str(handle, NVS_KEY_AP_SSID, manager->ap_ssid, &len) == ESP_OK) {
+        found = true;
+        if (!manager->ap_ssid[0]) {
+            wifi_manager_default_ap_ssid(manager->ap_ssid, sizeof(manager->ap_ssid));
+        }
+    }
 
     len = sizeof(manager->mdns_hostname);
-    found |= (nvs_get_str(handle, NVS_KEY_MDNS_HOST, manager->mdns_hostname, &len) == ESP_OK);
+    if (nvs_get_str(handle, NVS_KEY_MDNS_HOST, manager->mdns_hostname, &len) == ESP_OK) {
+        found = true;
+        if (!manager->mdns_hostname[0]) {
+            wifi_manager_default_mdns_hostname(manager->mdns_hostname, sizeof(manager->mdns_hostname));
+        }
+    }
 
     len = sizeof(manager->ap_password);
     if (nvs_get_str(handle, NVS_KEY_AP_PASS, manager->ap_password, &len) == ESP_OK) {
@@ -981,15 +997,17 @@ const char *wifi_manager_get_mdns_hostname(wifi_manager_t *manager) {
 }
 
 esp_err_t wifi_manager_set_ap_ssid(wifi_manager_t *manager, const char *ssid) {
-    if (!manager || !ssid || !wifi_manager_ap_ssid_is_valid(ssid)) {
+    if (!manager || !ssid || (ssid[0] && !wifi_manager_ap_ssid_is_valid(ssid))) {
         return ESP_ERR_INVALID_ARG;
     }
 
-    strlcpy(manager->ap_ssid, ssid, sizeof(manager->ap_ssid));
+    char default_ssid[WIFI_MANAGER_SSID_MAX_LEN];
+    wifi_manager_default_ap_ssid(default_ssid, sizeof(default_ssid));
+    strlcpy(manager->ap_ssid, ssid[0] ? ssid : default_ssid, sizeof(manager->ap_ssid));
     ESP_LOGI(TAG, "AP SSID set to %s (applies on next AP start)", manager->ap_ssid);
     // Deliberately not restarting a running AP: the client that just asked for
     // the change is most likely connected over it.
-    return save_identity_setting(NVS_KEY_AP_SSID, manager->ap_ssid);
+    return save_identity_setting(NVS_KEY_AP_SSID, manager->ap_ssid, default_ssid);
 }
 
 esp_err_t wifi_manager_set_ap_password(wifi_manager_t *manager, const char *password) {
@@ -1001,15 +1019,18 @@ esp_err_t wifi_manager_set_ap_password(wifi_manager_t *manager, const char *pass
     ESP_LOGI(TAG, "AP password %s (applies on next AP start)",
              password[0] ? "changed" : "reset to default");
     // Not restarting a running AP, for the same reason as the SSID
-    return save_identity_setting(NVS_KEY_AP_PASS, manager->ap_password);
+    return save_identity_setting(NVS_KEY_AP_PASS, manager->ap_password, manager->ap_default_pw);
 }
 
 esp_err_t wifi_manager_set_mdns_hostname(wifi_manager_t *manager, const char *hostname) {
-    if (!manager || !hostname || !wifi_manager_mdns_hostname_is_valid(hostname)) {
+    if (!manager || !hostname || (hostname[0] && !wifi_manager_mdns_hostname_is_valid(hostname))) {
         return ESP_ERR_INVALID_ARG;
     }
 
-    strlcpy(manager->mdns_hostname, hostname, sizeof(manager->mdns_hostname));
+    char default_hostname[WIFI_MANAGER_HOSTNAME_MAX_LEN];
+    wifi_manager_default_mdns_hostname(default_hostname, sizeof(default_hostname));
+    strlcpy(manager->mdns_hostname, hostname[0] ? hostname : default_hostname,
+            sizeof(manager->mdns_hostname));
 
     // Cheap to apply live: this re-probes and announces the new name without
     // tearing the responder down, so clients pick it up within a second.
@@ -1021,5 +1042,5 @@ esp_err_t wifi_manager_set_mdns_hostname(wifi_manager_t *manager, const char *ho
                  manager->mdns_hostname);
     }
 
-    return save_identity_setting(NVS_KEY_MDNS_HOST, manager->mdns_hostname);
+    return save_identity_setting(NVS_KEY_MDNS_HOST, manager->mdns_hostname, default_hostname);
 }

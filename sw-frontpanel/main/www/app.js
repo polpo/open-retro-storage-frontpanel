@@ -525,9 +525,6 @@ async function loadWiFiStatus() {
     }
 }
 
-// Defaults reported by the panel for "Restore Defaults"
-let panelSettingDefaults = { ap_ssid: '', mdns_hostname: '' };
-
 function updateHostnamePreview() {
     const hostname = document.getElementById('setting-mdns-hostname').value.trim();
     const preview = document.getElementById('setting-hostname-preview');
@@ -548,10 +545,8 @@ async function loadPanelSettings() {
         document.getElementById('setting-ap-ssid').value = data.ap_ssid || '';
         document.getElementById('setting-mdns-hostname').value = data.mdns_hostname || '';
         showApPassword(data.ap_password);
-        panelSettingDefaults = {
-            ap_ssid: data.default_ap_ssid || '',
-            mdns_hostname: data.default_mdns_hostname || ''
-        };
+        document.getElementById('setting-ap-ssid').placeholder = data.default_ap_ssid || '';
+        document.getElementById('setting-mdns-hostname').placeholder = data.default_mdns_hostname || '';
         updateHostnamePreview();
     }
 }
@@ -572,7 +567,7 @@ async function savePanelSetting(body, successMessage) {
     return data;
 }
 
-// An empty apPassword resets to the default. null leaves it unchanged
+// An empty value resets to the default. A null apPassword leaves it unchanged
 async function sendAccessPoint(apSsid, apPassword) {
     const body = { ap_ssid: apSsid };
     if (apPassword !== null) body.ap_password = apPassword;
@@ -580,6 +575,7 @@ async function sendAccessPoint(apSsid, apPassword) {
     const data = await savePanelSetting(body,
         'Access point saved. Changes apply the next time the access point starts.');
     if (data) {
+        document.getElementById('setting-ap-ssid').value = data.ap_ssid || '';
         showApPassword(data.ap_password);
     }
 }
@@ -600,8 +596,17 @@ async function saveAccessPoint() {
 }
 
 async function resetAccessPoint() {
-    document.getElementById('setting-ap-ssid').value = panelSettingDefaults.ap_ssid;
-    await sendAccessPoint(panelSettingDefaults.ap_ssid, '');
+    await sendAccessPoint('', '');
+}
+
+// An empty hostname resets to the default
+async function sendHostname(hostname) {
+    const data = await savePanelSetting({ mdns_hostname: hostname }, 'Saved.');
+    if (data) {
+        document.getElementById('setting-mdns-hostname').value = data.mdns_hostname || '';
+        showStatus('success', `Saved. Panel is now at http://${data.mdns_hostname}.local`);
+        updateHostnamePreview();
+    }
 }
 
 async function saveHostname() {
@@ -610,14 +615,11 @@ async function saveHostname() {
         showStatus('error', 'Hostname is required');
         return;
     }
-    if (await savePanelSetting({ mdns_hostname: hostname }, `Saved. Panel is now at http://${hostname}.local`)) {
-        updateHostnamePreview();
-    }
+    await sendHostname(hostname);
 }
 
 async function resetHostname() {
-    document.getElementById('setting-mdns-hostname').value = panelSettingDefaults.mdns_hostname;
-    await saveHostname();
+    await sendHostname('');
 }
 
 async function scanWiFi() {
