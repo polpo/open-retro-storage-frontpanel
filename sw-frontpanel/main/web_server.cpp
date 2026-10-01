@@ -329,9 +329,6 @@ static const httpd_uri_t uri_handlers[] = {
 #endif
 };
 
-static_assert(sizeof(uri_handlers) / sizeof(uri_handlers[0]) <= WEB_SERVER_MAX_HANDLERS,
-              "uri_handlers[] exceeds WEB_SERVER_MAX_HANDLERS; bump it in web_server.h");
-
 // ETag for the embedded web assets, based on the build's ELF hash
 static char s_asset_etag[CONFIG_APP_RETRIEVE_LEN_ELF_SHA + 3];
 
@@ -1358,7 +1355,7 @@ esp_err_t web_server_start(web_server_t *server) {
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = server->port;
-    config.max_uri_handlers = WEB_SERVER_MAX_HANDLERS;
+    config.max_uri_handlers = sizeof(uri_handlers) / sizeof(uri_handlers[0]);
     config.max_open_sockets = 7;  // parallel asset + API fetches; see LWIP_MAX_SOCKETS in sdkconfig.defaults
     config.lru_purge_enable = true;
 
