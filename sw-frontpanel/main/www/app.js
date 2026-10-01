@@ -531,20 +531,11 @@ function updateHostnamePreview() {
     preview.textContent = hostname ? `Reachable at http://${hostname}.local` : '';
 }
 
-// The AP password as last reported by the panel
-let currentApPassword = '';
-
-function showApPassword(password) {
-    currentApPassword = password || '';
-    document.getElementById('setting-ap-password').value = currentApPassword;
-}
-
 async function loadPanelSettings() {
     const data = await apiCall('/settings');
     if (data) {
         document.getElementById('setting-ap-ssid').value = data.ap_ssid || '';
         document.getElementById('setting-mdns-hostname').value = data.mdns_hostname || '';
-        showApPassword(data.ap_password);
         document.getElementById('setting-ap-ssid').placeholder = data.default_ap_ssid || '';
         document.getElementById('setting-mdns-hostname').placeholder = data.default_mdns_hostname || '';
         updateHostnamePreview();
@@ -576,7 +567,8 @@ async function sendAccessPoint(apSsid, apPassword) {
         'Access point saved. Changes apply the next time the access point starts.');
     if (data) {
         document.getElementById('setting-ap-ssid').value = data.ap_ssid || '';
-        showApPassword(data.ap_password);
+        // Set-only: the panel never sends the password back
+        document.getElementById('setting-ap-password').value = '';
     }
 }
 
@@ -586,13 +578,14 @@ async function saveAccessPoint() {
         showStatus('error', 'Access point name is required');
         return;
     }
-    // Not trimmed: spaces are legal in a WPA2 passphrase
+    // Not trimmed: spaces are legal in a WPA2 passphrase. Left empty, the
+    // current password is kept.
     const apPassword = document.getElementById('setting-ap-password').value;
-    if (apPassword.length < 8 || apPassword.length > 63) {
+    if (apPassword && (apPassword.length < 8 || apPassword.length > 63)) {
         showStatus('error', 'Access point password must be 8-63 characters');
         return;
     }
-    await sendAccessPoint(apSsid, apPassword !== currentApPassword ? apPassword : null);
+    await sendAccessPoint(apSsid, apPassword || null);
 }
 
 async function resetAccessPoint() {
