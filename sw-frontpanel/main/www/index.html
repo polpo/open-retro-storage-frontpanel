@@ -62,6 +62,19 @@
         .progress-fill { height: 100%; background-color: #007bff; transition: width 0.3s ease; }
         .version-info { font-family: 'Courier New', monospace; font-size: 14px; }
         .subtitle { color: #666; margin: 5px 0; }
+        .settings-row { display: flex; gap: 15px; margin-top: 15px; padding-top: 15px; border-top: 1px solid #ddd; }
+        .settings-card { flex: 1 1 0; display: flex; flex-direction: column; align-items: flex-start; }
+        .settings-card + .settings-card { border-left: 1px solid #ddd; padding-left: 15px; }
+        @media (max-width: 640px) {
+            .settings-row { flex-direction: column; }
+            .settings-card + .settings-card { border-left: none; padding-left: 0; border-top: 1px solid #ddd; padding-top: 15px; }
+        }
+        .settings-card h4 { margin: 0 0 5px; }
+        .settings-card label { font-size: 13px; font-weight: bold; margin-top: 8px; }
+        .settings-card input[type="text"] { width: 100%; box-sizing: border-box; margin: 3px 0; }
+        .settings-card .subtitle { font-size: 13px; min-height: 1em; }
+        .settings-actions { margin-top: auto; padding-top: 5px; }
+        .settings-actions button { margin: 5px 5px 0 0; }
         .status-bar { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); padding: 8px 16px; border-radius: 20px; font-size: 13px; box-shadow: 0 2px 8px rgba(0,0,0,0.2); z-index: 1000; transition: opacity 0.3s ease, visibility 0.3s ease; }
         .status-bar.hidden { opacity: 0; visibility: hidden; }
         .device-tabs { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; }
@@ -73,7 +86,7 @@
         @media (prefers-color-scheme: dark) {
             body { background-color: #1a1a1a; color: #e0e0e0; }
             .container { background: #2d2d2d; box-shadow: 0 2px 4px rgba(0,0,0,0.3); }
-            .section { border-color: #444; }
+            .section, .settings-row, .settings-card + .settings-card { border-color: #444; }
             .section h3 { color: #e0e0e0; }
             .entry-item, .wifi-item { border-color: #555; background: #3a3a3a; }
             .entry-item:hover { background: #4a4a4a; }
@@ -161,6 +174,31 @@
                     <input type="text" id="manual-ssid" placeholder="Network Name (SSID)" />
                     <input type="password" id="manual-password" placeholder="Password" />
                     <button onclick="connectToWiFi(document.getElementById('manual-ssid').value, document.getElementById('manual-password').value)">🔗 Connect</button>
+                </div>
+                <div class="settings-row">
+                    <div class="settings-card">
+                        <h4>Access Point</h4>
+                        <p class="subtitle">The network this panel creates when it isn't connected to WiFi. Changes apply the next time the access point starts.</p>
+                        <label for="setting-ap-ssid">Name</label>
+                        <input type="text" id="setting-ap-ssid" maxlength="32" placeholder="Access point name" />
+                        <label for="setting-ap-password">Password</label>
+                        <input type="text" id="setting-ap-password" maxlength="63" placeholder="New password (leave empty to keep)" autocomplete="off" />
+                        <div class="settings-actions">
+                            <button onclick="saveAccessPoint()">💾 Save</button>
+                            <button onclick="resetAccessPoint()" class="refresh-btn">↩️ Defaults</button>
+                        </div>
+                    </div>
+                    <div class="settings-card">
+                        <h4>Hostname</h4>
+                        <p class="subtitle">The .local address this panel answers to. Give each panel its own if you have more than one on the network.</p>
+                        <label for="setting-mdns-hostname">Hostname</label>
+                        <input type="text" id="setting-mdns-hostname" maxlength="63" placeholder="Hostname" oninput="updateHostnamePreview()" />
+                        <p id="setting-hostname-preview" class="subtitle"></p>
+                        <div class="settings-actions">
+                            <button onclick="saveHostname()">💾 Save</button>
+                            <button onclick="resetHostname()" class="refresh-btn">↩️ Default</button>
+                        </div>
+                    </div>
                 </div>
             </div>
         </div>

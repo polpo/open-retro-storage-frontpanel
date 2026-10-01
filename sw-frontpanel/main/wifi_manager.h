@@ -28,26 +28,34 @@
 extern "C" {
 #endif
 
-#define WIFI_MANAGER_SSID_MAX_LEN 32
+#define WIFI_MANAGER_SSID_MAX_LEN 33  // 802.11 maximum of 32 bytes plus our NULL
 #define WIFI_MANAGER_PASSWORD_MAX_LEN 64
+// An mDNS hostname is a single DNS label: 63 characters max (RFC 1035) plus our NULL
+#define WIFI_MANAGER_HOSTNAME_MAX_LEN 64
 
 #ifdef CONFIG_PRODUCT_BLUESCSI
-#define WIFI_MANAGER_AP_SSID "BlueSCSI-FrontPanel"
-#define WIFI_MANAGER_MDNS_HOSTNAME "bluescsi"
+#define WIFI_MANAGER_AP_SSID_PREFIX "BlueSCSI-FrontPanel"
+#define WIFI_MANAGER_MDNS_HOSTNAME_DEFAULT "bluescsi"
 #define WIFI_MANAGER_MDNS_INSTANCE "BlueSCSI Front Panel"
 #define PRODUCT_NAME_FULL "BlueSCSI Front Panel"
 #define PRODUCT_NAME_SHORT "BlueSCSI"
 #define PRODUCT_LOGO_URL "/logo.svg"
 #else
-#define WIFI_MANAGER_AP_SSID "PicoIDE-FrontPanel"
-#define WIFI_MANAGER_MDNS_HOSTNAME "picoide"
+#define WIFI_MANAGER_AP_SSID_PREFIX "PicoIDE-FrontPanel"
+#define WIFI_MANAGER_MDNS_HOSTNAME_DEFAULT "picoide"
 #define WIFI_MANAGER_MDNS_INSTANCE "PicoIDE Front Panel"
 #define PRODUCT_NAME_FULL "PicoIDE Front Panel"
 #define PRODUCT_NAME_SHORT "PicoIDE"
 #define PRODUCT_LOGO_URL "/logo.svg"
 #endif
 
+#ifdef CONFIG_PRODUCT_BLUESCSI
 #define WIFI_MANAGER_AP_PASSWORD "frontpanel123"
+#else
+// Per-device random default AP password, generated on first boot and kept in NVS:
+// lowercase letters only for easy typing, at the WPA2 minimum length
+#define WIFI_MANAGER_AP_DEFAULT_PW_LEN 8
+#endif
 #define WIFI_MANAGER_AP_CHANNEL 1
 #define WIFI_MANAGER_AP_MAX_CONNECTIONS 4
 #define WIFI_MANAGER_CONNECTION_RETRY_MAX 5
@@ -71,17 +79,23 @@ typedef struct {
 } wifi_ap_info_t;
 
 typedef struct {
+    wifi_manager_state_t state;
+
+    // Persisted settings: each lives under its own NVS key instead of the old
+    // legacy blob. Keeps the format compatible for upgrades/downgrades: adding
+    // a new field brings in its default, and an old build only cares about old
+    // fields it knows about.
     char ssid[WIFI_MANAGER_SSID_MAX_LEN];
     char password[WIFI_MANAGER_PASSWORD_MAX_LEN];
     bool auto_connect;
     bool ap_mode_enabled;
     uint32_t connection_timeout_ms;
     uint8_t max_retry_attempts;
-} wifi_manager_config_t;
+    char ap_ssid[WIFI_MANAGER_SSID_MAX_LEN];
+    char mdns_hostname[WIFI_MANAGER_HOSTNAME_MAX_LEN];
+    char ap_password[WIFI_MANAGER_PASSWORD_MAX_LEN];  // empty means use the default
+    char ap_default_pw[WIFI_MANAGER_PASSWORD_MAX_LEN];  // Filled in at init
 
-typedef struct {
-    wifi_manager_state_t state;
-    wifi_manager_config_t config;
     bool initialized;
     bool station_connected;
     bool ap_active;
@@ -100,10 +114,8 @@ esp_err_t wifi_manager_init(wifi_manager_t *manager);
 esp_err_t wifi_manager_deinit(wifi_manager_t *manager);
 
 // Configuration
-esp_err_t wifi_manager_set_config(wifi_manager_t *manager, const wifi_manager_config_t *config);
-esp_err_t wifi_manager_get_config(wifi_manager_t *manager, wifi_manager_config_t *config);
-esp_err_t wifi_manager_save_config(wifi_manager_t *manager);
-esp_err_t wifi_manager_load_config(wifi_manager_t *manager);
+esp_err_t wifi_manager_save_station_settings(wifi_manager_t *manager);
+esp_err_t wifi_manager_load_settings(wifi_manager_t *manager);
 esp_err_t wifi_manager_clear_config(wifi_manager_t *manager);
 
 // Connection management
@@ -131,6 +143,23 @@ esp_err_t wifi_manager_set_callbacks(wifi_manager_t *manager,
                                    void (*on_disconnected)(void),
                                    void (*on_ap_started)(esp_ip4_addr_t ip),
                                    void (*on_state_changed)(wifi_manager_state_t state));
+
+// Panel identity: the AP SSID defaults to the product prefix plus the last two
+// bytes of the SoftAP MAC, so several panels are distinguishable out of the
+// box
+const char *wifi_manager_get_ap_ssid(wifi_manager_t *manager);
+const char *wifi_manager_get_ap_password(wifi_manager_t *manager);
+const char *wifi_manager_get_mdns_hostname(wifi_manager_t *manager);
+esp_err_t wifi_manager_set_ap_ssid(wifi_manager_t *manager, const char *ssid);
+esp_err_t wifi_manager_set_ap_password(wifi_manager_t *manager, const char *password);
+esp_err_t wifi_manager_set_mdns_hostname(wifi_manager_t *manager, const char *hostname);
+void wifi_manager_default_ap_ssid(char *out, size_t len);
+void wifi_manager_default_mdns_hostname(char *out, size_t len);
+// Exposed so a caller setting several at once can reject them up front rather
+// than persisting the first and failing on a later one.
+bool wifi_manager_ap_ssid_is_valid(const char *ssid);
+bool wifi_manager_ap_password_is_valid(const char *password);
+bool wifi_manager_mdns_hostname_is_valid(const char *hostname);
 
 // Utility functions
 const char* wifi_manager_state_to_string(wifi_manager_state_t state);

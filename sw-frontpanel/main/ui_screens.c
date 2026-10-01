@@ -272,6 +272,28 @@ esp_err_t ui_update_splash_version(display_manager_t *display, const char *versi
     return ESP_OK;
 }
 
+// Draw a vertical scroll bar down the right edge from y to the bottom of the
+// screen. total must be greater than visible.
+static void draw_scrollbar(display_manager_t *display, uint8_t y,
+                           uint32_t visible, uint32_t total, uint32_t position) {
+    uint8_t scrollbar_x = 125;
+    uint8_t scrollbar_width = 3;
+    uint8_t scrollbar_height = 64 - y;
+
+    // Draw scroll bar background (thin frame)
+    display_manager_draw_frame(display, scrollbar_x, y, scrollbar_width, scrollbar_height);
+
+    // Calculate thumb position and size
+    uint8_t thumb_height = (visible * (scrollbar_height - 2)) / total;
+    if (thumb_height < 4) thumb_height = 4; // Minimum thumb size
+
+    uint8_t max_thumb_pos = scrollbar_height - 2 - thumb_height;
+    uint8_t thumb_y = y + 1 + (position * max_thumb_pos) / (total - visible);
+
+    // Draw scroll thumb (filled box)
+    display_manager_draw_box(display, scrollbar_x + 1, thumb_y, scrollbar_width - 2, thumb_height);
+}
+
 esp_err_t ui_draw_menu(display_manager_t *display, menu_t *menu) {
     if (!display || !menu) {
         return ESP_ERR_INVALID_ARG;
@@ -335,24 +357,7 @@ esp_err_t ui_draw_menu(display_manager_t *display, menu_t *menu) {
 
     // Draw scroll bar if there are more items than visible
     if (menu->item_count > menu->visible_items) {
-        // Calculate scroll bar dimensions
-        uint8_t scrollbar_x = 125;
-        uint8_t scrollbar_y = y_offset;
-        uint8_t scrollbar_width = 3;
-        uint8_t scrollbar_height = 64 - y_offset;
-
-        // Draw scroll bar background (thin frame)
-        display_manager_draw_frame(display, scrollbar_x, scrollbar_y, scrollbar_width, scrollbar_height);
-
-        // Calculate thumb position and size
-        uint8_t thumb_height = (menu->visible_items * (scrollbar_height - 2)) / menu->item_count;
-        if (thumb_height < 4) thumb_height = 4; // Minimum thumb size
-
-        uint8_t max_thumb_pos = scrollbar_height - 2 - thumb_height;
-        uint8_t thumb_y = scrollbar_y + 1 + (menu->window_start * max_thumb_pos) / (menu->item_count - menu->visible_items);
-
-        // Draw scroll thumb (filled box)
-        display_manager_draw_box(display, scrollbar_x + 1, thumb_y, scrollbar_width - 2, thumb_height);
+        draw_scrollbar(display, y_offset, menu->visible_items, menu->item_count, menu->window_start);
     }
 
     // Request display update
@@ -440,40 +445,74 @@ esp_err_t ui_draw_status_bar(display_manager_t *display, const char *status) {
     return ESP_OK;
 }
 
-esp_err_t ui_draw_info_screen(display_manager_t *display, const char *title, const char *info) {
+#define INFO_LINE_CHARS    20  // ~20 chars fit between x=2 and the scroll bar
+#define INFO_VISIBLE_LINES 5   // baselines at y=20,30,40,50,60
+
+// Copy the next wrapped line of info text into line (INFO_LINE_CHARS + 1 bytes)
+// and return a pointer to the start of the following line
+static const char *info_next_line(const char *p, char *line) {
+    int len = 0;
+    while (*p && *p != '\n' && len < INFO_LINE_CHARS) {
+        line[len++] = *p++;
+    }
+    line[len] = '\0';
+    if (*p == '\n') p++;
+    return p;
+}
+
+uint32_t ui_info_screen_max_scroll(const char *info) {
+    if (!info) {
+        return 0;
+    }
+
+    char line[INFO_LINE_CHARS + 1];
+    uint32_t count = 0;
+    while (*info) {
+        info = info_next_line(info, line);
+        count++;
+    }
+    return (count > INFO_VISIBLE_LINES) ? count - INFO_VISIBLE_LINES : 0;
+}
+
+esp_err_t ui_draw_info_screen(display_manager_t *display, const char *title,
+                              const char *info, uint32_t first_line) {
     if (!display || !title || !info) {
         return ESP_ERR_INVALID_ARG;
     }
-    
+
     display_manager_clear(display);
-    
+
     // Draw title
     display_manager_set_font(display, u8g2_font_amstrad_cpc_extended_8f);
     display_manager_draw_box(display, 0, 0, 128, 10);
     display_manager_set_draw_color(display, 0);
     display_manager_draw_text(display, 2, 8, title);
     display_manager_set_draw_color(display, 1);
-    
-    // Draw info text
+
     display_manager_set_font(display, u8g2_font_6x10_tf);
-    
-    // Simple word wrap - this could be improved
+
+    // Draw info text, hard wrapped at INFO_LINE_CHARS, starting at first_line
+    uint32_t max_scroll = ui_info_screen_max_scroll(info);
+    if (first_line > max_scroll) first_line = max_scroll;
+
     int y = 20;
     int line_height = 10;
-    char line[32];
+    char line[INFO_LINE_CHARS + 1];
     const char *p = info;
-    
+
+    for (uint32_t i = 0; i < first_line && *p; i++) {
+        p = info_next_line(p, line);
+    }
+
     while (*p && y < 64) {
-        int len = 0;
-        while (*p && *p != '\n' && len < 20) {
-            line[len++] = *p++;
-        }
-        line[len] = '\0';
-        
+        p = info_next_line(p, line);
         display_manager_draw_text(display, 2, y, line);
         y += line_height;
-        
-        if (*p == '\n') p++;
+    }
+
+    // Draw scroll bar if the text doesn't fit (same style as menus)
+    if (max_scroll > 0) {
+        draw_scrollbar(display, 10, INFO_VISIBLE_LINES, max_scroll + INFO_VISIBLE_LINES, first_line);
     }
 
     display_manager_request_update(display);

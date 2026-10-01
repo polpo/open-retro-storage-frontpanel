@@ -38,13 +38,16 @@ async function apiCall(endpoint, options = {}) {
         });
 
         if (!response.ok) {
-            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+            // The panel sends the reason for a rejection as the plain-text
+            // body, which is far more useful than a generic "Bad Request".
+            const reason = (await response.text()).trim();
+            throw new Error(reason || `HTTP ${response.status}: ${response.statusText}`);
         }
 
         return await response.json();
     } catch (error) {
         console.error('API call failed:', error);
-        showStatus('error', `API Error: ${error.message}`);
+        showStatus('error', `Error: ${error.message}`);
         return null;
     }
 }
@@ -520,6 +523,96 @@ async function loadWiFiStatus() {
             toggleWiFiSection();
         }
     }
+}
+
+function updateHostnamePreview() {
+    const hostname = document.getElementById('setting-mdns-hostname').value.trim();
+    const preview = document.getElementById('setting-hostname-preview');
+    preview.textContent = hostname ? `Reachable at http://${hostname}.local` : '';
+}
+
+async function loadPanelSettings() {
+    const data = await apiCall('/settings');
+    if (data) {
+        document.getElementById('setting-ap-ssid').value = data.ap_ssid || '';
+        document.getElementById('setting-mdns-hostname').value = data.mdns_hostname || '';
+        document.getElementById('setting-ap-ssid').placeholder = data.default_ap_ssid || '';
+        document.getElementById('setting-mdns-hostname').placeholder = data.default_mdns_hostname || '';
+        updateHostnamePreview();
+    }
+}
+
+// The access point and hostname have separate Save buttons, so a request
+// carries only that card's fields. The firmware leaves alone any field that
+// isn't present, so saving one part of the settings can't clobber the other.
+async function savePanelSetting(body, successMessage) {
+    showStatus('', 'Saving...');
+
+    const data = await apiCall('/settings', {
+        method: 'POST',
+        body: JSON.stringify(body)
+    });
+    if (!data) return null;
+
+    showStatus('success', successMessage);
+    return data;
+}
+
+// An empty value resets to the default. A null apPassword leaves it unchanged
+async function sendAccessPoint(apSsid, apPassword) {
+    const body = { ap_ssid: apSsid };
+    if (apPassword !== null) body.ap_password = apPassword;
+
+    const data = await savePanelSetting(body,
+        'Access point saved. Changes apply the next time the access point starts.');
+    if (data) {
+        document.getElementById('setting-ap-ssid').value = data.ap_ssid || '';
+        // Set-only: the panel never sends the password back
+        document.getElementById('setting-ap-password').value = '';
+    }
+}
+
+async function saveAccessPoint() {
+    const apSsid = document.getElementById('setting-ap-ssid').value.trim();
+    if (!apSsid) {
+        showStatus('error', 'Access point name is required');
+        return;
+    }
+    // Not trimmed: spaces are legal in a WPA2 passphrase. Left empty, the
+    // current password is kept.
+    const apPassword = document.getElementById('setting-ap-password').value;
+    if (apPassword && (apPassword.length < 8 || apPassword.length > 63)) {
+        showStatus('error', 'Access point password must be 8-63 characters');
+        return;
+    }
+    await sendAccessPoint(apSsid, apPassword || null);
+}
+
+async function resetAccessPoint() {
+    await sendAccessPoint('', '');
+}
+
+// An empty hostname resets to the default
+async function sendHostname(hostname) {
+    const data = await savePanelSetting({ mdns_hostname: hostname }, 'Saved.');
+    if (data) {
+        document.getElementById('setting-mdns-hostname').value = data.mdns_hostname || '';
+        showStatus('success', `Saved. Panel is now at http://${data.mdns_hostname}.local`);
+        updateHostnamePreview();
+    }
+}
+
+async function saveHostname() {
+    const hostname = document.getElementById('setting-mdns-hostname').value.trim();
+    if (!hostname) {
+        showStatus('error', 'Hostname is required');
+        return;
+    }
+    await sendHostname(hostname);
+}
+
+async function resetHostname() {
+    await sendHostname('');
 }
 
 async function scanWiFi() {
@@ -1535,6 +1628,7 @@ document.addEventListener('DOMContentLoaded', async function() {
             // #endif
             .then(() => refreshImages()),
         loadWiFiStatus(),
+        loadPanelSettings(),
         // #ifdef PRODUCT_BLUESCSI
         checkAllFirmware(),
         // #else
