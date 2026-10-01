@@ -272,6 +272,28 @@ esp_err_t ui_update_splash_version(display_manager_t *display, const char *versi
     return ESP_OK;
 }
 
+// Draw a vertical scroll bar down the right edge from y to the bottom of the
+// screen. total must be greater than visible.
+static void draw_scrollbar(display_manager_t *display, uint8_t y,
+                           uint32_t visible, uint32_t total, uint32_t position) {
+    uint8_t scrollbar_x = 125;
+    uint8_t scrollbar_width = 3;
+    uint8_t scrollbar_height = 64 - y;
+
+    // Draw scroll bar background (thin frame)
+    display_manager_draw_frame(display, scrollbar_x, y, scrollbar_width, scrollbar_height);
+
+    // Calculate thumb position and size
+    uint8_t thumb_height = (visible * (scrollbar_height - 2)) / total;
+    if (thumb_height < 4) thumb_height = 4; // Minimum thumb size
+
+    uint8_t max_thumb_pos = scrollbar_height - 2 - thumb_height;
+    uint8_t thumb_y = y + 1 + (position * max_thumb_pos) / (total - visible);
+
+    // Draw scroll thumb (filled box)
+    display_manager_draw_box(display, scrollbar_x + 1, thumb_y, scrollbar_width - 2, thumb_height);
+}
+
 esp_err_t ui_draw_menu(display_manager_t *display, menu_t *menu) {
     if (!display || !menu) {
         return ESP_ERR_INVALID_ARG;
@@ -335,24 +357,7 @@ esp_err_t ui_draw_menu(display_manager_t *display, menu_t *menu) {
 
     // Draw scroll bar if there are more items than visible
     if (menu->item_count > menu->visible_items) {
-        // Calculate scroll bar dimensions
-        uint8_t scrollbar_x = 125;
-        uint8_t scrollbar_y = y_offset;
-        uint8_t scrollbar_width = 3;
-        uint8_t scrollbar_height = 64 - y_offset;
-
-        // Draw scroll bar background (thin frame)
-        display_manager_draw_frame(display, scrollbar_x, scrollbar_y, scrollbar_width, scrollbar_height);
-
-        // Calculate thumb position and size
-        uint8_t thumb_height = (menu->visible_items * (scrollbar_height - 2)) / menu->item_count;
-        if (thumb_height < 4) thumb_height = 4; // Minimum thumb size
-
-        uint8_t max_thumb_pos = scrollbar_height - 2 - thumb_height;
-        uint8_t thumb_y = scrollbar_y + 1 + (menu->window_start * max_thumb_pos) / (menu->item_count - menu->visible_items);
-
-        // Draw scroll thumb (filled box)
-        display_manager_draw_box(display, scrollbar_x + 1, thumb_y, scrollbar_width - 2, thumb_height);
+        draw_scrollbar(display, y_offset, menu->visible_items, menu->item_count, menu->window_start);
     }
 
     // Request display update
@@ -507,21 +512,7 @@ esp_err_t ui_draw_info_screen(display_manager_t *display, const char *title,
 
     // Draw scroll bar if the text doesn't fit (same style as menus)
     if (max_scroll > 0) {
-        uint8_t scrollbar_x = 125;
-        uint8_t scrollbar_y = 10;
-        uint8_t scrollbar_width = 3;
-        uint8_t scrollbar_height = 64 - scrollbar_y;
-        uint32_t total_lines = max_scroll + INFO_VISIBLE_LINES;
-
-        display_manager_draw_frame(display, scrollbar_x, scrollbar_y, scrollbar_width, scrollbar_height);
-
-        uint8_t thumb_height = (INFO_VISIBLE_LINES * (scrollbar_height - 2)) / total_lines;
-        if (thumb_height < 4) thumb_height = 4; // Minimum thumb size
-
-        uint8_t max_thumb_pos = scrollbar_height - 2 - thumb_height;
-        uint8_t thumb_y = scrollbar_y + 1 + (first_line * max_thumb_pos) / max_scroll;
-
-        display_manager_draw_box(display, scrollbar_x + 1, thumb_y, scrollbar_width - 2, thumb_height);
+        draw_scrollbar(display, 10, INFO_VISIBLE_LINES, max_scroll + INFO_VISIBLE_LINES, first_line);
     }
 
     display_manager_request_update(display);
