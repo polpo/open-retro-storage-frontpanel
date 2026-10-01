@@ -94,9 +94,7 @@ typedef struct {
     char ap_ssid[WIFI_MANAGER_SSID_MAX_LEN];
     char mdns_hostname[WIFI_MANAGER_HOSTNAME_MAX_LEN];
     char ap_password[WIFI_MANAGER_PASSWORD_MAX_LEN];  // empty means use the default
-#ifndef CONFIG_PRODUCT_BLUESCSI
-    char ap_default_pw[WIFI_MANAGER_AP_DEFAULT_PW_LEN + 1];  // Loaded or generated at init
-#endif
+    char ap_default_pw[WIFI_MANAGER_PASSWORD_MAX_LEN];  // Filled in at init
 
     bool initialized;
     bool station_connected;

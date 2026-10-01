@@ -310,7 +310,9 @@ esp_err_t wifi_manager_init(wifi_manager_t *manager) {
 
     memset(manager, 0, sizeof(wifi_manager_t));
     s_manager = manager;
-#ifndef CONFIG_PRODUCT_BLUESCSI
+#ifdef CONFIG_PRODUCT_BLUESCSI
+    strlcpy(manager->ap_default_pw, WIFI_MANAGER_AP_PASSWORD, sizeof(manager->ap_default_pw));
+#else
     get_ap_default_pw(manager->ap_default_pw);
 #endif
 
@@ -951,11 +953,7 @@ const char *wifi_manager_get_ap_password(wifi_manager_t *manager) {
     if (manager && manager->ap_password[0]) {
         return manager->ap_password;
     }
-#ifdef CONFIG_PRODUCT_BLUESCSI
-    return WIFI_MANAGER_AP_PASSWORD;
-#else
     return manager ? manager->ap_default_pw : "";
-#endif
 }
 
 const char *wifi_manager_get_ap_ssid(wifi_manager_t *manager) {
