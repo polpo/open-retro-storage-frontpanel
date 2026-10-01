@@ -130,7 +130,7 @@ static void get_ap_default_pw(char *out) {
 #endif
 
 void wifi_manager_default_mdns_hostname(char *out, size_t len) {
-    snprintf(out, len, "%s", WIFI_MANAGER_MDNS_HOSTNAME_DEFAULT);
+    strlcpy(out, WIFI_MANAGER_MDNS_HOSTNAME_DEFAULT, len);
 }
 
 bool wifi_manager_ap_ssid_is_valid(const char *ssid) {
@@ -971,7 +971,7 @@ esp_err_t wifi_manager_set_ap_ssid(wifi_manager_t *manager, const char *ssid) {
         return ESP_ERR_INVALID_ARG;
     }
 
-    snprintf(manager->ap_ssid, sizeof(manager->ap_ssid), "%s", ssid);
+    strlcpy(manager->ap_ssid, ssid, sizeof(manager->ap_ssid));
     ESP_LOGI(TAG, "AP SSID set to %s (applies on next AP start)", manager->ap_ssid);
     // Deliberately not restarting a running AP: the client that just asked for
     // the change is most likely connected over it.
@@ -983,7 +983,7 @@ esp_err_t wifi_manager_set_ap_password(wifi_manager_t *manager, const char *pass
         return ESP_ERR_INVALID_ARG;
     }
 
-    snprintf(manager->ap_password, sizeof(manager->ap_password), "%s", password);
+    strlcpy(manager->ap_password, password, sizeof(manager->ap_password));
     ESP_LOGI(TAG, "AP password %s (applies on next AP start)",
              password[0] ? "changed" : "reset to default");
     // Not restarting a running AP, for the same reason as the SSID
@@ -995,8 +995,7 @@ esp_err_t wifi_manager_set_mdns_hostname(wifi_manager_t *manager, const char *ho
         return ESP_ERR_INVALID_ARG;
     }
 
-    snprintf(manager->mdns_hostname, sizeof(manager->mdns_hostname),
-             "%s", hostname);
+    strlcpy(manager->mdns_hostname, hostname, sizeof(manager->mdns_hostname));
 
     // Cheap to apply live: this re-probes and announces the new name without
     // tearing the responder down, so clients pick it up within a second.
