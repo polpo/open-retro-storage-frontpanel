@@ -174,6 +174,25 @@ static void set_default_settings(wifi_manager_t *manager) {
     manager->ap_password[0] = '\0';
 }
 
+// Save one panel identity setting, leaving other settings alone
+static esp_err_t save_identity_setting(const char *key, const char *value) {
+    nvs_handle_t handle;
+    esp_err_t ret = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to open NVS handle: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    ret = nvs_set_str(handle, key, value);
+    if (ret == ESP_OK) ret = nvs_commit(handle);
+    nvs_close(handle);
+
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to save %s: %s", key, esp_err_to_name(ret));
+    }
+    return ret;
+}
+
 static bool import_legacy_settings(nvs_handle_t handle, wifi_manager_t *manager) {
     legacy_wifi_config_t legacy;
     size_t size = sizeof(legacy);
@@ -284,7 +303,7 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
             // Save credentials if connect_and_save was used
             if (s_manager->pending_credential_save) {
                 s_manager->auto_connect = true;
-                esp_err_t save_ret = wifi_manager_save_settings(s_manager);
+                esp_err_t save_ret = wifi_manager_save_station_settings(s_manager);
                 if (save_ret == ESP_OK) {
                     ESP_LOGI(TAG, "WiFi credentials saved for auto-reconnect");
                 } else {
@@ -382,7 +401,8 @@ esp_err_t wifi_manager_deinit(wifi_manager_t *manager) {
     return ESP_OK;
 }
 
-esp_err_t wifi_manager_save_settings(wifi_manager_t *manager) {
+// Only called on successful connection so invalid station settings aren't saved
+esp_err_t wifi_manager_save_station_settings(wifi_manager_t *manager) {
     if (!manager) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -396,23 +416,19 @@ esp_err_t wifi_manager_save_settings(wifi_manager_t *manager) {
 
     // NVS skips the write when the stored value already matches, so setting
     // every key costs flash only for the ones that actually changed.
-    nvs_set_str(handle, NVS_KEY_STA_SSID, manager->ssid);
-    nvs_set_str(handle, NVS_KEY_STA_PASS, manager->password);
-    nvs_set_u8(handle, NVS_KEY_AUTO_CONN, manager->auto_connect);
-    nvs_set_u8(handle, NVS_KEY_AP_ENABLED, manager->ap_mode_enabled);
-    nvs_set_u32(handle, NVS_KEY_CONN_TMO, manager->connection_timeout_ms);
-    nvs_set_u8(handle, NVS_KEY_MAX_RETRY, manager->max_retry_attempts);
-    nvs_set_str(handle, NVS_KEY_AP_SSID, manager->ap_ssid);
-    nvs_set_str(handle, NVS_KEY_MDNS_HOST, manager->mdns_hostname);
-    nvs_set_str(handle, NVS_KEY_AP_PASS, manager->ap_password);
-
-    ret = nvs_commit(handle);
+    ret = nvs_set_str(handle, NVS_KEY_STA_SSID, manager->ssid);
+    if (ret == ESP_OK) ret = nvs_set_str(handle, NVS_KEY_STA_PASS, manager->password);
+    if (ret == ESP_OK) ret = nvs_set_u8(handle, NVS_KEY_AUTO_CONN, manager->auto_connect);
+    if (ret == ESP_OK) ret = nvs_set_u8(handle, NVS_KEY_AP_ENABLED, manager->ap_mode_enabled);
+    if (ret == ESP_OK) ret = nvs_set_u32(handle, NVS_KEY_CONN_TMO, manager->connection_timeout_ms);
+    if (ret == ESP_OK) ret = nvs_set_u8(handle, NVS_KEY_MAX_RETRY, manager->max_retry_attempts);
+    if (ret == ESP_OK) ret = nvs_commit(handle);
     nvs_close(handle);
 
     if (ret == ESP_OK) {
-        ESP_LOGI(TAG, "Settings saved");
+        ESP_LOGI(TAG, "Station settings saved");
     } else {
-        ESP_LOGE(TAG, "Failed to save settings: %s", esp_err_to_name(ret));
+        ESP_LOGE(TAG, "Failed to save station settings: %s", esp_err_to_name(ret));
     }
     return ret;
 }
@@ -473,7 +489,7 @@ esp_err_t wifi_manager_load_settings(wifi_manager_t *manager) {
     if (imported) {
         // Write the migrated imported settings, but leave the old one alone
         // in case we want to downgrade
-        wifi_manager_save_settings(manager);
+        wifi_manager_save_station_settings(manager);
     }
 
     return (found || imported) ? ESP_OK : ESP_ERR_NVS_NOT_FOUND;
@@ -973,7 +989,7 @@ esp_err_t wifi_manager_set_ap_ssid(wifi_manager_t *manager, const char *ssid) {
     ESP_LOGI(TAG, "AP SSID set to %s (applies on next AP start)", manager->ap_ssid);
     // Deliberately not restarting a running AP: the client that just asked for
     // the change is most likely connected over it.
-    return wifi_manager_save_settings(manager);
+    return save_identity_setting(NVS_KEY_AP_SSID, manager->ap_ssid);
 }
 
 esp_err_t wifi_manager_set_ap_password(wifi_manager_t *manager, const char *password) {
@@ -985,7 +1001,7 @@ esp_err_t wifi_manager_set_ap_password(wifi_manager_t *manager, const char *pass
     ESP_LOGI(TAG, "AP password %s (applies on next AP start)",
              password[0] ? "changed" : "reset to default");
     // Not restarting a running AP, for the same reason as the SSID
-    return wifi_manager_save_settings(manager);
+    return save_identity_setting(NVS_KEY_AP_PASS, manager->ap_password);
 }
 
 esp_err_t wifi_manager_set_mdns_hostname(wifi_manager_t *manager, const char *hostname) {
@@ -1005,5 +1021,5 @@ esp_err_t wifi_manager_set_mdns_hostname(wifi_manager_t *manager, const char *ho
                  manager->mdns_hostname);
     }
 
-    return wifi_manager_save_settings(manager);
+    return save_identity_setting(NVS_KEY_MDNS_HOST, manager->mdns_hostname);
 }

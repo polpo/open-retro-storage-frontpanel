@@ -114,7 +114,7 @@ esp_err_t wifi_manager_init(wifi_manager_t *manager);
 esp_err_t wifi_manager_deinit(wifi_manager_t *manager);
 
 // Configuration
-esp_err_t wifi_manager_save_settings(wifi_manager_t *manager);
+esp_err_t wifi_manager_save_station_settings(wifi_manager_t *manager);
 esp_err_t wifi_manager_load_settings(wifi_manager_t *manager);
 esp_err_t wifi_manager_clear_config(wifi_manager_t *manager);
 
@@ -144,13 +144,9 @@ esp_err_t wifi_manager_set_callbacks(wifi_manager_t *manager,
                                    void (*on_ap_started)(esp_ip4_addr_t ip),
                                    void (*on_state_changed)(wifi_manager_state_t state));
 
-// Panel identity. The AP SSID defaults to the product prefix plus the last two
+// Panel identity: the AP SSID defaults to the product prefix plus the last two
 // bytes of the SoftAP MAC, so several panels are distinguishable out of the
-// box; the mDNS hostname defaults to the bare product name. Both can be
-// overridden and are persisted to NVS. Setting the hostname re-announces
-// immediately; a new AP SSID or password applies the next time the AP starts.
-// The AP password can be overridden too; setting it to "" returns to the
-// per-product default.
+// box
 const char *wifi_manager_get_ap_ssid(wifi_manager_t *manager);
 const char *wifi_manager_get_ap_password(wifi_manager_t *manager);
 const char *wifi_manager_get_mdns_hostname(wifi_manager_t *manager);
