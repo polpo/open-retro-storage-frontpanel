@@ -16,8 +16,12 @@ endif()
 
 # A bench build carries the test hooks and must never be mistaken for, or
 # released as, the shipping image, so it gets its own name.
+# The DIY ESP32-C3 SuperMini image has a different pin map and no display, so
+# it gets its own name too.
 if(SDKCONFIG_DEFAULTS MATCHES "bench")
   set(FRONTPANEL_SUFFIX "-bench")
+elseif(SDKCONFIG_DEFAULTS MATCHES "diy")
+  set(FRONTPANEL_SUFFIX "-diy")
 else()
   set(FRONTPANEL_SUFFIX "")
 endif()

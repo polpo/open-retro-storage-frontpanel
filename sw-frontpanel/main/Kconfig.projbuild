@@ -17,6 +17,64 @@ menu "Product Configuration"
                 Build for BlueSCSI product.
     endchoice
 
+    choice PANEL_BOARD
+        prompt "Panel board"
+        default PANEL_BOARD_FRONTPANEL
+        help
+            Which physical board the firmware runs on. This selects the pin
+            map in gpio_pins.h.
+
+        config PANEL_BOARD_FRONTPANEL
+            bool "Open Retro Storage front panel PCB"
+            help
+                The shipping panel: ESPC3-12 module, SH1107 OLED, four
+                navigation buttons, WS2812 LED.
+
+        config PANEL_BOARD_C3_SUPERMINI
+            bool "ESP32-C3 SuperMini (DIY, web UI only)"
+            select PANEL_NO_DISPLAY
+            select PANEL_NO_BUTTONS
+            help
+                A bare ESP32-C3 SuperMini wired to a main board with a handful
+                of jumpers, for the web interface without a display or buttons.
+                That board only breaks out GPIO0-10, 20 and 21 (GPIO18/19 are
+                its USB-C data pins), so the shipping pin map does not fit.
+
+                Both host transports are wired, so one build covers every main
+                board: I2C for BlueSCSI v2, SPI for BlueSCSI Ultra/Ultra Wide
+                and PicoIDE.
+
+                I2C wiring: C3 GPIO3 -> host SDA, C3 GPIO10 -> host SCL,
+                GND -> GND, plus 2.2k pull-ups from each signal to 3V3. The
+                link runs at 1 MHz and the panel PCB normally supplies those
+                pull-ups.
+
+                SPI wiring: C3 GPIO6 -> host SCK, GPIO7 -> host MOSI,
+                GPIO5 -> host MISO, GPIO4 -> host CS, GND -> GND.
+    endchoice
+
+    config PANEL_NO_DISPLAY
+        bool
+        default n
+        help
+            Build without the SH1107 OLED. u8g2 still renders into its RAM
+            frame buffer (so the web UI and the test hooks work unchanged),
+            but nothing is clocked out.
+
+    config PANEL_NO_BUTTONS
+        bool
+        default n
+        help
+            Build without the four navigation buttons. The web UI and the
+            test hooks drive the menus instead.
+
+    config PANEL_SPI_BUS
+        bool
+        default y if !PANEL_NO_DISPLAY || HOST_TRANSPORT_SPI || HOST_TRANSPORT_AUTO
+        help
+            Claim the shared SPI2 bus at boot. The OLED and the SPI host link
+            both ride it, so a build needs it unless it has neither.
+
     config MAX_DEVICES
         int
         default 8 if PRODUCT_BLUESCSI
