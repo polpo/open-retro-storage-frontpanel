@@ -90,6 +90,21 @@ esp_err_t ota_manager_abort(ota_manager_t* ota);
 // Mark current firmware as valid (call after successful boot)
 esp_err_t ota_manager_mark_valid(void);
 
+// Where the pending OTA image came from. Persisted in NVS across the reboot
+// into the new image so boot-time validation can decide what to require
+// before cancelling rollback.
+typedef enum {
+    OTA_SOURCE_NONE = 0,
+    OTA_SOURCE_HOST = 1,    // Fetched from the main board (host_comm)
+    OTA_SOURCE_DIRECT = 2   // Uploaded directly (e.g. web upload)
+} ota_update_source_t;
+
+// Record the source of the image that was just written and set as boot partition
+esp_err_t ota_manager_set_update_source(ota_update_source_t source);
+
+// Read and clear the recorded source (returns OTA_SOURCE_NONE if not set)
+ota_update_source_t ota_manager_take_update_source(void);
+
 // Get current firmware version
 uint32_t ota_manager_get_current_version(void);
 
